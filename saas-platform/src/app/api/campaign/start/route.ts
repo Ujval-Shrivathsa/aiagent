@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import twilio from 'twilio';
+import plivo from 'plivo';
 import { prisma } from '@/lib/prisma';
 
 export const dynamic = 'force-dynamic';
@@ -21,17 +22,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing campaignId' }, { status: 400 });
     }
 
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
-    const from = process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_PHONE_NUMBER_FALLBACK;
     const appUrl = (process.env.APP_URL || '').replace(/\/$/, '');
+    const provider = (process.env.VOICE_PROVIDER || 'twilio').toLowerCase();
 
-    if (!accountSid || !authToken || !from) {
-      return NextResponse.json({ error: 'Twilio is not configured on the server' }, { status: 500 });
-    }
     if (!appUrl || appUrl.includes('localhost')) {
       return NextResponse.json({
-        error: 'APP_URL must be your public ngrok URL so Twilio can reach the outbound agent',
+        error: 'APP_URL must be your public ngrok URL so the voice agent can be reached',
       }, { status: 500 });
     }
 
@@ -51,15 +47,10 @@ export async function POST(req: Request) {
       }, { status: 400 });
     }
 
-    const client = twilio(accountSid, authToken);
     const results: { id: string; phone: string; ok: boolean; error?: string }[] = [];
 
     for (const lead of leads) {
       const to = toE164(lead.phone);
-      const url =
-        `${appUrl}/api/voice/outbound` +
-        `?customerName=${encodeURIComponent(lead.name || '')}` +
-        `&customerPhone=${encodeURIComponent(to)}`;
 
       try {
         await prisma.lead.update({
@@ -67,14 +58,44 @@ export async function POST(req: Request) {
           data: { status: 'calling' },
         });
 
-        await client.calls.create({
-          to,
-          from,
-          url,
-          statusCallback: `${appUrl}/api/voice/status`,
-          statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-          record: true,
-        });
+        if (provider === 'plivo') {
+          const authId = process.env.PLIVO_AUTH_ID;
+          const authToken = process.env.PLIVO_AUTH_TOKEN;
+          const from = process.env.PLIVO_PHONE_NUMBER;
+          if (!authId || !authToken || !from) {
+            throw new Error('Plivo is not configured (PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN, PLIVO_PHONE_NUMBER)');
+          }
+          const answerUrl =
+            `${appUrl}/api/plivo/outbound` +
+            `?customerName=${encodeURIComponent(lead.name || '')}` +
+            `&customerPhone=${encodeURIComponent(to)}`;
+          const client = new plivo.Client(authId, authToken);
+          await client.calls.create(from, to, answerUrl, {
+            answerMethod: 'POST',
+            hangupUrl: `${appUrl}/api/plivo/status`,
+            hangupMethod: 'POST',
+          });
+        } else {
+          const accountSid = process.env.TWILIO_ACCOUNT_SID;
+          const authToken = process.env.TWILIO_AUTH_TOKEN;
+          const from = process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_PHONE_NUMBER_FALLBACK;
+          if (!accountSid || !authToken || !from) {
+            throw new Error('Twilio is not configured on the server');
+          }
+          const url =
+            `${appUrl}/api/voice/outbound` +
+            `?customerName=${encodeURIComponent(lead.name || '')}` +
+            `&customerPhone=${encodeURIComponent(to)}`;
+          const client = twilio(accountSid, authToken);
+          await client.calls.create({
+            to,
+            from,
+            url,
+            statusCallback: `${appUrl}/api/voice/status`,
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+            record: true,
+          });
+        }
 
         results.push({ id: lead.id, phone: to, ok: true });
       } catch (err: any) {
