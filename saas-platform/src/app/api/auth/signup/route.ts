@@ -1,10 +1,16 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { prisma, getDatabaseConfigError } from '@/lib/prisma';
 import { hashPassword, signToken } from '@/lib/auth';
 
+export const dynamic = 'force-dynamic';
+
 export async function POST(req: Request) {
-  console.log("[API/AUTH/SIGNUP] Hit!");
   try {
+    const configError = getDatabaseConfigError();
+    if (configError) {
+      return NextResponse.json({ error: configError }, { status: 503 });
+    }
+
     const { email, password } = await req.json();
 
     if (!email || !password) {
@@ -34,12 +40,16 @@ export async function POST(req: Request) {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      maxAge: 86400, // 1 day
+      maxAge: 86400,
     });
 
     return response;
   } catch (error: any) {
     console.error("[API/AUTH/SIGNUP] Error:", error);
-    return NextResponse.json({ error: 'Internal server error', details: error.message }, { status: 500 });
+    const message = error?.message || 'Internal server error';
+    const setupHint = /sqlite|P1001|P1013|does not exist|P2021/i.test(message)
+      ? ' Set DATABASE_URL to the Supabase Postgres URI, then redeploy so prisma db push can create tables.'
+      : '';
+    return NextResponse.json({ error: message + setupHint }, { status: 500 });
   }
 }

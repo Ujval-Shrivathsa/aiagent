@@ -32,7 +32,7 @@ export default function SignupPage() {
       }
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Signup failed");
+      if (!res.ok) throw new Error(data.error || data.details || "Signup failed");
 
       router.push("/dashboard");
     } catch (err: any) {
