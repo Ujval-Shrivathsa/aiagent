@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import twilio from 'twilio';
-import plivo from 'plivo';
 import { prisma } from '@/lib/prisma';
 
 export const dynamic = 'force-dynamic';
@@ -69,12 +68,25 @@ export async function POST(req: Request) {
             `${appUrl}/api/plivo/outbound` +
             `?customerName=${encodeURIComponent(lead.name || '')}` +
             `&customerPhone=${encodeURIComponent(to)}`;
-          const client = new plivo.Client(authId, authToken);
-          await client.calls.create(from, to, answerUrl, {
-            answerMethod: 'POST',
-            hangupUrl: `${appUrl}/api/plivo/status`,
-            hangupMethod: 'POST',
+          const plivoRes = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${authId}:${authToken}`).toString('base64')}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from,
+              to,
+              answer_url: answerUrl,
+              answer_method: 'POST',
+              hangup_url: `${appUrl}/api/plivo/status`,
+              hangup_method: 'POST',
+            }),
           });
+          const plivoBody = await plivoRes.json().catch(() => ({}));
+          if (!plivoRes.ok) {
+            throw new Error(plivoBody?.error || `Plivo call failed (${plivoRes.status})`);
+          }
         } else {
           const accountSid = process.env.TWILIO_ACCOUNT_SID;
           const authToken = process.env.TWILIO_AUTH_TOKEN;

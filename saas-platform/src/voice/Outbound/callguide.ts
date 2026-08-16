@@ -25,11 +25,7 @@ export const GREETING_NO_NAME = "Hello, this is Bhoomi from Alliance Square. Are
 
 export const GREETING = GREETING_NO_NAME;
 
-export function getGreeting(customerName?: string | null | undefined): string {
-  const name = typeof customerName === 'string' ? customerName.trim() : '';
-  if (name) {
-    return `Hello ${name}, this is Bhoomi from Alliance Square. Are you looking for a site in Mysuru?`;
-  }
+export function getGreeting(_customerName?: string | null | undefined): string {
   return GREETING_NO_NAME;
 }
 

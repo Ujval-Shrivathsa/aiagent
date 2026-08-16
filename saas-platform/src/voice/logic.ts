@@ -5,6 +5,27 @@ import { fetchLiveSiteData, formatLiveDataForPrompt } from '../lib/live-site-dat
 import { buildInboundSystemInstruction, getGreeting as getInboundGreeting } from '../voice/Inbound/index';
 import { buildOutboundSystemInstruction, getGreeting as getOutboundGreeting } from '../voice/Outbound/index';
 
+function parseHeaderBag(raw: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  const str = raw?.extra_headers || raw?.extraHeaders;
+  if (typeof str === 'string' && str.trim()) {
+    for (const pair of str.split(/[;,]/)) {
+      const i = pair.indexOf('=');
+      if (i <= 0) continue;
+      const k = pair.slice(0, i).trim();
+      const v = pair.slice(i + 1).trim();
+      try {
+        out[k] = decodeURIComponent(v);
+      } catch {
+        out[k] = v;
+      }
+    }
+  } else if (str && typeof str === 'object') {
+    for (const [k, v] of Object.entries(str)) out[k] = String(v ?? '');
+  }
+  return out;
+}
+
 // --- Normalize Plivo & Twilio WebSocket events to one internal format ---
 function normalizeVoiceEvent(raw: any): any {
   const evt: string = raw.event || raw.type || 'media';
@@ -14,11 +35,13 @@ function normalizeVoiceEvent(raw: any): any {
     const start = raw.start || raw.Start || raw;
     const streamId = start.streamSid || start.streamId || start.CallUUID || start.callUuid || start.callSid || start.stream_sid;
     const params = start.customParameters || start.CustomParameters || start.extraHeaders || start.extra_headers || start.Parameters || {};
-    const mergedParams = { ...(params || {}), ...(raw.parameters || {}) };
+    const objectParams = typeof params === 'string' ? parseHeaderBag({ extra_headers: params }) : (params || {});
+    const mergedParams = { ...parseHeaderBag(raw), ...objectParams, ...(raw.parameters || {}) };
     result.start = {
       streamSid: streamId,
-      callSid: start.callSid || start.CallUUID || start.callUuid || streamId,
+      callSid: start.callSid || start.callId || start.CallUUID || start.callUuid || streamId,
       customParameters: mergedParams,
+      isPlivo: Boolean(raw.extra_headers != null || start.streamId || start.callId),
     };
     return result;
   }
@@ -188,9 +211,10 @@ const STATUS = {
 };
 const PROTECTED_STATUSES = [STATUS.VISIT_SCHEDULED, STATUS.FOLLOW_UP];
 
-export async function setupGemini(ws: WebSocket) {
+export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
+  let audioSink: 'twilio' | 'plivo' = (process.env.VOICE_PROVIDER || 'twilio').toLowerCase() === 'plivo' ? 'plivo' : 'twilio';
   let streamSid: string | null = null;
   let geminiSession: any = null;
   let transcriptCount = 0;
@@ -332,9 +356,37 @@ export async function setupGemini(ws: WebSocket) {
     }
     if (!loggedFirstAudio) {
       loggedFirstAudio = true;
-      console.log(`[GEMINI] Streaming speech to Twilio (${geminiPlaybackRate} Hz → 8 kHz mu-law)`);
+      console.log(`[GEMINI] Streaming speech to ${audioSink} (${geminiPlaybackRate} Hz → 8 kHz mu-law)`);
     }
-    ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: muLawBuffer.toString("base64") } }));
+    const payload = muLawBuffer.toString("base64");
+    if (audioSink === "plivo") {
+      ws.send(JSON.stringify({
+        event: "playAudio",
+        media: {
+          contentType: "audio/x-mulaw",
+          sampleRate: 8000,
+          payload,
+        },
+      }));
+    } else {
+      ws.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
+    }
+  };
+
+  const clearPlayback = () => {
+    if (audioSink === "plivo") {
+      ws.send(JSON.stringify({ event: "clearAudio", streamId: streamSid }));
+    } else {
+      ws.send(JSON.stringify({ event: "clear", streamSid }));
+    }
+  };
+
+  const hangupStream = () => {
+    if (audioSink === "plivo") {
+      ws.send(JSON.stringify({ event: "stop", streamId: streamSid }));
+    } else {
+      ws.send(JSON.stringify({ event: "stop", streamSid }));
+    }
   };
 
   const playGeminiAudioParts = (parts: any[] | undefined) => {
@@ -403,16 +455,25 @@ export async function setupGemini(ws: WebSocket) {
 
       if (msg.event === 'start') {
         streamSid = msg.start.streamSid;
-        const customParams = msg.start.customParameters || {};
-        const isOutbound = customParams.isOutbound === 'true';
+        if (msg.start.isPlivo) audioSink = 'plivo';
+        const fromUrl: Record<string, string> = {};
+        streamParams?.forEach((v, k) => {
+          fromUrl[k] = v;
+        });
+        const customParams = { ...fromUrl, ...(msg.start.customParameters || {}) };
+        const isOutbound = String(customParams.isOutbound || '').toLowerCase() === 'true';
         isOutboundCall = isOutbound;
         const rawName = customParams.customerName || '';
         const blacklistedNames = ['customer', 'contact', 'lead', 'unknown', 'null', 'undefined', 'unnamed', ''];
         const hasValidName = rawName && !blacklistedNames.includes(rawName.toLowerCase().trim());
         const customerName = hasValidName ? rawName.trim() : '';
-        customerPhone = customParams.customerPhone || null;
+        const rawPhone = customParams.customerPhone || '';
+        const phoneDigits = String(rawPhone).replace(/\D/g, '');
+        customerPhone = phoneDigits
+          ? (phoneDigits.length === 10 ? `+91${phoneDigits}` : `+${phoneDigits}`)
+          : null;
 
-        console.log(`[WS] Stream started: ${streamSid} | Name: ${customerName || 'N/A'} | Phone: ${customerPhone || 'N/A'} | Outbound: ${isOutboundCall}`);
+        console.log(`[WS] Stream started: ${streamSid} | Name: ${customerName || 'N/A'} | Phone: ${customerPhone || 'N/A'} | Outbound: ${isOutboundCall} | Sink: ${audioSink}`);
 
         const currentDateStr = new Date().toLocaleDateString('en-IN');
         const activeSystemInstruction = isOutboundCall
@@ -490,7 +551,7 @@ CURRENT DATE: ${currentDateStr}
               onmessage: async (response: any) => {
                 if (response.serverContent?.interrupted) {
                   console.log("[GEMINI] Turn interrupted — clearing playback, listening...");
-                  ws.send(JSON.stringify({ event: "clear", streamSid }));
+                  clearPlayback();
                   outputLeftover = Buffer.alloc(0);
                   vadIsSpeaking = true;
                   vadSilenceStartedAt = null;
@@ -658,7 +719,7 @@ CURRENT DATE: ${currentDateStr}
                           console.error("[DB Error] Failed to mark call completed:", e);
                         }
                       }
-                      ws.send(JSON.stringify({ event: "stop", streamSid }));
+                      hangupStream();
                       geminiSession?.close();
                       ws.close();
                     }
@@ -886,7 +947,7 @@ CURRENT DATE: ${currentDateStr}
         } catch (err) {
           console.error("[GEMINI] Failed to establish live session:", err);
           try {
-            ws.send(JSON.stringify({ event: "stop", streamSid }));
+            hangupStream();
           } catch (sendErr) {
             console.error("[WS] Failed to send stop event after connect failure:", sendErr);
           }
@@ -899,7 +960,7 @@ CURRENT DATE: ${currentDateStr}
         // Send greeting only after the session handle is assigned (see onopen note).
         try {
           const greetingText: string = isOutboundCall
-            ? getOutboundGreeting(customerName)
+            ? getOutboundGreeting()
             : getInboundGreeting(customerName);
           const instruction = `Speak this greeting out loud now with audio. Exact words: ${greetingText}`;
           console.log(`[GEMINI] Sending greeting for spoken audio`);

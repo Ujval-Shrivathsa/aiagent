@@ -1,12 +1,13 @@
 import { createServer } from 'http';
+import path from 'path';
 import next from 'next';
 import { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
 import { setupGemini } from './src/voice/logic';
 
-dotenv.config({ path: '.env' });
-dotenv.config({ path: '../.env.local' });
-dotenv.config({ path: '../.env' });
+dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true });
+dotenv.config({ path: path.resolve(process.cwd(), '../.env.local') });
+dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
@@ -23,7 +24,8 @@ app.prepare().then(() => {
 
   wss.on('connection', (ws, req) => {
     console.log('[WS] New voice connection received');
-    setupGemini(ws as any);
+    const reqUrl = new URL(req.url || '/media-stream', `http://${req.headers.host || 'localhost'}`);
+    setupGemini(ws as any, reqUrl.searchParams);
   });
 
   server.on('upgrade', (req, socket, head) => {
@@ -39,5 +41,6 @@ app.prepare().then(() => {
   server.listen(port, () => {
     console.log(`> Ready on http://localhost:${port}`);
     console.log(`> WebSocket listening on ws://localhost:${port}/media-stream`);
+    console.log(`> Voice provider: ${process.env.VOICE_PROVIDER || 'twilio'} | APP_URL: ${process.env.APP_URL ? 'set' : 'missing'}`);
   });
 });

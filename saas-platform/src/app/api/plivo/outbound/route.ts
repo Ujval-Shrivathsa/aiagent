@@ -8,6 +8,15 @@ function wsHostFromRequest(req: Request): string {
   return fromEnv || fromHeader;
 }
 
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 export async function POST(req: Request) {
   const url = new URL(req.url);
   let customerName = url.searchParams.get('customerName') || '';
@@ -25,17 +34,26 @@ export async function POST(req: Request) {
     // query params only
   }
 
+  const phoneDigits = customerPhone.replace(/\D/g, '');
+  const safeName = customerName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40);
   const headers = [
     'isOutbound=true',
-    `customerPhone=${encodeURIComponent(customerPhone)}`,
-    `customerName=${encodeURIComponent(customerName)}`,
-  ].join(',');
+    phoneDigits ? `customerPhone=${phoneDigits}` : '',
+    safeName ? `customerName=${safeName}` : '',
+  ].filter(Boolean).join(';');
 
   const wsHost = wsHostFromRequest(req);
+  const streamQuery = new URLSearchParams({
+    isOutbound: 'true',
+    ...(phoneDigits ? { customerPhone: phoneDigits } : {}),
+    ...(customerName ? { customerName } : {}),
+  }).toString();
+  const streamUrl = `wss://${wsHost}/media-stream?${streamQuery}`;
+
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" extraHeaders="${headers}">
-    wss://${wsHost}/media-stream
+  <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" extraHeaders="${xmlEscape(headers)}">
+    ${xmlEscape(streamUrl)}
   </Stream>
 </Response>`;
 
