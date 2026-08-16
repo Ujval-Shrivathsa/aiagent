@@ -1,0 +1,50 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:../dev.db?connection_limit=1&busy_timeout=15000"
+}
+
+model User {
+  id                String     @id @default(cuid())
+  email             String     @unique
+  password          String
+  twilioSid         String?
+  twilioToken       String?
+  twilioPhone       String?
+  googleRefreshToken String?
+  campaigns         Campaign[]
+  createdAt         DateTime   @default(now())
+}
+
+model Campaign {
+  id        String   @id @default(cuid())
+  name      String
+  status    String   @default("idle") // idle, running, paused, completed
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  leads     Lead[]
+  createdAt DateTime @default(now())
+}
+
+model Lead {
+  id          String   @id @default(cuid())
+  name        String
+  phone       String
+  status      String   @default("pending") // pending, calling, answered, failed, completed, Scheduled visit, Follow up, Not interested
+  duration    String?
+  summary     String?
+  interested  Boolean?
+  appointmentTime DateTime?
+  transcription String?
+  recordingUrl String?
+  lastResponse String?
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id])
+  createdAt   DateTime @default(now())
+}
