@@ -37,6 +37,13 @@
     "**/*.mts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "test-agent.ts",
+    "test.js",
+    "check-db.js",
+    "seed-user.js",
+    "migrate-statuses.js",
+    "prisma.config.ts",
+    "server.ts"
   ]
 }

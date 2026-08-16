@@ -457,7 +457,7 @@ CURRENT DATE: ${currentDateStr}
             model: "gemini-3.1-flash-live-preview",
             config: {
               responseModalities: [Modality.AUDIO],
-              thinkingConfig: { thinkingLevel: "minimal" },
+              thinkingConfig: { thinkingLevel: "minimal" } as any,
               realtimeInputConfig: {
                 automaticActivityDetection: {
                   disabled: false,

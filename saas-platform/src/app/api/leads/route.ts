@@ -77,7 +77,7 @@ export async function GET(req: Request) {
     // SQLite retry logic for GET
     let retries = 5;
     let leads;
-    let interestedLeads = [];
+    let interestedLeads: Awaited<ReturnType<typeof prisma.lead.findMany>> = [];
     while (retries > 0) {
       try {
         leads = await prisma.lead.findMany({

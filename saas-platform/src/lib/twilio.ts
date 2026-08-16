@@ -14,7 +14,7 @@ export const fromPhoneFallback = process.env.TWILIO_PHONE_NUMBER_FALLBACK || fro
  * This resolves Trial account geo-restrictions (e.g. verified Indian caller ID
  * works for self-test calls, purchased US Twilio number works post-upgrade).
  */
-export async function createCallRetryable(options: Omit<twilio.Twilio.Api.V2010.Account.CallList.CreateOptions, 'from'> & { to: string }) {
+export async function createCallRetryable(options: Omit<Parameters<typeof twilioClient.calls.create>[0], 'from'> & { to: string }) {
   const primaries = [...new Set([fromPhone, fromPhoneFallback].filter(Boolean) as string[])];
   let lastErr: any;
   for (const from of primaries) {
