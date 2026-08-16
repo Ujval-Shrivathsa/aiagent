@@ -577,6 +577,7 @@ CURRENT DATE: ${currentDateStr}
                 }
                 if (response.serverContent?.turnComplete) {
                   sendPcmToTwilio(Buffer.alloc(0), true);
+                  capture?.onAiTurnComplete();
                   capture?.onAiSpeakEnd();
                   if (isOutboundCall && !outboundOpeningRepeatDone) {
                     if (!outboundGreetingSpoken) {
@@ -605,7 +606,7 @@ CURRENT DATE: ${currentDateStr}
                     .join(" ");
                   if (aiText) {
                     fullTranscription += `AI: ${aiText}\n`;
-                    capture?.onAiText(aiText);
+                    capture?.onAiTranscriptChunk(aiText);
 
                     // Best-effort "ask once" backstop — see comment at the
                     // top of the file. Only fires a corrective nudge on an
@@ -635,7 +636,7 @@ CURRENT DATE: ${currentDateStr}
                 const outTx = response.serverContent?.outputTranscription?.text
                   || response.serverContent?.outputAudioTranscription?.text;
                 if (outTx) {
-                  capture?.onAiText(outTx);
+                  capture?.onAiTranscriptChunk(outTx);
                 }
 
                 if (response.serverContent?.inputTranscription?.text) {
