@@ -41,6 +41,11 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# local call capture (do not commit audio / JSON transcripts)
+/recordings/**
+!/recordings/.gitkeep
+/call_logs/**
+!/call_logs/.gitkeep
 /src/generated/prisma
 
 # local sqlite

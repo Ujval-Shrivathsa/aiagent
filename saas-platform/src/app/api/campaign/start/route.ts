@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import twilio from 'twilio';
 import { prisma } from '@/lib/prisma';
+import { callLog } from '@/voice/call-capture/logger';
 
 export const dynamic = 'force-dynamic';
 
@@ -81,12 +82,15 @@ export async function POST(req: Request) {
               answer_method: 'POST',
               hangup_url: `${appUrl}/api/plivo/status`,
               hangup_method: 'POST',
+              ring_url: `${appUrl}/api/plivo/status`,
+              ring_method: 'POST',
             }),
           });
           const plivoBody = await plivoRes.json().catch(() => ({}));
           if (!plivoRes.ok) {
             throw new Error(plivoBody?.error || `Plivo call failed (${plivoRes.status})`);
           }
+          callLog('CALL', `CALL INITIATED  to=${to}`);
         } else {
           const accountSid = process.env.TWILIO_ACCOUNT_SID;
           const authToken = process.env.TWILIO_AUTH_TOKEN;

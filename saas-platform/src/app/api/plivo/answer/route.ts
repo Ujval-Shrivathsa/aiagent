@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { callLog } from '@/voice/call-capture/logger';
 
 function wsHostFromRequest(req: Request): string {
   const fromEnv = (process.env.APP_URL || process.env.VOICE_SERVER_URL || '')
@@ -10,6 +11,7 @@ function wsHostFromRequest(req: Request): string {
 
 export async function POST(req: Request) {
   const wsHost = wsHostFromRequest(req);
+  callLog('CALL', 'CALL ANSWERED  inbound');
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" extraHeaders="isOutbound=false">

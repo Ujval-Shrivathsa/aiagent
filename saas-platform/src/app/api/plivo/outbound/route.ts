@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { callLog } from '@/voice/call-capture/logger';
 
 function wsHostFromRequest(req: Request): string {
   const fromEnv = (process.env.APP_URL || process.env.VOICE_SERVER_URL || '')
@@ -49,6 +50,7 @@ export async function POST(req: Request) {
     ...(customerName ? { customerName } : {}),
   }).toString();
   const streamUrl = `wss://${wsHost}/media-stream?${streamQuery}`;
+  callLog('CALL', `CALL ANSWERED  outbound to=+${phoneDigits || customerPhone}`);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>

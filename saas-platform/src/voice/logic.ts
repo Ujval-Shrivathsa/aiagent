@@ -4,6 +4,8 @@ import { prisma } from '../lib/prisma';
 import { fetchLiveSiteData, formatLiveDataForPrompt } from '../lib/live-site-data';
 import { buildInboundSystemInstruction, getGreeting as getInboundGreeting } from '../voice/Inbound/index';
 import { buildOutboundSystemInstruction, getGreeting as getOutboundGreeting } from '../voice/Outbound/index';
+import { CallCaptureSession } from '../voice/call-capture/session';
+import { callLog } from '../voice/call-capture/logger';
 
 function parseHeaderBag(raw: any): Record<string, string> {
   const out: Record<string, string> = {};
@@ -216,6 +218,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   let audioSink: 'twilio' | 'plivo' = (process.env.VOICE_PROVIDER || 'twilio').toLowerCase() === 'plivo' ? 'plivo' : 'twilio';
   let streamSid: string | null = null;
+  let capture: CallCaptureSession | null = null;
   let geminiSession: any = null;
   let transcriptCount = 0;
   let startTime = Date.now();
@@ -358,6 +361,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       loggedFirstAudio = true;
       console.log(`[GEMINI] Streaming speech to ${audioSink} (${geminiPlaybackRate} Hz → 8 kHz mu-law)`);
     }
+    capture?.onAiSpeakStart();
+    capture?.onAiMuLaw(muLawBuffer);
     const payload = muLawBuffer.toString("base64");
     if (audioSink === "plivo") {
       ws.send(JSON.stringify({
@@ -474,6 +479,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
           : null;
 
         console.log(`[WS] Stream started: ${streamSid} | Name: ${customerName || 'N/A'} | Phone: ${customerPhone || 'N/A'} | Outbound: ${isOutboundCall} | Sink: ${audioSink}`);
+        capture = new CallCaptureSession({
+          streamSid,
+          phone: customerPhone,
+          outbound: isOutboundCall,
+        });
 
         const currentDateStr = new Date().toLocaleDateString('en-IN');
         const activeSystemInstruction = isOutboundCall
@@ -536,21 +546,24 @@ CURRENT DATE: ${currentDateStr}
                 { functionDeclarations: [END_CALL_TOOL, BOOK_APPOINTMENT_TOOL, SET_NAME_TOOL, SET_FOLLOW_UP_TOOL, NOT_INTERESTED_TOOL] },
               ],
               inputAudioTranscription: {},
+              outputAudioTranscription: {},
             },
             callbacks: {
               onopen: () => {
                 console.log("[GEMINI] Session opened!");
+                callLog('SUCCESS', 'GEMINI LIVE SESSION OPEN');
                 resetSilenceTimer();
-                // NOTE: do NOT send the greeting here. `ai.live.connect` resolves
-                // the session object AFTER onopen can fire, and `geminiSession`
-                // is only assigned after the await — so sending from onopen was
-                // a race that often logged "Session not available" and left the
-                // caller in silence. Greeting is sent immediately after the
-                // await below, once `geminiSession` is assigned.
+              },
+              onerror: (err: any) => {
+                const msg = err?.message || String(err);
+                console.error("[GEMINI Error]:", err);
+                callLog('ERROR', `GEMINI/STT ERROR: ${msg}`);
+                capture?.onSttError(msg);
               },
               onmessage: async (response: any) => {
                 if (response.serverContent?.interrupted) {
                   console.log("[GEMINI] Turn interrupted — clearing playback, listening...");
+                  capture?.onAiSpeakEnd();
                   clearPlayback();
                   outputLeftover = Buffer.alloc(0);
                   vadIsSpeaking = true;
@@ -564,6 +577,7 @@ CURRENT DATE: ${currentDateStr}
                 }
                 if (response.serverContent?.turnComplete) {
                   sendPcmToTwilio(Buffer.alloc(0), true);
+                  capture?.onAiSpeakEnd();
                   if (isOutboundCall && !outboundOpeningRepeatDone) {
                     if (!outboundGreetingSpoken) {
                       outboundGreetingSpoken = true;
@@ -591,6 +605,7 @@ CURRENT DATE: ${currentDateStr}
                     .join(" ");
                   if (aiText) {
                     fullTranscription += `AI: ${aiText}\n`;
+                    capture?.onAiText(aiText);
 
                     // Best-effort "ask once" backstop — see comment at the
                     // top of the file. Only fires a corrective nudge on an
@@ -617,6 +632,12 @@ CURRENT DATE: ${currentDateStr}
                   }
                 }
 
+                const outTx = response.serverContent?.outputTranscription?.text
+                  || response.serverContent?.outputAudioTranscription?.text;
+                if (outTx) {
+                  capture?.onAiText(outTx);
+                }
+
                 if (response.serverContent?.inputTranscription?.text) {
                   resetSilenceTimer();
                   const userText = response.serverContent.inputTranscription.text;
@@ -633,6 +654,7 @@ CURRENT DATE: ${currentDateStr}
                   // which reflects an actual detected interruption.
 
                   fullTranscription += `User: ${userText}\n`;
+                  capture?.onCustomerTranscript(userText);
                   if (CUSTOMER_GOODBYE_PATTERN.test(userText)) {
                     customerClearGoodbye = true;
                     console.log(`[GUARD] Clear customer goodbye detected: "${userText.trim()}"`);
@@ -881,9 +903,6 @@ CURRENT DATE: ${currentDateStr}
                   geminiSession.sendToolResponse({ functionResponses: toolResponses });
                 }
               },
-              onerror: (err: any) => {
-                console.error("[GEMINI Error]:", err);
-              },
               onclose: async (event: any) => {
                 console.log("[GEMINI] Session closed. Reason:", event?.reason || "No reason provided", "Code:", event?.code);
                 const duration = Math.round((Date.now() - startTime) / 1000);
@@ -946,6 +965,8 @@ CURRENT DATE: ${currentDateStr}
           });
         } catch (err) {
           console.error("[GEMINI] Failed to establish live session:", err);
+          callLog('ERROR', `GEMINI CONNECT FAILED: ${err instanceof Error ? err.message : String(err)}`);
+          capture?.onSttError('Gemini live connect failed');
           try {
             hangupStream();
           } catch (sendErr) {
@@ -964,6 +985,7 @@ CURRENT DATE: ${currentDateStr}
             : getInboundGreeting(customerName);
           const instruction = `Speak this greeting out loud now with audio. Exact words: ${greetingText}`;
           console.log(`[GEMINI] Sending greeting for spoken audio`);
+          capture?.onAiText(greetingText);
           if (typeof geminiSession.sendClientContent === 'function') {
             geminiSession.sendClientContent({
               turns: [{ role: 'user', parts: [{ text: instruction }] }],
@@ -999,62 +1021,80 @@ CURRENT DATE: ${currentDateStr}
         }
 
       } else if (msg.event === 'media') {
-        if (!geminiSession) return;
-        resetSilenceTimer();
-        const muLawData = Buffer.from(msg.media.payload, "base64");
-        const pcmBuffer = Buffer.alloc(muLawData.length * 4);
-        let sumSquares = 0;
-        for (let i = 0; i < muLawData.length; i++) {
-          const sample = muLawToPcmTable[muLawData[i]];
-          sumSquares += sample * sample;
-          const boosted = Math.max(-32768, Math.min(32767, Math.round(sample * inputGain)));
-          pcmBuffer.writeInt16LE(boosted, i * 4);
-          pcmBuffer.writeInt16LE(boosted, i * 4 + 2);
-        }
         try {
-          geminiSession.sendRealtimeInput({
-            audio: { data: pcmBuffer.toString("base64"), mimeType: 'audio/pcm;rate=16000' }
-          });
+          const muLawData = Buffer.from(msg.media.payload, "base64");
+          capture?.onCustomerMuLaw(muLawData);
+          if (!geminiSession) return;
+          resetSilenceTimer();
+          const pcmBuffer = Buffer.alloc(muLawData.length * 4);
+          let sumSquares = 0;
+          for (let i = 0; i < muLawData.length; i++) {
+            const sample = muLawToPcmTable[muLawData[i]];
+            sumSquares += sample * sample;
+            const boosted = Math.max(-32768, Math.min(32767, Math.round(sample * inputGain)));
+            pcmBuffer.writeInt16LE(boosted, i * 4);
+            pcmBuffer.writeInt16LE(boosted, i * 4 + 2);
+          }
+          try {
+            geminiSession.sendRealtimeInput({
+              audio: { data: pcmBuffer.toString("base64"), mimeType: 'audio/pcm;rate=16000' }
+            });
 
-          const rms = muLawData.length > 0 ? Math.sqrt(sumSquares / muLawData.length) : 0;
-          const now = Date.now();
-          if (rms > VAD_ENERGY_THRESHOLD) {
-            if (!vadIsSpeaking) repromptCount = 0;
-            vadIsSpeaking = true;
-            vadSilenceStartedAt = null;
-          } else if (vadIsSpeaking) {
-            if (vadSilenceStartedAt === null) {
-              vadSilenceStartedAt = now;
-            } else if (now - vadSilenceStartedAt >= VAD_SILENCE_MS) {
-              vadIsSpeaking = false;
-              vadSilenceStartedAt = null;
-              if (isOutboundCall && !outboundOpeningRepeatDone) {
-                // Greeting echo must not fake a customer utterance during the 4s wait.
-                return;
+            const rms = muLawData.length > 0 ? Math.sqrt(sumSquares / muLawData.length) : 0;
+            const now = Date.now();
+            if (rms > VAD_ENERGY_THRESHOLD) {
+              if (!vadIsSpeaking) {
+                repromptCount = 0;
+                capture?.onCustomerSpeakStart();
               }
-              try {
-                geminiSession.sendRealtimeInput({ audioStreamEnd: true });
-              } catch (vadErr: any) {
-                console.error("[GEMINI] Failed to send audioStreamEnd:", vadErr.message);
+              vadIsSpeaking = true;
+              vadSilenceStartedAt = null;
+            } else if (vadIsSpeaking) {
+              if (vadSilenceStartedAt === null) {
+                vadSilenceStartedAt = now;
+              } else if (now - vadSilenceStartedAt >= VAD_SILENCE_MS) {
+                vadIsSpeaking = false;
+                vadSilenceStartedAt = null;
+                capture?.onCustomerSpeakEnd();
+                if (isOutboundCall && !outboundOpeningRepeatDone) {
+                  return;
+                }
+                try {
+                  geminiSession.sendRealtimeInput({ audioStreamEnd: true });
+                } catch (vadErr: any) {
+                  console.error("[GEMINI] Failed to send audioStreamEnd:", vadErr.message);
+                }
               }
             }
+          } catch (e: any) {
+            console.error("[GEMINI] Failed to send audio:", e.message);
+            capture?.onSttError(e.message || 'audio send failed');
           }
-        } catch (e: any) {
-          console.error("[GEMINI] Failed to send audio:", e.message);
+        } catch (decodeErr: any) {
+          callLog('ERROR', `INVALID AUDIO PACKET: ${decodeErr?.message || decodeErr}`);
         }
       } else if (msg.event === 'stop') {
         process.stdout.write('\n[WS] Call stopped by Twilio/Plivo\n');
+        void capture?.finalize();
+        capture = null;
         geminiSession?.close();
       }
     } catch (e) {
       console.error("[WS Message Error]:", e);
+      callLog('ERROR', `MEDIA STREAM ERROR: ${e instanceof Error ? e.message : String(e)}`);
     }
+  });
+
+  ws.on('error', (err) => {
+    callLog('ERROR', `WEBSOCKET ERROR: ${err?.message || err}`);
   });
 
   ws.on('close', () => {
     console.log('[WS] Connection closed');
     if (silenceTimer) clearTimeout(silenceTimer);
     if (outboundOpeningWaitTimer) clearTimeout(outboundOpeningWaitTimer);
+    void capture?.finalize();
+    capture = null;
     geminiSession?.close();
   });
 }
