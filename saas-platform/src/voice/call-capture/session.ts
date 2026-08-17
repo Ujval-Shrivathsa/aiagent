@@ -58,6 +58,11 @@ export class CallCaptureSession {
     this.recorder.appendAiMuLaw(buf);
   }
 
+  /** Telephony playback buffer was cleared (interruption) — keep channels in sync. */
+  onAiPlaybackCleared(): void {
+    this.recorder.clearAiPending();
+  }
+
   onCustomerSpeakStart(): void {
     if (this.customerSpeaking) return;
     this.customerSpeaking = true;

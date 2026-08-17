@@ -16,3 +16,15 @@ export function recordingSampleRate(): number {
 export function sttProvider(): string {
   return (process.env.STT_PROVIDER || 'gemini').toLowerCase();
 }
+
+/** Gain applied to the customer channel in the recording (phone audio is quiet). */
+export function customerRecordingGain(): number {
+  const n = Number(process.env.RECORDING_CUSTOMER_GAIN || 3.5);
+  return Number.isFinite(n) && n > 0 ? n : 3.5;
+}
+
+/** RMS below this is treated as line noise and ducked in the recording. */
+export function customerNoiseGateRms(): number {
+  const n = Number(process.env.RECORDING_NOISE_GATE_RMS || 260);
+  return Number.isFinite(n) && n >= 0 ? n : 260;
+}

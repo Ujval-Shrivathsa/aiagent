@@ -379,6 +379,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const clearPlayback = () => {
+    capture?.onAiPlaybackCleared();
+    outputLeftover = Buffer.alloc(0);
     if (audioSink === "plivo") {
       ws.send(JSON.stringify({ event: "clearAudio", streamId: streamSid }));
     } else {

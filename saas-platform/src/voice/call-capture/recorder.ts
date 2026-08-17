@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { recordingsDir, recordingSampleRate } from './config';
+import { recordingsDir, recordingSampleRate, customerRecordingGain, customerNoiseGateRms } from './config';
 import { callLog } from './logger';
 
 const FRAME_MS = 20;
@@ -45,10 +45,20 @@ export class CallRecorder {
   private closed = false;
   private sampleRate: number;
   private frameSamples: number;
+  private customerGain: number;
+  private noiseGateRms: number;
+  // Noise-gate release: keep the gate open for a short tail after speech so
+  // word endings aren't clipped. Counted in 20ms chunks (~300ms).
+  private gateOpenChunks = 0;
+  // DC-block filter state for the customer channel (removes hum/rumble).
+  private dcPrevIn = 0;
+  private dcPrevOut = 0;
 
   constructor(callId: string) {
     this.sampleRate = recordingSampleRate();
     this.frameSamples = Math.max(1, Math.round(this.sampleRate * (FRAME_MS / 1000)));
+    this.customerGain = customerRecordingGain();
+    this.noiseGateRms = customerNoiseGateRms();
     const dir = recordingsDir();
     fs.mkdirSync(dir, { recursive: true });
     this.filePath = path.join(dir, `${callId}.wav`);
@@ -72,7 +82,33 @@ export class CallRecorder {
   appendCustomerMuLaw(buf: Buffer): void {
     if (this.closed || !this.stream) return;
     try {
-      for (let i = 0; i < buf.length; i++) this.customerQ.push(muLawToPcm[buf[i]]);
+      // Decode + DC-block (high-pass) to strip hum/rumble from the line.
+      const cleaned = new Array<number>(buf.length);
+      let sumSquares = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const x = muLawToPcm[buf[i]];
+        const y = x - this.dcPrevIn + 0.995 * this.dcPrevOut;
+        this.dcPrevIn = x;
+        this.dcPrevOut = y;
+        cleaned[i] = y;
+        sumSquares += y * y;
+      }
+
+      // Noise gate: duck chunks that are just line noise, with a ~300ms
+      // release so word endings aren't chopped.
+      const rms = buf.length > 0 ? Math.sqrt(sumSquares / buf.length) : 0;
+      if (rms >= this.noiseGateRms) {
+        this.gateOpenChunks = 15;
+      } else if (this.gateOpenChunks > 0) {
+        this.gateOpenChunks--;
+      }
+      const gateFactor = this.gateOpenChunks > 0 ? 1 : 0.12;
+
+      const factor = this.customerGain * gateFactor;
+      for (let i = 0; i < cleaned.length; i++) {
+        const boosted = Math.round(cleaned[i] * factor);
+        this.customerQ.push(Math.max(-32768, Math.min(32767, boosted)));
+      }
     } catch (err: any) {
       callLog('ERROR', `AUDIO DECODE ERROR (customer): ${err?.message || err}`);
     }
@@ -85,6 +121,17 @@ export class CallRecorder {
     } catch (err: any) {
       callLog('ERROR', `AUDIO DECODE ERROR (ai): ${err?.message || err}`);
     }
+  }
+
+  /**
+   * Drop AI audio that has been queued but not yet written. Called when the
+   * telephony side clears its playback buffer (customer interruption) —
+   * without this, the recorder keeps "playing out" AI speech that the
+   * customer never heard, shifting the AI channel out of sync with the
+   * customer channel for the rest of the call.
+   */
+  clearAiPending(): void {
+    this.aiQ.length = 0;
   }
 
   private flushFrame(forceRest = false): void {
