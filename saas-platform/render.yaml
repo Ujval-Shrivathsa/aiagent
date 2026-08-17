@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: priya-voice-agent
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/plivo/status
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: VOICE_PROVIDER
+        value: plivo
+      # Set these in the Render dashboard (or sync from your .env):
+      # APP_URL, VOICE_SERVER_URL, GEMINI_API_KEY, PLIVO_*, DATABASE_URL, JWT_SECRET, etc.
+      - key: APP_URL
+        sync: false
+      - key: VOICE_SERVER_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PLIVO_AUTH_ID
+        sync: false
+      - key: PLIVO_AUTH_TOKEN
+        sync: false
+      - key: PLIVO_PHONE_NUMBER
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

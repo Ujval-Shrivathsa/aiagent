@@ -241,6 +241,71 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const OPENING_QUESTION = "Are you looking for a site in Mysuru?";
   const inputGain = 2.5;
 
+  // --- Live input noise suppression: lightweight per-packet DSP on the
+  //     EXISTING telephony stream (Plivo mu-law 8kHz mono). No ML model, no
+  //     second pipeline, zero added buffering.
+  //
+  //     1) Biquad high-pass @100Hz (Q=0.707): removes mains hum (50Hz +
+  //        harmonics), handling rumble, and line thump far better than the old
+  //        6Hz DC blocker, while leaving telephony speech (300–3400Hz) intact.
+  //     2) Adaptive noise-floor gate: instead of fixed 320/240 RMS thresholds
+  //        (wrong for both quiet callers and noisy lines), the background
+  //        level is tracked continuously and the gate thresholds ride ~2.2x
+  //        above it. Quiet callers keep a low threshold; fan/AC/traffic lines
+  //        get a proportionally higher one. Closed = duck to 25%, never mute,
+  //        so speech onsets still reach Gemini's own VAD. ---
+  const HP_F0 = 100, HP_Q = 0.7071, HP_FS = 8000;
+  const hpW = 2 * Math.PI * HP_F0 / HP_FS;
+  const hpAlpha = Math.sin(hpW) / (2 * HP_Q);
+  const hpA0 = 1 + hpAlpha;
+  const HP_B0 = ((1 + Math.cos(hpW)) / 2) / hpA0;
+  const HP_B1 = (-(1 + Math.cos(hpW))) / hpA0;
+  const HP_B2 = HP_B0;
+  const HP_A1 = (-2 * Math.cos(hpW)) / hpA0;
+  const HP_A2 = (1 - hpAlpha) / hpA0;
+  let hpX1 = 0, hpX2 = 0, hpY1 = 0, hpY2 = 0;
+
+  let noiseFloorRms = 150;       // per-call estimate of the line's background level
+  const NOISE_FLOOR_MIN = 40, NOISE_FLOOR_MAX = 900;
+  let gateOpen = false;
+  let gateBelowSince: number | null = null;
+  const GATE_OPEN_MIN_RMS = 260;   // floor so quiet callers are never gated out
+  const GATE_OPEN_MAX_RMS = 1200;  // cap so shouting isn't required on noisy lines
+  const GATE_RELEASE_MS = 300;     // ride through short intra-sentence pauses
+  const GATE_FLOOR = 0.25;         // duck ~12dB when closed, never hard-mute
+  let lastUpsampleSample = 0;      // continuity for linear-interpolation upsampling
+
+  // Preallocated scratch buffers — the media handler runs every ~20ms, so we
+  // avoid per-packet allocations (Plivo packets are 160 bytes; 3200 samples =
+  // 400ms of headroom for oversized packets).
+  const SCRATCH_SAMPLES = 3200;
+  const scratchCleaned = new Int16Array(SCRATCH_SAMPLES);
+  const scratchPcm16k = Buffer.allocUnsafe(SCRATCH_SAMPLES * 4);
+
+  // Local barge-in: how long the audio already queued at Plivo will keep
+  // playing on the phone. While that clock is running and the customer talks
+  // loudly + sustained, we clear playback immediately instead of waiting
+  // ~0.5s for Gemini's own `interrupted` round trip. The trigger threshold is
+  // adaptive (>= 5x the line's noise floor, min 900 RMS) so background noise
+  // can't clip the AI but genuine speech triggers fast.
+  let aiPlaybackEndsAt = 0;
+  let bargeInStartedAt: number | null = null;
+  const BARGE_IN_MIN_RMS = 900;
+  const BARGE_IN_FLOOR_MULT = 5;
+  const BARGE_IN_MIN_MS = 140; // sustained voice, not a cough/thud
+
+  // Dev-only latency instrumentation (set LATENCY_DEBUG=1). Marks:
+  // AUDIO_IN (speech start) → GEMINI_AUDIO_SENT (turn committed) →
+  // GEMINI_FIRST_AUDIO (first model audio) → PLIVO_AUDIO_SENT (first chunk out).
+  const LATENCY_DEBUG = process.env.LATENCY_DEBUG === '1';
+  let speechEndAt = 0;
+  let awaitingFirstAiAudio = false;
+  const latLog = (label: string) => {
+    if (!LATENCY_DEBUG) return;
+    const delta = speechEndAt > 0 ? ` +${Date.now() - speechEndAt}ms` : '';
+    console.log(`[LAT] ${label}${delta}`);
+  };
+
   // Heuristic, best-effort tracking of "ask once" offers made by the model,
   // as a code-side backstop on top of the prompt's own "track internally"
   // instruction (which relies purely on the model's own memory and can slip
@@ -287,16 +352,51 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
   };
 
+  // BUGFIX (duplicate opening question): the retry used to be cancelled only
+  // by an inputTranscription, which lags real speech by 2–5s — so the repeat
+  // could fire while the customer was mid-answer. Now the local VAD cancels
+  // the retry the moment speech energy starts. If that sound turns out not to
+  // produce a transcript within a grace window (noise, a cough), the retry is
+  // re-armed so a genuinely unanswered opening still gets its single repeat.
+  let openingSpeechInProgress = false;
+  let openingGraceTimer: NodeJS.Timeout | null = null;
+  const OPENING_SPEECH_GRACE_MS = 7000;
+
+  const customerStartedAnsweringOpening = () => {
+    if (!isOutboundCall || outboundOpeningRepeatDone) return;
+    if (!outboundOpeningWaitTimer && !openingSpeechInProgress) return;
+    clearOpeningWait();
+    if (!openingSpeechInProgress) {
+      openingSpeechInProgress = true;
+      console.log("[GEMINI] Customer audio during opening wait — retry paused");
+    }
+    if (openingGraceTimer) clearTimeout(openingGraceTimer);
+    openingGraceTimer = setTimeout(() => {
+      openingGraceTimer = null;
+      openingSpeechInProgress = false;
+      if (!outboundOpeningRepeatDone) {
+        console.log("[GEMINI] Opening speech produced no transcript — re-arming retry");
+        armOpeningWait();
+      }
+    }, OPENING_SPEECH_GRACE_MS);
+  };
+
   const customerAnsweredOpening = (raw?: string) => {
     if (!isOutboundCall) return;
     if (!raw || looksLikeOpeningEcho(raw)) return;
     outboundOpeningRepeatDone = true;
+    openingSpeechInProgress = false;
+    if (openingGraceTimer) {
+      clearTimeout(openingGraceTimer);
+      openingGraceTimer = null;
+    }
     clearOpeningWait();
     injectLiveDataIfReady();
   };
 
   const armOpeningWait = () => {
     if (!isOutboundCall || outboundOpeningRepeatDone) return;
+    if (openingSpeechInProgress) return;
     if (outboundOpeningWaitTimer) return;
     console.log("[GEMINI] Arming 4s opening-question retry");
     outboundOpeningWaitTimer = setTimeout(() => {
@@ -363,6 +463,13 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
     capture?.onAiSpeakStart();
     capture?.onAiMuLaw(muLawBuffer);
+    // 8 samples per ms at 8kHz — extend the "still audible on the phone" clock
+    // by the duration of this queued chunk (generation outpaces playback).
+    aiPlaybackEndsAt = Math.max(Date.now(), aiPlaybackEndsAt) + muLawBuffer.length / 8;
+    if (awaitingFirstAiAudio) {
+      awaitingFirstAiAudio = false;
+      latLog('PLIVO_AUDIO_SENT (time-to-first-response-audio)');
+    }
     const payload = muLawBuffer.toString("base64");
     if (audioSink === "plivo") {
       ws.send(JSON.stringify({
@@ -381,6 +488,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const clearPlayback = () => {
     capture?.onAiPlaybackCleared();
     outputLeftover = Buffer.alloc(0);
+    aiPlaybackEndsAt = 0;
+    bargeInStartedAt = null;
     if (audioSink === "plivo") {
       ws.send(JSON.stringify({ event: "clearAudio", streamId: streamSid }));
     } else {
@@ -401,6 +510,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     for (const part of parts) {
       const data = part.inlineData?.data || part.audio?.data;
       if (!data) continue;
+      if (awaitingFirstAiAudio) latLog('GEMINI_FIRST_AUDIO');
       const mime = String(part.inlineData?.mimeType || part.audio?.mimeType || '');
       const rateMatch = mime.match(/rate=(\d+)/i);
       if (rateMatch) geminiPlaybackRate = parseInt(rateMatch[1], 10) || geminiPlaybackRate;
@@ -413,7 +523,9 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   // talking), which is unnecessary timer churn on the event loop during
   // exactly the part of the call where responsiveness matters most.
   const VAD_ENERGY_THRESHOLD = 500;
-  const VAD_SILENCE_MS = 450;
+  // 450 → 350ms: commit the customer's turn to Gemini sooner after they stop
+  // (still above Gemini's own 250ms AAD window, so no double-trigger churn).
+  const VAD_SILENCE_MS = 350;
   let vadIsSpeaking = false;
   let vadSilenceStartedAt: number | null = null;
 
@@ -534,9 +646,14 @@ CURRENT DATE: ${currentDateStr}
               realtimeInputConfig: {
                 automaticActivityDetection: {
                   disabled: false,
-                  silenceDurationMs: 400,
+                  // 400 → 250ms: Gemini starts replying ~150ms sooner after the
+                  // customer stops talking. END_SENSITIVITY_HIGH detects the end
+                  // of speech faster; start sensitivity is left at default so
+                  // background noise doesn't cause false barge-in interruptions.
+                  endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+                  silenceDurationMs: 250,
                   prefixPaddingMs: 20,
-                },
+                } as any,
               },
               speechConfig: {
                 // Indian English voice (en-IN). Female consultant timbre via Kore.
@@ -1029,26 +1146,102 @@ CURRENT DATE: ${currentDateStr}
           capture?.onCustomerMuLaw(muLawData);
           if (!geminiSession) return;
           resetSilenceTimer();
-          const pcmBuffer = Buffer.alloc(muLawData.length * 4);
+
+          // 1) Decode + 100Hz biquad high-pass (mains hum, rumble, handling
+          //    noise). Runs into preallocated scratch — no per-packet allocs.
+          const sampleCount = muLawData.length;
+          const cleaned = sampleCount <= SCRATCH_SAMPLES ? scratchCleaned : new Int16Array(sampleCount);
           let sumSquares = 0;
-          for (let i = 0; i < muLawData.length; i++) {
-            const sample = muLawToPcmTable[muLawData[i]];
-            sumSquares += sample * sample;
-            const boosted = Math.max(-32768, Math.min(32767, Math.round(sample * inputGain)));
-            pcmBuffer.writeInt16LE(boosted, i * 4);
-            pcmBuffer.writeInt16LE(boosted, i * 4 + 2);
+          for (let i = 0; i < sampleCount; i++) {
+            const x = muLawToPcmTable[muLawData[i]];
+            const y = HP_B0 * x + HP_B1 * hpX1 + HP_B2 * hpX2 - HP_A1 * hpY1 - HP_A2 * hpY2;
+            hpX2 = hpX1; hpX1 = x;
+            hpY2 = hpY1; hpY1 = y;
+            const s = y > 32767 ? 32767 : y < -32768 ? -32768 : Math.round(y);
+            cleaned[i] = s;
+            sumSquares += s * s;
+          }
+          const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
+          const now = Date.now();
+
+          // 2) Adaptive noise-floor tracking: converge quickly while the packet
+          //    looks like background (below 2x current floor), drift up only
+          //    very slowly during speech so talking never inflates the floor.
+          if (rms < noiseFloorRms * 2) {
+            noiseFloorRms += (rms - noiseFloorRms) * 0.05;
+          } else {
+            noiseFloorRms += (rms - noiseFloorRms) * 0.004;
+          }
+          if (noiseFloorRms < NOISE_FLOOR_MIN) noiseFloorRms = NOISE_FLOOR_MIN;
+          if (noiseFloorRms > NOISE_FLOOR_MAX) noiseFloorRms = NOISE_FLOOR_MAX;
+
+          // 3) Gate thresholds ride the measured floor (2.2x open, 0.72x of
+          //    open to close) instead of fixed values — quiet callers keep a
+          //    low threshold, noisy fan/AC/traffic lines get a higher one.
+          const gateOpenRms = Math.min(GATE_OPEN_MAX_RMS, Math.max(GATE_OPEN_MIN_RMS, noiseFloorRms * 2.2));
+          const gateCloseRms = gateOpenRms * 0.72;
+          if (rms >= gateOpenRms) {
+            gateOpen = true;
+            gateBelowSince = null;
+          } else if (gateOpen && rms < gateCloseRms) {
+            if (gateBelowSince === null) {
+              gateBelowSince = now;
+            } else if (now - gateBelowSince >= GATE_RELEASE_MS) {
+              gateOpen = false;
+              gateBelowSince = null;
+            }
+          }
+          const effectiveGain = (gateOpen ? 1 : GATE_FLOOR) * inputGain;
+
+          // 4) Gain + 8k→16k upsample via linear interpolation into
+          //    preallocated scratch (duplication added imaging artifacts that
+          //    hurt recognition in noise; interpolation is one add per sample).
+          const pcmBuffer = sampleCount <= SCRATCH_SAMPLES ? scratchPcm16k : Buffer.allocUnsafe(sampleCount * 4);
+          for (let i = 0; i < sampleCount; i++) {
+            let cur = Math.round(cleaned[i] * effectiveGain);
+            if (cur > 32767) cur = 32767; else if (cur < -32768) cur = -32768;
+            const mid = (lastUpsampleSample + cur) >> 1;
+            pcmBuffer.writeInt16LE(mid, i * 4);
+            pcmBuffer.writeInt16LE(cur, i * 4 + 2);
+            lastUpsampleSample = cur;
           }
           try {
+            // Forwarded immediately — one packet in, one packet out, no
+            // utterance buffering anywhere on this path.
             geminiSession.sendRealtimeInput({
-              audio: { data: pcmBuffer.toString("base64"), mimeType: 'audio/pcm;rate=16000' }
+              audio: {
+                data: pcmBuffer.subarray(0, sampleCount * 4).toString("base64"),
+                mimeType: 'audio/pcm;rate=16000',
+              }
             });
 
-            const rms = muLawData.length > 0 ? Math.sqrt(sumSquares / muLawData.length) : 0;
-            const now = Date.now();
+            // Instant barge-in: if the AI is still audible on the phone and the
+            // customer speaks sustained at well above the line's noise floor,
+            // cut playback locally right away instead of waiting for Gemini's
+            // `interrupted` round trip (~0.5s). Threshold adapts to the line
+            // (5x noise floor, min 900 RMS) so background noise can't clip the
+            // AI. Gemini's interrupted event remains the authoritative fallback.
+            const bargeInRms = Math.max(BARGE_IN_MIN_RMS, noiseFloorRms * BARGE_IN_FLOOR_MULT);
+            if (now < aiPlaybackEndsAt && rms >= bargeInRms) {
+              if (bargeInStartedAt === null) {
+                bargeInStartedAt = now;
+              } else if (now - bargeInStartedAt >= BARGE_IN_MIN_MS) {
+                console.log("[VAD] Local barge-in — clearing AI playback immediately");
+                capture?.onAiSpeakEnd();
+                clearPlayback(); // clears Plivo queue + outputLeftover + playback clock + recorder pending
+              }
+            } else if (rms < gateCloseRms) {
+              bargeInStartedAt = null;
+            }
+
             if (rms > VAD_ENERGY_THRESHOLD) {
               if (!vadIsSpeaking) {
                 repromptCount = 0;
                 capture?.onCustomerSpeakStart();
+                // Cancel the opening-question retry on ACTUAL AUDIO, not on the
+                // transcript (which lags speech by seconds) — see bugfix note.
+                customerStartedAnsweringOpening();
+                latLog('AUDIO_IN (customer speech start)');
               }
               vadIsSpeaking = true;
               vadSilenceStartedAt = null;
@@ -1059,14 +1252,16 @@ CURRENT DATE: ${currentDateStr}
                 vadIsSpeaking = false;
                 vadSilenceStartedAt = null;
                 capture?.onCustomerSpeakEnd();
-                if (isOutboundCall && !outboundOpeningRepeatDone) {
-                  return;
-                }
-                try {
-                  geminiSession.sendRealtimeInput({ audioStreamEnd: true });
-                } catch (vadErr: any) {
-                  console.error("[GEMINI] Failed to send audioStreamEnd:", vadErr.message);
-                }
+                speechEndAt = now;
+                awaitingFirstAiAudio = true;
+                latLog('GEMINI_AUDIO_SENT (local speech end; AAD committed turn ~100ms earlier)');
+                // NOTE: we deliberately do NOT send audioStreamEnd here. Per the
+                // installed @google/genai SDK, with automaticActivityDetection
+                // enabled audioStreamEnd means "the audio stream stopped (mic
+                // off)" — not "the speaker paused". Gemini's AAD already ends
+                // the turn 250ms after silence (before this 350ms VAD fires);
+                // sending audioStreamEnd on every pause forced a redundant
+                // stream close/reopen cycle per turn.
               }
             }
           } catch (e: any) {
@@ -1096,6 +1291,7 @@ CURRENT DATE: ${currentDateStr}
     console.log('[WS] Connection closed');
     if (silenceTimer) clearTimeout(silenceTimer);
     if (outboundOpeningWaitTimer) clearTimeout(outboundOpeningWaitTimer);
+    if (openingGraceTimer) clearTimeout(openingGraceTimer);
     void capture?.finalize();
     capture = null;
     geminiSession?.close();
