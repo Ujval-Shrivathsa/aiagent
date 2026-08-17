@@ -1,19 +1,21 @@
 services:
   - type: web
     name: priya-voice-agent
-    runtime: docker
+    runtime: node
     plan: free
     region: singapore
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npx tsx server.ts
     healthCheckPath: /api/plivo/status
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: "22.13.0"
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=460"
       - key: VOICE_PROVIDER
         value: plivo
-      # Set these in the Render dashboard (or sync from your .env):
-      # APP_URL, VOICE_SERVER_URL, GEMINI_API_KEY, PLIVO_*, DATABASE_URL, JWT_SECRET, etc.
       - key: APP_URL
         sync: false
       - key: VOICE_SERVER_URL

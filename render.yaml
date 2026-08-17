@@ -1,17 +1,21 @@
-# Render Blueprint (repo root). The voice app lives in saas-platform/.
+# Render Blueprint (repo root). App lives in saas-platform/.
 services:
   - type: web
     name: priya-voice-agent
-    runtime: docker
+    runtime: node
     plan: free
     region: singapore
     rootDir: saas-platform
-    dockerfilePath: ./saas-platform/Dockerfile
-    dockerContext: ./saas-platform
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npx tsx server.ts
     healthCheckPath: /api/plivo/status
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: "22.13.0"
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=460"
       - key: VOICE_PROVIDER
         value: plivo
       - key: APP_URL
