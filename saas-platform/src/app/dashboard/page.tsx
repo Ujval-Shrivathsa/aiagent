@@ -1,20 +1,16 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useRef, useMemo } from "react";
+import Link from "next/link";
 import { 
   Users, 
   PhoneCall, 
   Plus, 
   FileUp, 
   Play, 
-  LogOut, 
-  LayoutDashboard,
-  Database,
   Loader2,
   Trash2,
   ThumbsUp,
-  CheckCircle2,
   Calendar,
   Clock,
   ArrowRight,
@@ -25,8 +21,13 @@ import {
   ChevronLeft,
   ChevronRight,
   Eye,
+  Database,
+  Search,
+  Mic,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { DashboardShell, DashboardCard, StatCard } from "@/components/dashboard/Shell";
+import { StatusBadge } from "@/components/dashboard/Sidebar";
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<'overview' | 'interested'>('overview');
@@ -39,17 +40,34 @@ export default function Dashboard() {
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
   const [newLead, setNewLead] = useState({ name: "", phone: "" });
-  const [user, setUser] = useState<any>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [leadRecording, setLeadRecording] = useState<{ callId: string; hasAudio: boolean } | null>(null);
   const [activeCampaignId] = useState<string>("default-campaign");
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const router = useRouter();
 
   useEffect(() => {
-    setUser({ email: "team@alliancesquare.in" });
     fetchAllData();
     setIsLoading(false);
-  }, [router]);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedLead?.phone) {
+      setLeadRecording(null);
+      return;
+    }
+    const digits = selectedLead.phone.replace(/\D/g, "").slice(-10);
+    if (digits.length < 10) return;
+    fetch(`/api/recordings?phone=${encodeURIComponent(selectedLead.phone)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        const first = data.recordings?.[0];
+        if (first) setLeadRecording({ callId: first.callId, hasAudio: first.hasAudio });
+        else setLeadRecording(null);
+      })
+      .catch(() => setLeadRecording(null));
+  }, [selectedLead?.phone, selectedLead?.id]);
 
   useEffect(() => {
     fetchAllData(); // Initial fetch
@@ -219,6 +237,26 @@ export default function Dashboard() {
     });
   };
 
+  const filteredLeads = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const qDigits = searchQuery.replace(/\D/g, "").slice(-10);
+    return leads.filter((lead) => {
+      if (statusFilter !== "all" && lead.status !== statusFilter) return false;
+      if (!q) return true;
+      const name = (lead.name || "").toLowerCase();
+      const phone = (lead.phone || "").replace(/\D/g, "");
+      return name.includes(q) || (qDigits.length >= 4 && phone.includes(qDigits));
+    });
+  }, [leads, searchQuery, statusFilter]);
+
+  const completedCount = leads.filter((l) =>
+    ["call ended", "call completed", "completed", "visit scheduled", "scheduled visit", "follow up", "not interested", "not - interested"].includes(
+      (l.status || "").toLowerCase()
+    )
+  ).length;
+
+  const callingCount = leads.filter((l) => l.status === "calling").length;
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-stone-50 dark:bg-stone-950">
@@ -228,173 +266,166 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-stone-50 dark:bg-stone-950 flex transition-colors">
+    <>
       <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv, .xlsx, .xls" />
 
-      {/* Sidebar */}
-      <aside className="w-64 bg-white dark:bg-stone-900 border-r border-stone-200 dark:border-stone-800 p-6 flex flex-col fixed h-full z-20">
-        <div className="mb-10 flex items-center gap-3">
-          <div className="w-10 h-10 gold-gradient rounded-xl flex items-center justify-center font-bold text-white text-xl shadow-lg">P</div>
-          <span className="text-2xl font-serif font-bold tracking-tight dark:text-white">Priya<span className="text-gold">.</span></span>
-        </div>
-
-        <nav className="flex-1 space-y-2">
-          {[
-            { id: 'overview', icon: LayoutDashboard, label: 'Overview' },
-            { id: 'interested', icon: ThumbsUp, label: 'Confirmed Leads' },
-          ].map((item) => (
-            <motion.button
-              key={item.id}
-              onClick={() => setActiveTab(item.id as any)}
-              className={`w-full flex items-center gap-4 px-4 py-3 rounded-2xl transition-all ${
-                activeTab === item.id 
-                  ? "bg-stone-100 dark:bg-stone-800 text-gold font-bold shadow-sm" 
-                  : "text-stone-500 hover:text-stone-900 dark:hover:text-stone-200"
-              }`}
-              whileHover={{ scale: 1.02, x: 5 }}
-              whileTap={{ scale: 0.98 }}
+      <DashboardShell
+        title="Outbound AI Agent"
+        subtitle="Manage leads, launch campaigns, and track customer interest in real time"
+        actions={
+          <>
+            <Link
+              href="/dashboard/recordings"
+              className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 px-5 py-2.5 rounded-2xl flex items-center gap-2 hover:shadow-md transition-all dark:text-stone-200 text-sm font-semibold"
             >
-              <item.icon size={20} />
-              {item.label}
-              {item.id === 'interested' && interestedLeads.length > 0 && (
-                <span className="ml-auto bg-emerald-100 text-emerald-700 text-[10px] font-black px-2 py-0.5 rounded-full">
-                  {interestedLeads.length}
+              <Mic size={16} /> Recordings
+            </Link>
+            <button
+              type="button"
+              onClick={() => setIsModalOpen(true)}
+              className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 px-5 py-2.5 rounded-2xl flex items-center gap-2 hover:shadow-md transition-all dark:text-stone-200 text-sm font-semibold"
+            >
+              <Plus size={16} /> Add Lead
+            </button>
+            <button
+              type="button"
+              onClick={startCampaign}
+              disabled={isCalling || leads.length === 0}
+              className="gold-gradient text-white px-5 py-2.5 rounded-2xl font-bold flex items-center gap-2 hover:shadow-xl hover:scale-[1.02] transition-all disabled:opacity-50 text-sm"
+            >
+              {isCalling ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+              {isCalling ? "Launching…" : callingCount > 0 ? `Calling (${callingCount})` : "Launch Campaign"}
+            </button>
+          </>
+        }
+      >
+
+        {/* Tab switcher */}
+        <div className="flex gap-2 mb-8 p-1 bg-stone-100 dark:bg-stone-900 rounded-2xl w-fit border border-stone-200 dark:border-stone-800">
+          {[
+            { id: "overview" as const, label: "Overview" },
+            { id: "interested" as const, label: "Confirmed Leads", count: interestedLeads.length },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${
+                activeTab === tab.id
+                  ? "bg-white dark:bg-stone-800 text-gold shadow-sm"
+                  : "text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
+              }`}
+            >
+              {tab.label}
+              {tab.count != null && tab.count > 0 && (
+                <span className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 text-[10px] font-black px-2 py-0.5 rounded-full">
+                  {tab.count}
                 </span>
               )}
-            </motion.button>
+            </button>
           ))}
-        </nav>
-
-        <div className="mt-auto pt-6 border-t border-stone-100 dark:border-stone-800 text-stone-300">
-          <button onClick={() => router.push("/auth/login")} className="w-full flex items-center gap-4 px-4 py-3 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-2xl transition-all">
-            <LogOut size={20} />
-            Logout
-          </button>
         </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="flex-1 ml-64 p-12">
-        <header className="flex justify-between items-center mb-12">
-          <div>
-            <h2 className="text-4xl font-serif font-bold dark:text-stone-100">Outbound AI Agent Portal</h2>
-            <p className="text-stone-500 dark:text-stone-400 mt-2 text-lg">Manage leads and track customer interest in real-time</p>
-          </div>
-          <div className="flex gap-4">
-            <button onClick={() => setIsModalOpen(true)} className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 px-7 py-3 rounded-3xl flex items-center gap-2 hover:shadow-md transition-all dark:text-stone-200 text-sm font-semibold">
-              <Plus size={18} /> Add Lead
-            </button>
-            <button onClick={startCampaign} disabled={isCalling} className="gold-gradient text-white px-7 py-3 rounded-3xl font-bold flex items-center gap-2 hover:shadow-xl hover:scale-[1.02] transition-all disabled:opacity-50 text-sm">
-              {isCalling ? <Loader2 size={18} className="animate-spin" /> : <Play size={18} />}
-              {isCalling ? "Launching..." : "Launch Campaign"}
-            </button>
-          </div>
-        </header>
-
-        {/* Overview Tab */}
-        {activeTab === 'overview' && (
+        {activeTab === "overview" && (
           <>
-            {/* Stats Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-12">
-              {[
-                { label: 'Total Leads', value: leads.length.toString(), icon: Users, color: 'text-blue-500' },
-                { label: 'Hot Leads', value: interestedLeads.length.toString(), icon: ThumbsUp, color: 'text-emerald-500' },
-                { label: 'Completed', value: leads.filter(l => ['completed', 'visit scheduled', 'follow up', 'not - interested'].includes(l.status)).length.toString(), icon: PhoneCall, color: 'text-gold' },
-                { label: 'Success Rate', value: interestedLeads.length > 0 ? `${Math.round((interestedLeads.length / leads.length) * 100)}%` : "0%", icon: TrendingUp, color: 'text-purple-500' },
-              ].map((stat, i) => (
-                <motion.div 
-                  key={i} 
-                  initial={{ opacity: 0, y: 20 }} 
-                  animate={{ opacity: 1, y: 0 }} 
-                  transition={{ delay: i * 0.1 }}
-                  whileHover={{ y: -5 }} 
-                  className="bg-white dark:bg-stone-900 p-8 rounded-[2.5rem] border border-stone-200 dark:border-stone-800 shadow-lg relative overflow-hidden group"
-                >
-                  <div className="absolute -right-4 -top-4 opacity-5 group-hover:opacity-10 transition-opacity"><stat.icon size={120} /></div>
-                  <div className={`p-4 rounded-2xl bg-stone-50 dark:bg-stone-800/50 ${stat.color} shadow-inner mb-4`}>
-                    <stat.icon size={24} />
-                  </div>
-                  <h4 className="text-stone-500 dark:text-stone-400 text-xs font-black uppercase tracking-[0.2em]">{stat.label}</h4>
-                  <p className="text-4xl font-black dark:text-white mt-2 tracking-tighter">{stat.value}</p>
-                </motion.div>
-              ))}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-10">
+              <StatCard label="Total Leads" value={String(leads.length)} icon={Users} color="text-blue-500" />
+              <StatCard label="Hot Leads" value={String(interestedLeads.length)} icon={ThumbsUp} color="text-emerald-500" delay={50} />
+              <StatCard label="Completed" value={String(completedCount)} icon={PhoneCall} color="text-gold" delay={100} />
+              <StatCard
+                label="Success Rate"
+                value={leads.length > 0 ? `${Math.round((interestedLeads.length / leads.length) * 100)}%` : "0%"}
+                icon={TrendingUp}
+                color="text-purple-500"
+                delay={150}
+              />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              {/* Lead Table */}
               <div className="lg:col-span-2 space-y-8">
-                <div className="bg-white dark:bg-stone-900 rounded-[2.5rem] border border-stone-200 dark:border-stone-800 overflow-hidden shadow-lg">
-                  <div className="p-8 border-b border-stone-100 dark:border-stone-800 flex justify-between items-center bg-stone-50/30 dark:bg-stone-800/20">
-                    <div>
-                      <h3 className="text-2xl font-serif font-bold dark:text-white">All Leads</h3>
-                      <p className="text-sm text-stone-500 mt-1">Select leads to bulk delete</p>
-                    </div>
-                    <div className="flex gap-4">
+                <DashboardCard
+                  title="All Leads"
+                  subtitle={`${filteredLeads.length} shown · select rows to bulk delete`}
+                  actions={
+                    <div className="flex flex-wrap gap-3">
+                      <div className="relative">
+                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+                        <input
+                          type="text"
+                          placeholder="Search name or phone…"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          className="pl-9 pr-3 py-2 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl text-xs outline-none focus:ring-2 focus:ring-gold/30 w-44"
+                        />
+                      </div>
+                      <select
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        className="py-2 px-3 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl text-xs font-semibold outline-none"
+                      >
+                        <option value="all">All statuses</option>
+                        <option value="calling">Calling</option>
+                        <option value="follow up">Follow up</option>
+                        <option value="visit scheduled">Visit scheduled</option>
+                        <option value="not interested">Not interested</option>
+                        <option value="call ended">Call ended</option>
+                      </select>
                       {selectedLeads.length > 0 && (
-                        <button onClick={handleBulkDelete} className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-2xl hover:shadow-md transition-all text-red-500 flex items-center gap-2 font-black text-[10px] uppercase tracking-widest">
-                          <Trash2 size={16} /> Delete {selectedLeads.length}
+                        <button type="button" onClick={handleBulkDelete} className="px-3 py-2 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-xl text-red-500 flex items-center gap-2 font-black text-[10px] uppercase tracking-widest">
+                          <Trash2 size={14} /> Delete {selectedLeads.length}
                         </button>
                       )}
-                      <button onClick={() => fileInputRef.current?.click()} className="p-3 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-2xl hover:shadow-md transition-all dark:text-stone-300 flex items-center gap-2 font-black text-[10px] uppercase tracking-widest">
-                        <FileUp size={16} /> Import
+                      <button type="button" onClick={() => fileInputRef.current?.click()} className="px-3 py-2 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl dark:text-stone-300 flex items-center gap-2 font-black text-[10px] uppercase tracking-widest">
+                        <FileUp size={14} /> Import
                       </button>
                     </div>
-                  </div>
-                  
-                  <div className="p-0 overflow-x-auto">
+                  }
+                >
+                  <div className="overflow-x-auto">
                     <table className="w-full text-left">
                       <thead>
-                        <tr className="bg-stone-50/50 dark:bg-stone-800/30 text-stone-400 dark:text-stone-500 text-[11px] font-black uppercase tracking-[0.2em]">
-                          <th className="px-8 py-6 w-12"></th>
-                          <th className="px-8 py-6 text-stone-400 dark:text-stone-500 text-[11px] font-black uppercase tracking-[0.2em]">Name</th>
-                          <th className="px-8 py-6 text-stone-400 dark:text-stone-500 text-[11px] font-black uppercase tracking-[0.2em]">Status</th>
-                          <th className="px-8 py-6 text-stone-400 dark:text-stone-500 text-[11px] font-black uppercase tracking-[0.2em]">Summary</th>
-                          <th className="px-8 py-6 text-right text-stone-400 dark:text-stone-500 text-[11px] font-black uppercase tracking-[0.2em]">Action</th>
+                        <tr className="bg-stone-50/50 dark:bg-stone-800/30 text-stone-400 text-[10px] font-black uppercase tracking-[0.2em]">
+                          <th className="px-6 py-4 w-10"></th>
+                          <th className="px-6 py-4">Name</th>
+                          <th className="px-6 py-4">Status</th>
+                          <th className="px-6 py-4">Summary</th>
+                          <th className="px-6 py-4 text-right">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
-                        {leads.length === 0 ? (
+                        {filteredLeads.length === 0 ? (
                           <tr>
-                            <td colSpan={5} className="px-8 py-24 text-center">
-                              <div className="flex flex-col items-center gap-4 opacity-30"><Database size={48} /><p className="font-bold uppercase tracking-widest text-xs">Awaiting data...</p></div>
+                            <td colSpan={5} className="px-6 py-20 text-center">
+                              <div className="flex flex-col items-center gap-3 opacity-40">
+                                <Database size={40} />
+                                <p className="font-bold uppercase tracking-widest text-xs">No leads match</p>
+                              </div>
                             </td>
                           </tr>
                         ) : (
-                          leads.map((lead, i) => (
-                            <tr key={i} onClick={() => setSelectedLead(lead)} className="hover:bg-stone-50 dark:hover:bg-stone-800/10 transition-all group cursor-pointer">
-                              <td className="px-8 py-6" onClick={(e) => e.stopPropagation()}>
-                                <input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 rounded border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-900 text-gold focus:ring-gold cursor-pointer" />
+                          filteredLeads.map((lead) => (
+                            <tr key={lead.id} onClick={() => setSelectedLead(lead)} className="hover:bg-stone-50 dark:hover:bg-stone-800/10 transition-all group cursor-pointer">
+                              <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                                <input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 rounded border-stone-300 text-gold cursor-pointer" />
                               </td>
-                              <td className="px-8 py-6">
+                              <td className="px-6 py-4">
                                 <div className="flex flex-col">
                                   <span className="uppercase font-black text-xs tracking-tighter dark:text-stone-200">{lead.name || <span className="text-stone-400 normal-case font-normal italic">Unknown</span>}</span>
                                   <span className="text-stone-400 text-[10px] font-mono mt-1">{lead.phone}</span>
                                 </div>
                               </td>
-                              <td className="px-8 py-6 ">
-                                <span className={`px-4 py-2 rounded-full text-[9px] font-black uppercase tracking-[0.15em] whitespace-nowrap ${
-                                  lead.status === 'calling' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 animate-pulse' :
-                                  lead.status === 'visit scheduled' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' :
-                                  lead.status === 'follow up' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' :
-                                  lead.status === 'not - interested' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
-                                  lead.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
-                                  'bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400'
-                                }`}>{lead.status}</span>
+                              <td className="px-6 py-4">
+                                <StatusBadge status={lead.status} />
                               </td>
-                              <td className="px-8 py-6">
-                                <div className="flex justify-center w-full">
-                                  {lead.summary ? (
-                                    <div className="p-2 bg-stone-50 dark:bg-stone-800/50 rounded-lg text-gold hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors">
-                                      <Eye size={18} />
-                                    </div>
-                                  ) : (
-                                    <span className="text-stone-300">—</span>
-                                  )}
-                                </div>
+                              <td className="px-6 py-4 text-center">
+                                {lead.summary ? (
+                                  <Eye size={16} className="inline text-gold opacity-60 group-hover:opacity-100" />
+                                ) : (
+                                  <span className="text-stone-300">—</span>
+                                )}
                               </td>
-                              <td className="px-8 py-6 text-right">
-                                <button onClick={(e) => { e.stopPropagation(); handleDelete(lead.id); }} className="p-3 bg-red-50 dark:bg-red-950/20 text-red-500 hover:bg-red-100 rounded-xl transition-all opacity-0 group-hover:opacity-100">
-                                  <Trash2 size={16} />
+                              <td className="px-6 py-4 text-right">
+                                <button type="button" onClick={(e) => { e.stopPropagation(); handleDelete(lead.id); }} className="p-2 bg-red-50 dark:bg-red-950/20 text-red-500 rounded-xl opacity-0 group-hover:opacity-100 transition-all">
+                                  <Trash2 size={14} />
                                 </button>
                               </td>
                             </tr>
@@ -403,7 +434,7 @@ export default function Dashboard() {
                       </tbody>
                     </table>
                   </div>
-                </div>
+                </DashboardCard>
               </div>
 
               {/* Calendar Widget */}
@@ -578,12 +609,7 @@ export default function Dashboard() {
                           <td className="px-8 py-6 text-stone-600 dark:text-stone-300 font-mono text-sm">{lead.phone}</td>
                           <td className="px-8 py-6 text-stone-500 text-sm">{lead.createdAt ? new Date(lead.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
                           <td className="px-8 py-6">
-                            <span className={`px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest whitespace-nowrap ${
-                              lead.status === 'visit scheduled' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' : 
-                              lead.status === 'follow up' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' :
-                              lead.status === 'not - interested' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
-                              'bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-400'
-                            }`}>{lead.status}</span>
+                            <StatusBadge status={lead.status} />
                           </td>
                         </motion.tr>
                       ))
@@ -594,7 +620,7 @@ export default function Dashboard() {
             </div>
           </motion.div>
         )}
-      </main>
+      </DashboardShell>
 
       {/* Manual Add Modal */}
       <AnimatePresence>
@@ -672,17 +698,50 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                   <div>
                     <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-2">Status</h4>
-                    <span className={`px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest ${
-                      selectedLead.status === 'visit scheduled' ? 'bg-emerald-100 text-emerald-700' :
-                      selectedLead.status === 'follow up' ? 'bg-amber-100 text-amber-700' :
-                      selectedLead.status === 'not - interested' ? 'bg-red-100 text-red-700' :
-                      'bg-stone-100 text-stone-500'
-                    }`}>{selectedLead.status}</span>
+                    <StatusBadge status={selectedLead.status} />
                   </div>
+                  {selectedLead.duration != null && (
+                    <div>
+                      <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-2">Duration</h4>
+                      <p className="text-sm font-semibold text-stone-600 dark:text-stone-300">{selectedLead.duration}s</p>
+                    </div>
+                  )}
                 </div>
+
+                {(leadRecording?.hasAudio || selectedLead.recordingUrl) && (
+                  <div>
+                    <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-3">Call Recording</h4>
+                    <audio
+                      controls
+                      className="w-full rounded-xl mb-2"
+                      src={
+                        leadRecording?.hasAudio
+                          ? `/api/recordings/${leadRecording.callId}/audio`
+                          : selectedLead.recordingUrl
+                      }
+                    />
+                    {leadRecording && (
+                      <Link
+                        href={`/dashboard/recordings?call=${leadRecording.callId}`}
+                        className="text-xs font-bold text-gold hover:underline inline-flex items-center gap-1"
+                      >
+                        <Mic size={12} /> View full transcript
+                      </Link>
+                    )}
+                  </div>
+                )}
+
+                {selectedLead.transcription && (
+                  <div>
+                    <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-2">Transcript</h4>
+                    <p className="text-sm text-stone-600 dark:text-stone-300 bg-stone-50 dark:bg-stone-800/50 p-4 rounded-2xl whitespace-pre-wrap max-h-40 overflow-y-auto">
+                      {selectedLead.transcription}
+                    </p>
+                  </div>
+                )}
 
                 {selectedLead.appointmentTime && (
                   <div>
@@ -744,6 +803,6 @@ export default function Dashboard() {
           </div>
         )}
       </AnimatePresence>
-    </div>
+    </>
   );
 }

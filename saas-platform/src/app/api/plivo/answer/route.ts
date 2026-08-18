@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { callLog } from '@/voice/call-capture/logger';
 
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
 function wsHostFromRequest(req: Request): string {
   const fromEnv = (process.env.APP_URL || process.env.VOICE_SERVER_URL || '')
     .replace(/^https?:\/\//, '')
