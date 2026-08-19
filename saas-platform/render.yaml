@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     region: singapore
-    buildCommand: npm ci --include=dev && NODE_OPTIONS=--max-old-space-size=4096 npm run build
+    buildCommand: export NODE_OPTIONS=--max-old-space-size=4096 && npm ci --include=dev && npm run build
     startCommand: npx tsx server.ts
     healthCheckPath: /api/plivo/status
     envVars:
