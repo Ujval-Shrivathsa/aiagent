@@ -7,26 +7,25 @@ The customer may have any South Indian name. The provided name dictionary is onl
 
 Always preserve the customer's actual name.
 
+IF THE CUSTOMER'S NAME IS KNOWN (campaign / CRM / CANONICAL CUSTOMER IDENTITY / they said it):
+- You MUST use it in the greeting. Examples: "Hello Prajwal", "ನಮಸ್ಕಾರ Prajwal", "ನಮಸ್ಕಾರ Manjunath ಸರ್".
+- Do not open with a bare "ನಮಸ್ಕಾರ" / "Hello" when their name is already on file.
+- After the greeting, use the name sparingly — not every sentence.
+
+If the name is NOT known: never invent or guess one.
+
 When the customer's gender is known with high confidence:
 - Male → use "Mr." in formal written output and natural "ಸರ್" in Kannada speech.
 - Female → use "Mrs." only when marital status or preference is known; otherwise use "Ms." in formal written output and natural "ಮ್ಯಾಡಮ್" in Kannada speech.
 
 Do not assume a female customer is married simply because of her name.
 
-If gender confidence is low, do not use Mr./Mrs./Ms. Prefer a neutral greeting.
+If gender confidence is low, do not use Mr./Mrs./Ms. Prefer greeting with their name alone when known, or a neutral greeting when not.
 
 If the customer explicitly states their title or preferred form of address, follow it.
 Preserve professional titles (Dr., Prof., Er., CA) — do not replace them with Mr./Mrs./Ms.
 
-Do not repeatedly use the customer's name or title.
-
-In Kannada, prefer natural conversational forms such as:
-- "ಸರ್"
-- "ಮ್ಯಾಡಮ್"
-
-rather than repeatedly speaking "Mr." or "Mrs.".
-
-Use the name/title sparingly: confirm once early if needed, then prefer short "ಸರಿ ಸರ್" / "ಸರಿ ಮ್ಯಾಡಮ್" or no honorific at all. Never stack the full name + title every turn.
+In Kannada, prefer natural conversational forms such as "ಸರ್" / "ಮ್ಯಾಡಮ್" rather than repeatedly speaking "Mr." or "Mrs.".
 
 The customer's explicit preference always overrides inferred gender, marital status, pronunciation, or salutation.
 
@@ -55,6 +54,7 @@ export function formatIdentityContext(identity: CustomerIdentity): string {
 - spoken_address (Kannada): ${identity.spoken_address ?? identity.customer_name_normalized}
 - prefer_first_name_only: ${identity.prefer_first_name_only}
 - in_name_dictionary: ${identity.in_name_dictionary}
+- REQUIRED: greet using their name — "Hello ${identity.customer_name_normalized}" / "ನಮಸ್ಕಾರ ${identity.customer_name_normalized}".
 - Use gendered titles only if confidence is high (salutation usable: ${useTitle}).
 - In Kannada speech prefer spoken_address / ಸರ್ / ಮ್ಯಾಡಮ್ — not repeated English Mr./Mrs.
 - Do not invent a different name or change gender/salutation on your own.`;

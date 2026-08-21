@@ -36,18 +36,19 @@ export async function POST(req: Request) {
   }
 
   const phoneDigits = customerPhone.replace(/\D/g, '');
-  const safeName = customerName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40);
+  // Keep the real name for Stream headers (spaces → underscore so Plivo parses ok).
+  const headerName = customerName.trim().replace(/\s+/g, '_').slice(0, 60);
   const headers = [
     'isOutbound=true',
     phoneDigits ? `customerPhone=${phoneDigits}` : '',
-    safeName ? `customerName=${safeName}` : '',
+    headerName ? `customerName=${headerName}` : '',
   ].filter(Boolean).join(';');
 
   const wsHost = wsHostFromRequest(req);
   const streamQuery = new URLSearchParams({
     isOutbound: 'true',
     ...(phoneDigits ? { customerPhone: phoneDigits } : {}),
-    ...(customerName ? { customerName } : {}),
+    ...(customerName.trim() ? { customerName: customerName.trim() } : {}),
   }).toString();
   const streamUrl = `wss://${wsHost}/media-stream?${streamQuery}`;
   callLog('CALL', `CALL ANSWERED  outbound to=+${phoneDigits || customerPhone}`);

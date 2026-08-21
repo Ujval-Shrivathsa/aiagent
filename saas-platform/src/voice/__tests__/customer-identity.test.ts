@@ -99,21 +99,26 @@ describe('resolveCustomerIdentity', () => {
 });
 
 describe('Kannada opening with identity', () => {
-  it('uses ಸರ್ for known male and stays neutral without name', () => {
+  it('uses the lead name naturally without forcing ಸರ್ in the greeting', () => {
     const male = buildOutboundKannadaOpening('Manjunath');
-    assert.match(male, /ನಮಸ್ಕಾರ ಸರ್/);
-    assert.match(male, /Manjunath/);
-    assert.match(male, /ನೋಡ್ತಿದ್ದೀರಾ ಸರ್/);
+    assert.match(male, /ನಮಸ್ಕಾರ Manjunath/);
+    assert.match(male, /ಭೂಮಿ ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
+    assert.match(male, /plot ನೋಡ್ತಿದ್ದೀರಾ/);
 
     const neutral = buildOutboundKannadaOpening(null);
-    assert.match(neutral, /^ನಮಸ್ಕಾರ\./);
+    assert.match(neutral, /^ನಮಸ್ಕಾರ,/);
     assert.doesNotMatch(neutral, /ನಮಸ್ಕಾರ ಸರ್/);
   });
 
-  it('uses ಮ್ಯಾಡಮ್ for known female', () => {
+  it('uses ಮ್ಯಾಡಮ್ only via identity elsewhere — opening stays light', () => {
     const female = buildOutboundKannadaOpening('Priya');
-    assert.match(female, /ನಮಸ್ಕಾರ ಮ್ಯಾಡಮ್/);
-    assert.match(female, /Priya/);
+    assert.match(female, /ನಮಸ್ಕಾರ Priya/);
+    assert.doesNotMatch(female, /ಮ್ಯಾಡಮ್/);
+  });
+
+  it('uses the exact lead name even when not in the dictionary', () => {
+    const opening = buildOutboundKannadaOpening('Prajwal');
+    assert.match(opening, /ನಮಸ್ಕಾರ Prajwal/);
   });
 });
 

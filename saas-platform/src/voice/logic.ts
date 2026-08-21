@@ -4,12 +4,18 @@ import { prisma } from '../lib/prisma';
 import { fetchLiveSiteData, formatLiveDataForPrompt } from '../lib/live-site-data';
 import { buildInboundSystemInstruction, getGreeting as getInboundGreeting, getInboundGreetingInstruction } from '../voice/Inbound/index';
 import { buildOutboundSystemInstruction, getGreeting as getOutboundGreeting, getOutboundGreetingInstruction } from '../voice/Outbound/index';
-import { OUTBOUND_OPENING_QUESTION_KN } from '../voice/kannada-style';
+import { OUTBOUND_OPENING_QUESTION_KN, getOutboundOpeningQuestionKn } from '../voice/kannada-style';
 import { CallCaptureSession } from '../voice/call-capture/session';
 import { callLog } from '../voice/call-capture/logger';
 import { loadAudioPipelineConfig } from '../voice/audio-pipeline-config';
 import { buildLiveSpeechConfig, describeSpeechConfig, loadLiveSpeechSettings } from '../voice/tts/speech-config';
 import { detectScriptLanguage } from '../voice/language/script-detect';
+import {
+  languageCodeForConversation,
+  languageSwitchSystemPrompt,
+  resolveNextConversationLanguage,
+  type ConversationLanguage,
+} from '../voice/language/conversation-language';
 import { evaluateBargeIn, evaluateLocalSpeech } from '../voice/turn-policy';
 import { LEAD_STATUS, outcomeFromFlags } from '../lib/lead-status';
 import {
@@ -21,9 +27,22 @@ import {
 import {
   emptyIdentity,
   formatIdentityContext,
+  kannadaHonorific,
   resolveCustomerIdentity,
   type CustomerIdentity,
 } from '../voice/customer-identity';
+import {
+  beginWaitingForCustomer,
+  classifyCustomerWhileWaiting,
+  createWaitingState,
+  enterCustomerRequestedWait,
+  loadWaitConfig,
+  nextWaitDeadline,
+  onMeaningfulCustomerSpeech,
+  tickWait,
+  type HonorificKn,
+  type WaitingState,
+} from '../voice/wait-policy';
 
 function parseHeaderBag(raw: any): Record<string, string> {
   const out: Record<string, string> = {};
@@ -252,14 +271,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let transcriptCount = 0;
   let startTime = Date.now();
   let customerPhone: string | null = null;
-  let silenceTimer: NodeJS.Timeout | null = null;
-  let lastSilenceReset = 0;
-  let repromptCount = 0;
-  // Soft check-ins only — NEVER auto-end the call on silence. The customer
-  // must clearly say they want to hang up before endCall is used.
-  const MAX_REPROMPTS = 2;
-  const SILENCE_TIMEOUT_MS = 12000;
-  const SILENCE_RESET_DEBOUNCE_MS = 500; // don't churn the timer on every ~20ms audio packet
+  // Patient wait / silence state machine — see wait-policy.ts.
+  // NEVER auto-end the call on silence; NEVER treat silence as not interested.
+  const waitCfg = loadWaitConfig();
+  let waitingState: WaitingState = createWaitingState();
+  let waitTickTimer: NodeJS.Timeout | null = null;
   let fullTranscription: string = "";
   let isFirstResponse = true;
   let isOutboundCall = false;
@@ -269,9 +285,12 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let outboundGreetingSpoken = false;
   let outboundOpeningWaitTimer: NodeJS.Timeout | null = null;
   const OPENING_WAIT_MS = 4000;
-  const OPENING_QUESTION = OUTBOUND_OPENING_QUESTION_KN;
+  const OPENING_QUESTION = getOutboundOpeningQuestionKn() || OUTBOUND_OPENING_QUESTION_KN;
   const audioCfg = loadAudioPipelineConfig();
   const ttsSettings = loadLiveSpeechSettings();
+  /** Track reply language — every new call starts Kannada (kn-IN TTS). */
+  let conversationLanguage: ConversationLanguage = 'kn';
+  let activeTtsLanguageCode: 'kn-IN' | 'en-IN' = 'kn-IN';
   const inputGain = audioCfg.inputGain;
   const voiceDebug = audioCfg.voiceDebug;
   const vadLog = (msg: string) => {
@@ -462,9 +481,133 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       } catch (e: any) {
         console.error("[GEMINI] Opening retry send failed:", e?.message || e);
       }
-      resetSilenceTimer();
+      // After the opening repeat is spoken, turnComplete will arm WAITING_FOR_CUSTOMER.
       setTimeout(() => injectLiveDataIfReady(), 1200);
     }, OPENING_WAIT_MS);
+  };
+
+  const currentHonorific = (): HonorificKn => {
+    const h = kannadaHonorific(customerIdentity);
+    if (h === 'ಸರ್' || h === 'ಮ್ಯಾಡಮ್') return h;
+    return 'ಸರ್';
+  };
+
+  const clearWaitTick = () => {
+    if (waitTickTimer) {
+      clearTimeout(waitTickTimer);
+      waitTickTimer = null;
+    }
+  };
+
+  const sendWaitSystemPrompt = (text: string) => {
+    if (!geminiSession) return;
+    try {
+      if (typeof geminiSession.sendClientContent === 'function') {
+        geminiSession.sendClientContent({
+          turns: [{ role: 'user', parts: [{ text }] }],
+          turnComplete: true,
+        });
+      } else {
+        geminiSession.sendRealtimeInput({ text });
+      }
+    } catch (e: any) {
+      console.error('[WAIT] Failed to send wait prompt:', e?.message || e);
+    }
+  };
+
+  const applyCustomerLanguageFromTranscript = (userText: string) => {
+    const resolved = resolveNextConversationLanguage(conversationLanguage, userText);
+    if (!resolved.switched) return;
+    const prev = conversationLanguage;
+    conversationLanguage = resolved.language;
+    activeTtsLanguageCode = languageCodeForConversation(conversationLanguage);
+    console.log(
+      `[LANG] Conversation language ${prev} → ${conversationLanguage} ` +
+        `(tts=${activeTtsLanguageCode}, reason=${resolved.decision.reason})`,
+    );
+    // Gemini Live speechConfig is set at connect (kn-IN). Mid-call language is
+    // enforced via an immediate system nudge — do not wait for multiple turns.
+    sendWaitSystemPrompt(
+      `${languageSwitchSystemPrompt(conversationLanguage)} SYSTEM TTS LANGUAGE TARGET: ${activeTtsLanguageCode}.`,
+    );
+  };
+
+  const scheduleWaitTick = () => {
+    clearWaitTick();
+    const now = Date.now();
+    const deadline = nextWaitDeadline(waitingState, waitCfg, now);
+    if (deadline == null) return;
+    const delay = Math.max(50, deadline - now);
+    waitTickTimer = setTimeout(() => {
+      waitTickTimer = null;
+      if (!geminiSession) return;
+      if (vadIsSpeaking) {
+        // Customer may be mid-utterance — don't fire availability check yet.
+        waitTickTimer = setTimeout(() => scheduleWaitTick(), 400);
+        return;
+      }
+      // Still playing TTS — push the silence clock until playback finishes.
+      const playLeft = aiPlaybackEndsAt - Date.now();
+      if (playLeft > 80 && waitingState.reason === 'normal_wait') {
+        waitingState = beginWaitingForCustomer(waitingState, Date.now() + playLeft);
+        scheduleWaitTick();
+        return;
+      }
+      const { state, decision } = tickWait(waitingState, waitCfg, Date.now(), currentHonorific());
+      waitingState = state;
+      if (decision.action === 'availability_check') {
+        console.log(
+          `[WAIT] Availability check #${waitingState.availability_check_count}/${waitCfg.maxAvailabilityChecks}: "${decision.spokenLine}"`,
+        );
+        sendWaitSystemPrompt(decision.systemPrompt);
+      } else if (decision.action === 'grace_callback') {
+        console.log(`[WAIT] Grace callback nudge (silence ≠ not interested): "${decision.spokenLine}"`);
+        sendWaitSystemPrompt(decision.systemPrompt);
+      } else if (decision.action === 'requested_wait_expired') {
+        console.log('[WAIT] Customer-requested wait ended — resuming normal listening (no immediate check)');
+      }
+      scheduleWaitTick();
+    }, delay);
+  };
+
+  /** Agent finished speaking → WAITING_FOR_CUSTOMER (after TTS drains). */
+  const armWaitingForCustomer = () => {
+    if (isOutboundCall && !outboundOpeningRepeatDone && !outboundGreetingSpoken) {
+      return;
+    }
+    // Opening has its own ~4s one-shot retry — don't stack a 5s availability check on top.
+    if (isOutboundCall && !outboundOpeningRepeatDone) {
+      return;
+    }
+    const now = Date.now();
+    const playLeft = Math.max(0, aiPlaybackEndsAt - now);
+    const silenceStart = now + playLeft;
+    waitingState = beginWaitingForCustomer(waitingState, silenceStart);
+    console.log(
+      `[WAIT] WAITING_FOR_CUSTOMER reason=${waitingState.reason} ` +
+        `(availability after ${waitCfg.availabilityCheckAfterMs}ms unexplained silence)`,
+    );
+    scheduleWaitTick();
+  };
+
+  const handleCustomerTranscriptForWait = (userText: string) => {
+    if (looksLikeOpeningEcho(userText)) return;
+    const classified = classifyCustomerWhileWaiting(userText, waitCfg);
+    if (classified.kind === 'wait_request') {
+      waitingState = enterCustomerRequestedWait(
+        waitingState,
+        classified.wait.durationMs,
+        Date.now(),
+      );
+      console.log(
+        `[WAIT] CUSTOMER_REQUESTED_WAIT ${classified.wait.durationMs}ms ` +
+          `(${classified.wait.kind}) phrase="${classified.wait.phrase}" — skipping 5s availability check`,
+      );
+      scheduleWaitTick();
+      return;
+    }
+    waitingState = onMeaningfulCustomerSpeech(waitingState, Date.now());
+    clearWaitTick();
   };
   const SITE_VISIT_OFFER_PATTERN = /site\s*visit|visit\s*the\s*(plot|layout|site)|come\s*(and\s*)?(see|visit)|ಸೈಟ್\s*ವಿಸಿಟ್|ವಿಸಿಟ್\s*ಮಾಡ|ಸೈಟ್\s*ನೋಡ/i;
   const FOLLOW_UP_OFFER_PATTERN = /sales\s*team\s*(contact|call|reach)|someone\s*(from\s*our\s*team\s*)?(will\s*)?(call|contact)\s*you/i;
@@ -584,43 +727,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let vadIsSpeaking = false;
   let vadSilenceStartedAt: number | null = null;
 
-  const resetSilenceTimer = () => {
-    if (isOutboundCall && !outboundOpeningRepeatDone && !outboundGreetingSpoken) {
-      return;
-    }
-    if (isOutboundCall && outboundGreetingSpoken && !outboundOpeningRepeatDone && outboundOpeningWaitTimer) {
-      return;
-    }
-    const now = Date.now();
-    if (now - lastSilenceReset < SILENCE_RESET_DEBOUNCE_MS) {
-      return;
-    }
-    lastSilenceReset = now;
-
-    if (silenceTimer) clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => {
-      if (!geminiSession) return;
-      // Customer audio resets this timer; if they speak again after a re-prompt,
-      // count goes back to 0 so we don't escalate from earlier quiet stretches.
-      repromptCount++;
-      if (repromptCount > MAX_REPROMPTS) {
-        // CRITICAL: do NOT end the call on silence. Keep waiting quietly.
-        // Ending is only allowed when the customer clearly says goodbye.
-        console.log(`[GEMINI] Silence after ${MAX_REPROMPTS} soft re-prompts — staying on the line (no auto endCall).`);
-        if (silenceTimer) clearTimeout(silenceTimer);
-        return;
-      }
-      console.log(`[GEMINI] Silence detected (${SILENCE_TIMEOUT_MS / 1000}s, soft re-prompt #${repromptCount}/${MAX_REPROMPTS}). NOT ending call.`);
-
-      const repromptText = isOutboundCall
-        ? `SILENCE RE-PROMPT: The customer has been quiet for ${SILENCE_TIMEOUT_MS / 1000}+ seconds. Softly and briefly rephrase your last open question IN THE SAME LANGUAGE — do NOT say goodbye, do NOT call endCall, do NOT invent that they are done. Just wait with them.`
-        : `SILENCE RE-PROMPT: The customer has been quiet for ${SILENCE_TIMEOUT_MS / 1000}+ seconds on this INBOUND call. Softly and briefly rephrase whichever question you were waiting on, IN THE SAME LANGUAGE. Do NOT say "I'll let you go", do NOT say goodbye, do NOT call endCall — silence is NOT a reason to hang up. Stay on the line.`;
-
-      geminiSession.sendRealtimeInput({ text: repromptText });
-    }, SILENCE_TIMEOUT_MS);
-  };
-
   console.log(`[WS] Connected (Twilio/Plivo). Waiting for start event...`);
+  console.log(
+    `[WAIT] Config: checkAfter=${waitCfg.availabilityCheckAfterMs}ms maxChecks=${waitCfg.maxAvailabilityChecks} ` +
+      `nextDelay=${waitCfg.nextCheckDelayMs}ms holdOn=${waitCfg.holdOnMs}ms justAMinute=${waitCfg.justAMinuteMs}ms`,
+  );
 
   ws.on('message', async (data: string) => {
     try {
@@ -637,10 +748,16 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
         const customParams = { ...fromUrl, ...(msg.start.customParameters || {}) };
         const isOutbound = String(customParams.isOutbound || '').toLowerCase() === 'true';
         isOutboundCall = isOutbound;
-        const rawName = customParams.customerName || '';
+        const rawName =
+          customParams.customerName ||
+          customParams.CustomerName ||
+          customParams.name ||
+          '';
         const blacklistedNames = ['customer', 'contact', 'lead', 'unknown', 'null', 'undefined', 'unnamed', ''];
-        const hasValidName = rawName && !blacklistedNames.includes(rawName.toLowerCase().trim());
-        const customerName = hasValidName ? rawName.trim() : '';
+        // Plivo extraHeaders may use underscores for spaces — restore for speech.
+        const restoredName = String(rawName).replace(/_/g, ' ').trim();
+        const hasValidName = restoredName && !blacklistedNames.includes(restoredName.toLowerCase());
+        const customerName = hasValidName ? restoredName : '';
         customerIdentity = customerName
           ? resolveCustomerIdentity({
               rawName: customerName,
@@ -673,9 +790,12 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
         }
 
         const currentDateStr = new Date().toLocaleDateString('en-IN');
+        const greetingIdentity = customerIdentity.customer_name_normalized
+          ? customerIdentity
+          : null;
         const activeSystemInstruction = isOutboundCall
-          ? buildOutboundSystemInstruction(currentDateStr)
-          : buildInboundSystemInstruction(currentDateStr);
+          ? buildOutboundSystemInstruction(currentDateStr, greetingIdentity)
+          : buildInboundSystemInstruction(currentDateStr, greetingIdentity);
 
         // LATENCY FIX: previously this file did
         //   const liveDataPromise = fetchLiveSiteData();
@@ -697,12 +817,14 @@ TOOL USAGE NOTES:
 - If they explicitly ask for a callback later (busy/driving), follow the BUSY / DRIVING / CALL BACK LATER script, then call endCall.
 - endCall ONLY when the customer clearly wants to hang up (bye / goodbye / thank you for your time / thanks that's all / I'm done / that's all I needed / you can end the call / clear equivalent in any language), OR after finishing a busy/callback-later script they requested. NEVER call endCall because a few minutes have passed, for silence, pauses, "okay"/"hmm", topic changes, or incomplete answers. No arbitrary call-duration cutoff.
 
-LANGUAGE REMINDER: Prefer simple professional Kannada for Mysuru/Karnataka callers. Generate Kannada directly — never English-then-translate. Match the customer's language/mix; never refuse a language.
-KANNADA REMINDER: Calm 30-year-old Karnataka sales professional. Short everyday Mysuru Kannada (not formal/textbook). One thought per sentence. Natural site/budget/loan English loanwords OK. No excitement or drama. After a question, STOP and listen. Only the five PDF projects. Office 10–7; site visits 10–5:30 — never 11–7; never push scheduling unless they asked to book.
+LANGUAGE REMINDER: START every call in simple Mysuru Kannada (kn-IN). First reply MUST be Kannada. After that, follow the customer's LATEST meaningful language immediately — clear English → English; clear Kannada → Kannada. Do NOT switch for isolated loanwords (plot, budget, site, property…). Never refuse a language. Preserve context when switching.
+KANNADA REMINDER: Calm 30-year-old Karnataka sales professional. Short everyday Mysuru Kannada (not formal/textbook). One thought per sentence. Natural site/plot/budget/loan English loanwords OK. No excitement or drama. After a question, STOP and listen. Only the five PDF projects. Office 10–7; site visits 10–5:30 — never 11–7; never push scheduling unless they asked to book.
+NO INVENTION: Never invent that the customer asked for a site visit, booking, or any question they did not ask. Never say "sure / that's great / wonderful" about something they did not say. If unclear, ask one short clarification in Kannada and WAIT.
 PROJECT FACTS REMINDER: CNM Apex = South-facing only at ₹5,450/sqft (not North). Booking amount = ₹59,000. Agreement amount / maintenance cost-duration → Sales Manager callback. Do not invent non-PDF projects.
-LISTENING REMINDER: Never speak over the customer. Allow natural pauses and hesitations. If they interrupt, stop immediately. First 30s: intro + why calling + one interest question + WAIT. Max one question per turn.
+LISTENING REMINDER: Never speak over the customer. Allow natural pauses and hesitations. If they interrupt, stop immediately. Opening: Speak → Ask → Stop → Listen. Max one question per turn.
+SILENCE REMINDER: After a question, wait. Do not fill silence. If the customer says wait / hold on / ಒಂದು ನಿಮಿಷ / ಸ್ವಲ್ಪ wait ಮಾಡಿ, respect that and do NOT ask if they are still there during their wait. Only brief availability checks come from system "AVAILABILITY CHECK:" messages after unexplained silence — never treat silence as not interested or hang-up.
 ${isOutboundCall ? `PRONUNCIATION: Hunsur is hun-sur / hun-soor ([hˈʌn.sɜː] or [hʊn.suːr]) — never hoo-na-soo-ru, never "Hoo-n-sur".
-SPEAK: Always answer with spoken audio. Never stay silent after the customer finishes. Keep the first spoken sentence short so playback starts immediately.
+SPEAK: Answer with spoken audio when the customer has actually finished a turn. Do not invent content to avoid silence. Keep the first spoken sentence short so playback starts immediately.
 QUALIFY: After interest = yes → purpose (invest vs construct) → budget → only matching projects. Do not dump unrelated layouts. Sridevi landmarks include Near Upcoming Electronic City. UK Square ~1 year / under construction ONLY if they specifically ask whether the project is ready. UK Square site sizes are not in the spec — never 50×80 / 50*80; do not invent a size.
 ` : ''}
 
@@ -714,7 +836,9 @@ ${formatIdentityContext(customerIdentity)}
         let localSession: any;
         try {
           console.log(`[VOICE] Audio pipeline: gain=${inputGain} gateMin=${GATE_OPEN_MIN_RMS} gateRel=${GATE_RELEASE_MS}ms bargeMinRms=${BARGE_IN_MIN_RMS} bargeHold=${BARGE_IN_MIN_MS}ms vadSilence=${VAD_SILENCE_MS}ms aadSilence=${audioCfg.aadSilenceDurationMs}ms aadEnd=${audioCfg.aadEndSensitivity} aadStart=${audioCfg.aadStartSensitivity}`);
-          console.log(`[VOICE] TTS: ${describeSpeechConfig(ttsSettings)}`);
+          conversationLanguage = 'kn';
+          activeTtsLanguageCode = 'kn-IN';
+          console.log(`[VOICE] TTS: ${describeSpeechConfig(ttsSettings, activeTtsLanguageCode)} (Kannada-first)`);
           localSession = await ai.live.connect({
             model: "gemini-3.1-flash-live-preview",
             config: {
@@ -731,9 +855,8 @@ ${formatIdentityContext(customerIdentity)}
                   prefixPaddingMs: audioCfg.aadPrefixPaddingMs,
                 } as any,
               },
-              // Native-audio Live: omit languageCode by default so Kannada (kn)
-              // and other Indic languages auto-select. See tts/speech-config.ts.
-              speechConfig: buildLiveSpeechConfig(ttsSettings) as any,
+              // Kannada-first: kn-IN for the opening; follow customer language via prompts.
+              speechConfig: buildLiveSpeechConfig(ttsSettings, activeTtsLanguageCode) as any,
               systemInstruction: `${activeSystemInstruction}\n${runtimeInstructionBase}`,
               tools: [
                 { functionDeclarations: [END_CALL_TOOL, BOOK_APPOINTMENT_TOOL, SET_NAME_TOOL, SET_FOLLOW_UP_TOOL, NOT_INTERESTED_TOOL] },
@@ -745,7 +868,6 @@ ${formatIdentityContext(customerIdentity)}
               onopen: () => {
                 console.log("[GEMINI] Session opened!");
                 callLog('SUCCESS', 'GEMINI LIVE SESSION OPEN');
-                resetSilenceTimer();
               },
               onerror: (err: any) => {
                 const msg = err?.message || String(err);
@@ -784,6 +906,9 @@ ${formatIdentityContext(customerIdentity)}
                     }
                     armOpeningWait();
                   }
+                  // Patient listening: do not re-prompt Gemini until unexplained silence
+                  // or an availability-check deadline (see wait-policy).
+                  armWaitingForCustomer();
                 }
 
                 // Customer clearly said goodbye but model closed verbally without
@@ -798,7 +923,6 @@ ${formatIdentityContext(customerIdentity)}
 
                 if (response.serverContent?.modelTurn) {
                   transcriptCount++;
-                  resetSilenceTimer();
                   const aiText = response.serverContent.modelTurn.parts
                     .map((p: any) => p.text || "")
                     .join(" ");
@@ -842,14 +966,12 @@ ${formatIdentityContext(customerIdentity)}
                 }
 
                 if (response.serverContent?.inputTranscription?.text) {
-                  resetSilenceTimer();
                   const userText = response.serverContent.inputTranscription.text;
                   const userLang = detectScriptLanguage(userText);
                   console.log(`[LANG] Customer STT lang=${userLang} text="${String(userText).slice(0, 100)}"`);
                   customerAnsweredOpening(userText);
-                  if (!looksLikeOpeningEcho(userText)) {
-                    repromptCount = 0; // customer spoke — clear soft-reprompt streak
-                  }
+                  handleCustomerTranscriptForWait(userText);
+                  applyCustomerLanguageFromTranscript(userText);
                   // FIX: previously this unconditionally sent a "clear"
                   // event (wiping Priya's outbound audio buffer) on EVERY
                   // transcribed fragment, not just genuine interruptions —
@@ -1260,10 +1382,8 @@ ${formatIdentityContext(customerIdentity)}
           const muLawData = Buffer.from(msg.media.payload, "base64");
           capture?.onCustomerMuLaw(muLawData);
           if (!geminiSession) return;
-          resetSilenceTimer();
-
-          // 1) Decode + 100Hz biquad high-pass (mains hum, rumble, handling
-          //    noise). Runs into preallocated scratch — no per-packet allocs.
+          // Do NOT reset wait/silence timers on raw media — fan/TV/keyboard must
+          // not count as a customer response. Only meaningful STT does.
           const sampleCount = muLawData.length;
           const cleaned = sampleCount <= SCRATCH_SAMPLES ? scratchCleaned : new Int16Array(sampleCount);
           let sumSquares = 0;
@@ -1381,7 +1501,6 @@ ${formatIdentityContext(customerIdentity)}
               silenceMs: VAD_SILENCE_MS,
             });
             if (speechDecision.event === 'start') {
-              repromptCount = 0;
               vadIsSpeaking = true;
               vadSilenceStartedAt = null;
               capture?.onCustomerSpeakStart();
@@ -1390,6 +1509,9 @@ ${formatIdentityContext(customerIdentity)}
               );
               customerStartedAnsweringOpening();
               latLog('AUDIO_IN (customer speech start)');
+              // Pause availability deadlines while local VAD hears speech energy
+              // (STT still owns resetting wait state — noise alone won't clear it).
+              clearWaitTick();
             } else if (speechDecision.event === 'silence_arm') {
               vadSilenceStartedAt = speechDecision.silenceStartedAt;
             } else if (speechDecision.event === 'end') {
@@ -1403,6 +1525,17 @@ ${formatIdentityContext(customerIdentity)}
                 `[VAD] Customer speech END after ${speechDecision.pausedFor}ms silence (vadSilenceMs=${VAD_SILENCE_MS} aadSilenceMs=${audioCfg.aadSilenceDurationMs})`
               );
               latLog('GEMINI_AUDIO_SENT (local speech end; AAD owns turn commit)');
+              // If STT never arrived (noise spike), keep waiting from a fresh silence clock
+              // unless the customer already requested an explicit wait window.
+              if (
+                waitingState.is_waiting &&
+                waitingState.reason !== 'customer_requested_wait'
+              ) {
+                waitingState = beginWaitingForCustomer(waitingState, Date.now());
+                scheduleWaitTick();
+              } else if (waitingState.reason === 'customer_requested_wait') {
+                scheduleWaitTick();
+              }
             } else if (speechDecision.event === 'none') {
               vadIsSpeaking = speechDecision.vadIsSpeaking;
               vadSilenceStartedAt = speechDecision.silenceStartedAt;
@@ -1432,7 +1565,7 @@ ${formatIdentityContext(customerIdentity)}
 
   ws.on('close', () => {
     console.log('[WS] Connection closed');
-    if (silenceTimer) clearTimeout(silenceTimer);
+    clearWaitTick();
     if (outboundOpeningWaitTimer) clearTimeout(outboundOpeningWaitTimer);
     if (openingGraceTimer) clearTimeout(openingGraceTimer);
     void capture?.finalize();

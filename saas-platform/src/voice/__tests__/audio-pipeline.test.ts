@@ -36,22 +36,22 @@ describe('audio-pipeline-config', () => {
 });
 
 describe('tts speech-config', () => {
-  it('omits languageCode by default for native multilingual audio (Kannada-capable)', () => {
+  it('defaults to kn-IN for Kannada-first openings', () => {
     const prevLang = process.env.VOICE_TTS_LANGUAGE_CODE;
     const prevVoice = process.env.VOICE_TTS_VOICE_NAME;
     delete process.env.VOICE_TTS_LANGUAGE_CODE;
     delete process.env.VOICE_TTS_VOICE_NAME;
     try {
       const settings = loadLiveSpeechSettings();
-      assert.equal(settings.languageCode, null);
+      assert.equal(settings.languageCode, 'kn-IN');
       assert.equal(settings.voiceName, 'Kore');
       const cfg = buildLiveSpeechConfig(settings);
-      assert.equal('languageCode' in cfg, false);
+      assert.equal(cfg.languageCode, 'kn-IN');
       assert.deepEqual(
         (cfg.voiceConfig as any).prebuiltVoiceConfig.voiceName,
         'Kore'
       );
-      assert.match(describeSpeechConfig(settings), /auto/);
+      assert.match(describeSpeechConfig(settings), /kn-IN/);
     } finally {
       if (prevLang === undefined) delete process.env.VOICE_TTS_LANGUAGE_CODE;
       else process.env.VOICE_TTS_LANGUAGE_CODE = prevLang;
@@ -60,13 +60,13 @@ describe('tts speech-config', () => {
     }
   });
 
-  it('allows forcing kn-IN when explicitly configured', () => {
+  it('allows forcing en-IN when explicitly configured', () => {
     const prev = process.env.VOICE_TTS_LANGUAGE_CODE;
-    process.env.VOICE_TTS_LANGUAGE_CODE = 'kn-IN';
+    process.env.VOICE_TTS_LANGUAGE_CODE = 'en-IN';
     try {
       const settings = loadLiveSpeechSettings();
-      assert.equal(settings.languageCode, 'kn-IN');
-      assert.equal(buildLiveSpeechConfig(settings).languageCode, 'kn-IN');
+      assert.equal(settings.languageCode, 'en-IN');
+      assert.equal(buildLiveSpeechConfig(settings).languageCode, 'en-IN');
     } finally {
       if (prev === undefined) delete process.env.VOICE_TTS_LANGUAGE_CODE;
       else process.env.VOICE_TTS_LANGUAGE_CODE = prev;

@@ -12,9 +12,9 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "start:voice": "tsx server.ts",
-    "test:voice": "tsx --test src/voice/__tests__/audio-pipeline.test.ts src/voice/__tests__/kannada-style.test.ts src/voice/__tests__/customer-identity.test.ts",
+    "test:voice": "tsx --test src/voice/__tests__/audio-pipeline.test.ts src/voice/__tests__/kannada-style.test.ts src/voice/__tests__/customer-identity.test.ts src/voice/__tests__/wait-policy.test.ts src/voice/__tests__/kannada-first.test.ts",
     "test:status": "tsx --test src/lib/__tests__/lead-status.test.ts",
-    "test": "tsx --test src/voice/__tests__/audio-pipeline.test.ts src/voice/__tests__/kannada-style.test.ts src/voice/__tests__/customer-identity.test.ts src/lib/__tests__/lead-status.test.ts",
+    "test": "tsx --test src/voice/__tests__/audio-pipeline.test.ts src/voice/__tests__/kannada-style.test.ts src/voice/__tests__/customer-identity.test.ts src/voice/__tests__/wait-policy.test.ts src/voice/__tests__/kannada-first.test.ts src/lib/__tests__/lead-status.test.ts",
     "lint": "eslint"
   },
   "dependencies": {
