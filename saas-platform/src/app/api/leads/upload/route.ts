@@ -172,6 +172,9 @@ export async function POST(req: Request) {
               name,
               phone,
               campaignId,
+              status: 'pending',
+              callStatus: 'pending',
+              outcomeStatus: 'unknown',
             };
           })
           .filter(Boolean) as any[];

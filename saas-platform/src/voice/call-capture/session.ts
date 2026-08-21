@@ -63,6 +63,15 @@ export class CallCaptureSession {
     this.recorder.clearAiPending();
   }
 
+  /**
+   * Customer finished their turn — allow the next AI reply into the recording.
+   * Paired with clearAiPending() so late chunks from an interrupted turn never
+   * keep writing on the AI channel while the customer is still talking.
+   */
+  onAiRecordingAllow(): void {
+    this.recorder.allowAi();
+  }
+
   onCustomerSpeakStart(): void {
     if (this.customerSpeaking) return;
     this.customerSpeaking = true;
@@ -72,6 +81,8 @@ export class CallCaptureSession {
   onCustomerSpeakEnd(): void {
     if (!this.customerSpeaking) return;
     this.customerSpeaking = false;
+    // Next AI turn is allowed to be recorded/played again.
+    this.recorder.allowAi();
     callLog('CUSTOMER', 'CUSTOMER finished speaking');
   }
 

@@ -52,6 +52,16 @@ export async function POST(req: Request) {
   const streamUrl = `wss://${wsHost}/media-stream?${streamQuery}`;
   callLog('CALL', `CALL ANSWERED  outbound to=+${phoneDigits || customerPhone}`);
 
+  // Answer URL fires only when the callee picks up → calling → answered.
+  if (phoneDigits) {
+    try {
+      const { markAnsweredByPhone } = await import('@/lib/lead-status-transitions');
+      await markAnsweredByPhone(phoneDigits);
+    } catch (e) {
+      console.error('[plivo/outbound] Failed to mark answered:', e);
+    }
+  }
+
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" extraHeaders="${xmlEscape(headers)}">

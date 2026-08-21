@@ -27,7 +27,8 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { DashboardShell, DashboardCard, StatCard } from "@/components/dashboard/Shell";
-import { StatusBadge } from "@/components/dashboard/Sidebar";
+import { DualStatusBadges, DualStatusContainers, DualStatusFilters, CallStatusBadge, OutcomeStatusBadge } from "@/components/dashboard/DualStatus";
+import { LEAD_STATUS, normalizeLeadStatus, OUTCOME_STATUSES, OUTCOME_UNKNOWN } from "@/lib/lead-status";
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<'overview' | 'interested'>('overview');
@@ -41,7 +42,8 @@ export default function Dashboard() {
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
   const [newLead, setNewLead] = useState({ name: "", phone: "" });
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [callStatusFilter, setCallStatusFilter] = useState<string>("all");
+  const [outcomeStatusFilter, setOutcomeStatusFilter] = useState<string>("all");
   const [leadRecording, setLeadRecording] = useState<{ callId: string; hasAudio: boolean } | null>(null);
   const [activeCampaignId] = useState<string>("default-campaign");
   const [currentMonth, setCurrentMonth] = useState(new Date());
@@ -201,7 +203,10 @@ export default function Dashboard() {
             if (data.interestedLeads) {
               setInterestedLeads(data.interestedLeads);
             }
-            const callingCount = data.leads.filter((l: any) => l.status === 'calling').length;
+            const callingCount = data.leads.filter((l: any) => {
+              const s = String(l.call_status || l.callStatus || l.status || '').toLowerCase();
+              return s === 'calling' || s === 'answered';
+            }).length;
             if (callingCount === 0) clearInterval(interval);
           }
         } catch (e) {
@@ -241,21 +246,63 @@ export default function Dashboard() {
     const q = searchQuery.trim().toLowerCase();
     const qDigits = searchQuery.replace(/\D/g, "").slice(-10);
     return leads.filter((lead) => {
-      if (statusFilter !== "all" && lead.status !== statusFilter) return false;
+      const call = String(lead.call_status || lead.callStatus || lead.status || "").toLowerCase();
+      const outcome = String(lead.outcome_status || lead.outcomeStatus || OUTCOME_UNKNOWN).toLowerCase();
+      if (callStatusFilter !== "all" && normalizeLeadStatus(call) !== callStatusFilter) return false;
+      if (outcomeStatusFilter !== "all") {
+        if (outcomeStatusFilter === OUTCOME_UNKNOWN) {
+          if (outcome !== OUTCOME_UNKNOWN) return false;
+        } else if (normalizeLeadStatus(outcome) !== outcomeStatusFilter) {
+          return false;
+        }
+      }
       if (!q) return true;
       const name = (lead.name || "").toLowerCase();
       const phone = (lead.phone || "").replace(/\D/g, "");
       return name.includes(q) || (qDigits.length >= 4 && phone.includes(qDigits));
     });
-  }, [leads, searchQuery, statusFilter]);
+  }, [leads, searchQuery, callStatusFilter, outcomeStatusFilter]);
 
-  const completedCount = leads.filter((l) =>
-    ["call ended", "call completed", "completed", "visit scheduled", "scheduled visit", "follow up", "not interested", "not - interested"].includes(
-      (l.status || "").toLowerCase()
-    )
-  ).length;
+  const completedCount = leads.filter((l) => {
+    const s = normalizeLeadStatus(l.call_status || l.callStatus || l.status);
+    return (
+      s === LEAD_STATUS.CALL_ENDED ||
+      s === LEAD_STATUS.CALL_COMPLETED ||
+      s === LEAD_STATUS.NOT_ANSWERED ||
+      s === LEAD_STATUS.FAILED ||
+      (OUTCOME_STATUSES as readonly string[]).includes(
+        normalizeLeadStatus(l.outcome_status || l.outcomeStatus || ""),
+      )
+    );
+  }).length;
 
-  const callingCount = leads.filter((l) => l.status === "calling").length;
+  const callingCount = leads.filter((l) => {
+    const s = normalizeLeadStatus(l.call_status || l.callStatus || l.status);
+    return s === LEAD_STATUS.CALLING || s === LEAD_STATUS.ANSWERED;
+  }).length;
+
+  const patchLeadDualStatus = async (
+    leadId: string,
+    patch: { call_status?: string; outcome_status?: string },
+  ) => {
+    try {
+      const res = await fetch("/api/leads", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: leadId, ...patch }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.lead) {
+        setLeads((prev) => prev.map((l) => (l.id === leadId ? data.lead : l)));
+        setSelectedLead((prev: any) => (prev?.id === leadId ? data.lead : prev));
+      } else {
+        fetchAllData();
+      }
+    } catch (e) {
+      console.error("Status patch error", e);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -335,7 +382,7 @@ export default function Dashboard() {
                 label="Success Rate"
                 value={leads.length > 0 ? `${Math.round((interestedLeads.length / leads.length) * 100)}%` : "0%"}
                 icon={TrendingUp}
-                color="text-purple-500"
+                color="text-emerald-500"
                 delay={150}
               />
             </div>
@@ -344,50 +391,61 @@ export default function Dashboard() {
               <div className="lg:col-span-2 space-y-6 sm:space-y-8">
                 <DashboardCard
                   title="All Leads"
-                  subtitle={`${filteredLeads.length} shown · select rows to bulk delete`}
+                  subtitle={
+                    leads.length === 0
+                      ? "Import a spreadsheet or add a contact to get started"
+                      : `${filteredLeads.length} of ${leads.length} leads`
+                  }
                   actions={
-                    <div className="flex flex-col sm:flex-row flex-wrap gap-2 sm:gap-3 w-full">
-                      <div className="relative flex-1 min-w-0 sm:min-w-[11rem]">
-                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
-                        <input
-                          type="text"
-                          placeholder="Search name or phone…"
-                          value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
-                          className="pl-9 pr-3 py-2.5 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl text-xs outline-none focus:ring-2 focus:ring-gold/30 w-full min-h-[44px]"
+                    <div className="space-y-3">
+                      <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+                        <div className="relative flex-1 min-w-0">
+                          <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none" />
+                          <input
+                            type="text"
+                            placeholder="Search name or phone…"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            className="pl-10 pr-3 py-2.5 bg-white dark:bg-stone-950 border border-stone-200 dark:border-stone-700 rounded-xl text-sm text-stone-800 dark:text-stone-100 placeholder:text-stone-400 outline-none focus:ring-2 focus:ring-gold/25 focus:border-gold/40 w-full min-h-[42px]"
+                          />
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          {selectedLeads.length > 0 && (
+                            <button type="button" onClick={handleBulkDelete} className="px-3.5 py-2.5 bg-red-50 dark:bg-red-950/30 border border-red-200/80 dark:border-red-900/50 rounded-xl text-red-600 dark:text-red-400 flex items-center justify-center gap-2 text-xs font-semibold min-h-[42px]">
+                              <Trash2 size={14} /> Delete {selectedLeads.length}
+                            </button>
+                          )}
+                          <button type="button" onClick={() => fileInputRef.current?.click()} className="px-3.5 py-2.5 bg-white dark:bg-stone-950 border border-stone-200 dark:border-stone-700 rounded-xl text-stone-600 dark:text-stone-300 flex items-center justify-center gap-2 text-xs font-semibold min-h-[42px] hover:border-gold/40 hover:text-gold transition-colors">
+                            <FileUp size={14} /> Import
+                          </button>
+                        </div>
+                      </div>
+                      <div className="pt-3 border-t border-stone-100 dark:border-stone-800/80">
+                        <DualStatusFilters
+                          callFilter={callStatusFilter}
+                          outcomeFilter={outcomeStatusFilter}
+                          onCallFilterChange={setCallStatusFilter}
+                          onOutcomeFilterChange={setOutcomeStatusFilter}
                         />
                       </div>
-                      <select
-                        value={statusFilter}
-                        onChange={(e) => setStatusFilter(e.target.value)}
-                        className="py-2.5 px-3 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl text-xs font-semibold outline-none min-h-[44px] w-full sm:w-auto"
-                      >
-                        <option value="all">All statuses</option>
-                        <option value="calling">Calling</option>
-                        <option value="follow up">Follow up</option>
-                        <option value="visit scheduled">Visit scheduled</option>
-                        <option value="not interested">Not interested</option>
-                        <option value="call ended">Call ended</option>
-                      </select>
-                      {selectedLeads.length > 0 && (
-                        <button type="button" onClick={handleBulkDelete} className="px-3 py-2.5 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-xl text-red-500 flex items-center justify-center gap-2 font-black text-[10px] uppercase tracking-widest min-h-[44px]">
-                          <Trash2 size={14} /> Delete {selectedLeads.length}
-                        </button>
-                      )}
-                      <button type="button" onClick={() => fileInputRef.current?.click()} className="px-3 py-2.5 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl dark:text-stone-300 flex items-center justify-center gap-2 font-black text-[10px] uppercase tracking-widest min-h-[44px]">
-                        <FileUp size={14} /> Import
-                      </button>
                     </div>
                   }
                 >
                   {/* Mobile / tablet card list */}
-                  <div className="md:hidden divide-y divide-stone-100 dark:divide-stone-800">
+                  <div className="md:hidden divide-y divide-stone-100 dark:divide-stone-800/80">
                     {filteredLeads.length === 0 ? (
-                      <div className="px-4 py-16 text-center">
-                        <div className="flex flex-col items-center gap-3 opacity-40">
-                          <Database size={36} />
-                          <p className="font-bold uppercase tracking-widest text-xs">No leads match</p>
+                      <div className="px-6 py-16 text-center">
+                        <div className="mx-auto w-12 h-12 rounded-2xl bg-stone-100 dark:bg-stone-800 flex items-center justify-center mb-4">
+                          <Database size={22} className="text-stone-400" />
                         </div>
+                        <p className="text-sm font-medium text-stone-600 dark:text-stone-300">
+                          {leads.length === 0 ? "No leads yet" : "No leads match these filters"}
+                        </p>
+                        <p className="text-xs text-stone-400 mt-1.5 max-w-xs mx-auto">
+                          {leads.length === 0
+                            ? "Use Import or Add Lead to start a campaign."
+                            : "Try clearing search or status filters."}
+                        </p>
                       </div>
                     ) : (
                       filteredLeads.map((lead) => (
@@ -404,27 +462,27 @@ export default function Dashboard() {
                             className="mt-1 w-4 h-4 rounded border-stone-300 text-gold cursor-pointer shrink-0"
                           />
                           <div className="flex-1 min-w-0">
-                            <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <p className="uppercase font-black text-xs tracking-tighter dark:text-stone-200 truncate">
-                                  {lead.name || <span className="text-stone-400 normal-case font-normal italic">Unknown</span>}
+                                <p className="font-semibold text-sm dark:text-stone-100 truncate">
+                                  {lead.name || <span className="text-stone-400 font-normal italic">Unknown</span>}
                                 </p>
-                                <p className="text-stone-400 text-[11px] font-mono mt-0.5 truncate">{lead.phone}</p>
+                                <p className="text-stone-400 text-[12px] font-mono mt-0.5 truncate">{lead.phone}</p>
                               </div>
-                              <StatusBadge status={lead.status} />
+                              <DualStatusBadges lead={lead} />
                             </div>
                             <div className="mt-3 flex items-center justify-between">
                               {lead.summary ? (
-                                <span className="text-[10px] font-bold text-gold uppercase tracking-wider flex items-center gap-1">
+                                <span className="text-[11px] font-medium text-gold flex items-center gap-1">
                                   <Eye size={12} /> View report
                                 </span>
                               ) : (
-                                <span className="text-stone-300 text-[10px]">No summary</span>
+                                <span className="text-stone-400 text-[11px]">No summary</span>
                               )}
                               <button
                                 type="button"
                                 onClick={(e) => { e.stopPropagation(); handleDelete(lead.id); }}
-                                className="p-2 bg-red-50 dark:bg-red-950/20 text-red-500 rounded-xl"
+                                className="p-2 text-red-500/80 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-lg"
                                 aria-label="Delete lead"
                               >
                                 <Trash2 size={14} />
@@ -440,38 +498,49 @@ export default function Dashboard() {
                   <div className="hidden md:block overflow-x-auto dashboard-scroll">
                     <table className="w-full text-left">
                       <thead>
-                        <tr className="bg-stone-50/50 dark:bg-stone-800/30 text-stone-400 text-[10px] font-black uppercase tracking-[0.2em]">
-                          <th className="px-4 lg:px-6 py-4 w-10"></th>
-                          <th className="px-4 lg:px-6 py-4">Name</th>
-                          <th className="px-4 lg:px-6 py-4">Status</th>
-                          <th className="px-4 lg:px-6 py-4">Summary</th>
-                          <th className="px-4 lg:px-6 py-4 text-right">Action</th>
+                        <tr className="border-b border-stone-100 dark:border-stone-800 text-stone-500 dark:text-stone-400 text-[11px] font-medium">
+                          <th className="px-4 lg:px-6 py-3.5 w-10"></th>
+                          <th className="px-4 lg:px-6 py-3.5 font-medium">Name</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-medium">Call status</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-medium">Customer outcome</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-medium">Summary</th>
+                          <th className="px-4 lg:px-6 py-3.5 text-right font-medium">Action</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
+                      <tbody className="divide-y divide-stone-100 dark:divide-stone-800/80">
                         {filteredLeads.length === 0 ? (
                           <tr>
-                            <td colSpan={5} className="px-6 py-20 text-center">
-                              <div className="flex flex-col items-center gap-3 opacity-40">
-                                <Database size={40} />
-                                <p className="font-bold uppercase tracking-widest text-xs">No leads match</p>
+                            <td colSpan={6} className="px-6 py-20 text-center">
+                              <div className="mx-auto w-12 h-12 rounded-2xl bg-stone-100 dark:bg-stone-800 flex items-center justify-center mb-4">
+                                <Database size={22} className="text-stone-400" />
                               </div>
+                              <p className="text-sm font-medium text-stone-600 dark:text-stone-300">
+                                {leads.length === 0 ? "No leads yet" : "No leads match these filters"}
+                              </p>
+                              <p className="text-xs text-stone-400 mt-1.5">
+                                {leads.length === 0
+                                  ? "Use Import or Add Lead to start a campaign."
+                                  : "Try clearing search or status filters."}
+                              </p>
                             </td>
                           </tr>
                         ) : (
                           filteredLeads.map((lead) => (
-                            <tr key={lead.id} onClick={() => setSelectedLead(lead)} className="hover:bg-stone-50 dark:hover:bg-stone-800/10 transition-all group cursor-pointer">
+                            <tr key={lead.id} onClick={() => setSelectedLead(lead)} className="hover:bg-stone-50/80 dark:hover:bg-stone-800/30 transition-colors group cursor-pointer">
                               <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
                                 <input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 rounded border-stone-300 text-gold cursor-pointer" />
                               </td>
                               <td className="px-4 lg:px-6 py-4">
-                                <div className="flex flex-col">
-                                  <span className="uppercase font-black text-xs tracking-tighter dark:text-stone-200">{lead.name || <span className="text-stone-400 normal-case font-normal italic">Unknown</span>}</span>
-                                  <span className="text-stone-400 text-[10px] font-mono mt-1">{lead.phone}</span>
+                                <div className="flex flex-col min-w-0">
+                                  <span className="font-semibold text-sm dark:text-stone-100 truncate">{lead.name || <span className="text-stone-400 font-normal italic">Unknown</span>}</span>
+                                  <span className="text-stone-400 text-[12px] font-mono mt-0.5">{lead.phone}</span>
                                 </div>
                               </td>
                               <td className="px-4 lg:px-6 py-4">
-                                <StatusBadge status={lead.status} />
+                                <CallStatusBadge lead={lead} />
+                              </td>
+                              <td className="px-4 lg:px-6 py-4">
+                                <OutcomeStatusBadge lead={lead} />
                               </td>
                               <td className="px-4 lg:px-6 py-4 text-center">
                                 {lead.summary ? (
@@ -658,7 +727,7 @@ export default function Dashboard() {
                             </p>
                             <p className="text-stone-500 font-mono text-[11px] mt-0.5 truncate">{lead.phone}</p>
                           </div>
-                          <StatusBadge status={lead.status} />
+                          <DualStatusBadges lead={lead} />
                         </div>
                         <p className="text-[10px] text-stone-400 mt-2">
                           {lead.createdAt ? new Date(lead.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}
@@ -679,13 +748,14 @@ export default function Dashboard() {
                       <th className="px-4 lg:px-8 py-5">Name</th>
                       <th className="px-4 lg:px-8 py-5">Phone Number</th>
                       <th className="px-4 lg:px-8 py-5">Call Date</th>
-                      <th className="px-4 lg:px-8 py-5">Status</th>
+                      <th className="px-4 lg:px-8 py-5">Call Status</th>
+                      <th className="px-4 lg:px-8 py-5">Customer Outcome</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
                     {interestedLeads.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-8 py-24 text-center">
+                        <td colSpan={7} className="px-8 py-24 text-center">
                           <div className="flex flex-col items-center gap-4 text-stone-400">
                             <ThumbsUp size={40} className="opacity-20" />
                             <p className="font-medium">No confirmed leads yet.</p>
@@ -709,7 +779,10 @@ export default function Dashboard() {
                           <td className="px-4 lg:px-8 py-6 text-stone-600 dark:text-stone-300 font-mono text-sm">{lead.phone}</td>
                           <td className="px-4 lg:px-8 py-6 text-stone-500 text-sm">{lead.createdAt ? new Date(lead.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
                           <td className="px-4 lg:px-8 py-6">
-                            <StatusBadge status={lead.status} />
+                            <CallStatusBadge lead={lead} />
+                          </td>
+                          <td className="px-4 lg:px-8 py-6">
+                            <OutcomeStatusBadge lead={lead} />
                           </td>
                         </motion.tr>
                       ))
@@ -799,9 +872,17 @@ export default function Dashboard() {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
-                  <div>
-                    <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-2">Status</h4>
-                    <StatusBadge status={selectedLead.status} />
+                  <div className="sm:col-span-2">
+                    <DualStatusContainers
+                      lead={selectedLead}
+                      editable
+                      onCallStatusChange={(value) =>
+                        patchLeadDualStatus(selectedLead.id, { call_status: value })
+                      }
+                      onOutcomeStatusChange={(value) =>
+                        patchLeadDualStatus(selectedLead.id, { outcome_status: value })
+                      }
+                    />
                   </div>
                   {selectedLead.duration != null && (
                     <div>

@@ -1,0 +1,606 @@
+{
+  "version": 1,
+  "source": "south_indian_names_pronunciation.xlsx",
+  "names": [
+    {
+      "name": "Aarav",
+      "gender": "male",
+      "ipa": "/ˈaːɾəʋ/"
+    },
+    {
+      "name": "Aditya",
+      "gender": "male",
+      "ipa": "/aːd̪ɪt̪jə/"
+    },
+    {
+      "name": "Ajay",
+      "gender": "male",
+      "ipa": "/əd͡ʒeɪ/"
+    },
+    {
+      "name": "Akash",
+      "gender": "male",
+      "ipa": "/aːkaːʂə/"
+    },
+    {
+      "name": "Akshay",
+      "gender": "male",
+      "ipa": "/əkʂəj/"
+    },
+    {
+      "name": "Anand",
+      "gender": "male",
+      "ipa": "/aːn̪ɐn̪d̪ə/"
+    },
+    {
+      "name": "Anirudh",
+      "gender": "male",
+      "ipa": "/ən̪ɪɾud̪ʱ/"
+    },
+    {
+      "name": "Arjun",
+      "gender": "male",
+      "ipa": "/ɐɾd͡ʒun̪/"
+    },
+    {
+      "name": "Arun",
+      "gender": "male",
+      "ipa": "/ɐɾun̪/"
+    },
+    {
+      "name": "Ashok",
+      "gender": "male",
+      "ipa": "/ɐʂoːkə/"
+    },
+    {
+      "name": "Bharath",
+      "gender": "male",
+      "ipa": "/bʱɐɾɐt̪ʰ/"
+    },
+    {
+      "name": "Chetan",
+      "gender": "male",
+      "ipa": "/t͡ʃeːt̪ɐn̪/"
+    },
+    {
+      "name": "Darshan",
+      "gender": "male",
+      "ipa": "/d̪ɐɾʂɐn̪/"
+    },
+    {
+      "name": "Dhanush",
+      "gender": "male",
+      "ipa": "/d̪ʱɐn̪uʂ/"
+    },
+    {
+      "name": "Dinesh",
+      "gender": "male",
+      "ipa": "/d̪ɪneːʂ/"
+    },
+    {
+      "name": "Ganesh",
+      "gender": "male",
+      "ipa": "/ɡɐneːʂ/"
+    },
+    {
+      "name": "Gautham",
+      "gender": "male",
+      "ipa": "/ɡaʊt̪ɐm/"
+    },
+    {
+      "name": "Harish",
+      "gender": "male",
+      "ipa": "/hɐɾɪʂ/"
+    },
+    {
+      "name": "Harsha",
+      "gender": "male",
+      "ipa": "/hɐɾʂɐ/"
+    },
+    {
+      "name": "Hemanth",
+      "gender": "male",
+      "ipa": "/heːmɐn̪t̪ʰ/"
+    },
+    {
+      "name": "Karthik",
+      "gender": "male",
+      "ipa": "/kaːɾt̪ɪk/"
+    },
+    {
+      "name": "Kiran",
+      "gender": "male",
+      "ipa": "/kɪɾɐn̪/"
+    },
+    {
+      "name": "Krishna",
+      "gender": "male",
+      "ipa": "/kɾɪʂɳɐ/"
+    },
+    {
+      "name": "Lokesh",
+      "gender": "male",
+      "ipa": "/loːkeːʂ/"
+    },
+    {
+      "name": "Madan",
+      "gender": "male",
+      "ipa": "/mɐd̪ɐn̪/"
+    },
+    {
+      "name": "Mahesh",
+      "gender": "male",
+      "ipa": "/mɐheːʂ/"
+    },
+    {
+      "name": "Manjunath",
+      "gender": "male",
+      "ipa": "/mɐɲd͡ʒun̪aːt̪ʰ/"
+    },
+    {
+      "name": "Naveen",
+      "gender": "male",
+      "ipa": "/n̪ɐʋiːn̪/"
+    },
+    {
+      "name": "Nikhil",
+      "gender": "male",
+      "ipa": "/n̪ɪkʰɪl/"
+    },
+    {
+      "name": "Pradeep",
+      "gender": "male",
+      "ipa": "/pɾɐd̪iːp/"
+    },
+    {
+      "name": "Pranav",
+      "gender": "male",
+      "ipa": "/pɾɐn̪ɐʋ/"
+    },
+    {
+      "name": "Prashanth",
+      "gender": "male",
+      "ipa": "/pɾɐʂaːn̪t̪ʰ/"
+    },
+    {
+      "name": "Puneeth",
+      "gender": "male",
+      "ipa": "/puːn̪iːt̪ʰ/"
+    },
+    {
+      "name": "Rahul",
+      "gender": "male",
+      "ipa": "/ɾaːɦul/"
+    },
+    {
+      "name": "Rajesh",
+      "gender": "male",
+      "ipa": "/ɾaːd͡ʒeːʂ/"
+    },
+    {
+      "name": "Rakesh",
+      "gender": "male",
+      "ipa": "/ɾaːkeːʂ/"
+    },
+    {
+      "name": "Raghav",
+      "gender": "male",
+      "ipa": "/ɾaːɡʱɐʋ/"
+    },
+    {
+      "name": "Rohit",
+      "gender": "male",
+      "ipa": "/ɾoːɦɪt̪/"
+    },
+    {
+      "name": "Sachin",
+      "gender": "male",
+      "ipa": "/sɐt͡ʃɪn̪/"
+    },
+    {
+      "name": "Sanjay",
+      "gender": "male",
+      "ipa": "/sɐɲd͡ʒeɪ/"
+    },
+    {
+      "name": "Shashank",
+      "gender": "male",
+      "ipa": "/ʂɐʂaːŋkɐ/"
+    },
+    {
+      "name": "Shivaraj",
+      "gender": "male",
+      "ipa": "/ʂɪʋɐɾaːd͡ʒ/"
+    },
+    {
+      "name": "Siddharth",
+      "gender": "male",
+      "ipa": "/sɪd̪d̪ʱaːɾt̪ʰ/"
+    },
+    {
+      "name": "Srinivas",
+      "gender": "male",
+      "ipa": "/sɾiːn̪ɪʋaːs/"
+    },
+    {
+      "name": "Sudeep",
+      "gender": "male",
+      "ipa": "/sud̪iːp/"
+    },
+    {
+      "name": "Suraj",
+      "gender": "male",
+      "ipa": "/suɾaːd͡ʒ/"
+    },
+    {
+      "name": "Suresh",
+      "gender": "male",
+      "ipa": "/suɾeːʂ/"
+    },
+    {
+      "name": "Tarun",
+      "gender": "male",
+      "ipa": "/t̪ɐɾun̪/"
+    },
+    {
+      "name": "Uday",
+      "gender": "male",
+      "ipa": "/ud̪ɐj/"
+    },
+    {
+      "name": "Varun",
+      "gender": "male",
+      "ipa": "/ʋɐɾun̪/"
+    },
+    {
+      "name": "Venkatesh",
+      "gender": "male",
+      "ipa": "/ʋeːŋkɐt̪eːʂ/"
+    },
+    {
+      "name": "Vijay",
+      "gender": "male",
+      "ipa": "/ʋɪd͡ʒɐj/"
+    },
+    {
+      "name": "Vinay",
+      "gender": "male",
+      "ipa": "/ʋɪn̪ɐj/"
+    },
+    {
+      "name": "Vivek",
+      "gender": "male",
+      "ipa": "/ʋɪʋeːk/"
+    },
+    {
+      "name": "Yashwanth",
+      "gender": "male",
+      "ipa": "/jɐʂʋɐn̪t̪ʰ/"
+    },
+    {
+      "name": "Yuvraj",
+      "gender": "male",
+      "ipa": "/juʋɾaːd͡ʒ/"
+    },
+    {
+      "name": "Abhishek",
+      "gender": "male",
+      "ipa": "/ɐbʱɪʂeːk/"
+    },
+    {
+      "name": "Advaith",
+      "gender": "male",
+      "ipa": "/ɐd̪ʋaɪt̪ʰ/"
+    },
+    {
+      "name": "Chirag",
+      "gender": "male",
+      "ipa": "/t͡ʃɪɾaːɡ/"
+    },
+    {
+      "name": "Devraj",
+      "gender": "male",
+      "ipa": "/d̪eːʋɾaːd͡ʒ/"
+    },
+    {
+      "name": "Aishwarya",
+      "gender": "female",
+      "ipa": "/aɪʂʋɐɾjɐ/"
+    },
+    {
+      "name": "Akshara",
+      "gender": "female",
+      "ipa": "/ɐkʂɐɾɐ/"
+    },
+    {
+      "name": "Amrutha",
+      "gender": "female",
+      "ipa": "/ɐmɾʊt̪ʰɐ/"
+    },
+    {
+      "name": "Ananya",
+      "gender": "female",
+      "ipa": "/ɐn̪ɐn̪jɐ/"
+    },
+    {
+      "name": "Anitha",
+      "gender": "female",
+      "ipa": "/ɐn̪iːt̪ʰɐ/"
+    },
+    {
+      "name": "Anjali",
+      "gender": "female",
+      "ipa": "/ɐɲd͡ʒɐlɪ/"
+    },
+    {
+      "name": "Aparna",
+      "gender": "female",
+      "ipa": "/ɐpɐɾɳɐ/"
+    },
+    {
+      "name": "Archana",
+      "gender": "female",
+      "ipa": "/ɐɾt͡ʃɐn̪ɐ/"
+    },
+    {
+      "name": "Asha",
+      "gender": "female",
+      "ipa": "/aːʂɐ/"
+    },
+    {
+      "name": "Ashwini",
+      "gender": "female",
+      "ipa": "/ɐʂʋɪn̪iː/"
+    },
+    {
+      "name": "Bhavana",
+      "gender": "female",
+      "ipa": "/bʱaːʋɐn̪aː/"
+    },
+    {
+      "name": "Chandana",
+      "gender": "female",
+      "ipa": "/t͡ʃɐn̪d̪ɐn̪ɐ/"
+    },
+    {
+      "name": "Charitha",
+      "gender": "female",
+      "ipa": "/t͡ʃɐɾɪt̪ʰɐ/"
+    },
+    {
+      "name": "Deepa",
+      "gender": "female",
+      "ipa": "/d̪iːpɐ/"
+    },
+    {
+      "name": "Divya",
+      "gender": "female",
+      "ipa": "/d̪ɪʋjɐ/"
+    },
+    {
+      "name": "Harini",
+      "gender": "female",
+      "ipa": "/hɐɾɪn̪iː/"
+    },
+    {
+      "name": "Hema",
+      "gender": "female",
+      "ipa": "/heːmɐ/"
+    },
+    {
+      "name": "Ishita",
+      "gender": "female",
+      "ipa": "/ɪʂɪt̪aː/"
+    },
+    {
+      "name": "Kavya",
+      "gender": "female",
+      "ipa": "/kaːʋjɐ/"
+    },
+    {
+      "name": "Keerthi",
+      "gender": "female",
+      "ipa": "/kiːɾt̪ʰi/"
+    },
+    {
+      "name": "Lakshmi",
+      "gender": "female",
+      "ipa": "/lɐkʂmɪ/"
+    },
+    {
+      "name": "Lavanya",
+      "gender": "female",
+      "ipa": "/lɐʋɐɳjɐ/"
+    },
+    {
+      "name": "Madhuri",
+      "gender": "female",
+      "ipa": "/mɐd̪ʱuɾɪ/"
+    },
+    {
+      "name": "Mahalakshmi",
+      "gender": "female",
+      "ipa": "/mɐhaːlɐkʂmɪ/"
+    },
+    {
+      "name": "Meghana",
+      "gender": "female",
+      "ipa": "/meːɡʱɐn̪aː/"
+    },
+    {
+      "name": "Nandini",
+      "gender": "female",
+      "ipa": "/n̪ɐn̪d̪ɪn̪iː/"
+    },
+    {
+      "name": "Navya",
+      "gender": "female",
+      "ipa": "/n̪ɐʋjɐ/"
+    },
+    {
+      "name": "Neha",
+      "gender": "female",
+      "ipa": "/n̪eːɦaː/"
+    },
+    {
+      "name": "Nithya",
+      "gender": "female",
+      "ipa": "/n̪ɪt̪ʰjɐ/"
+    },
+    {
+      "name": "Pooja",
+      "gender": "female",
+      "ipa": "/puːd͡ʒaː/"
+    },
+    {
+      "name": "Priya",
+      "gender": "female",
+      "ipa": "/pɾɪjɐ/"
+    },
+    {
+      "name": "Rakshitha",
+      "gender": "female",
+      "ipa": "/ɾɐkʂɪt̪ʰɐ/"
+    },
+    {
+      "name": "Ramya",
+      "gender": "female",
+      "ipa": "/ɾɐmjɐ/"
+    },
+    {
+      "name": "Rashmi",
+      "gender": "female",
+      "ipa": "/ɾɐʂmɪ/"
+    },
+    {
+      "name": "Reshma",
+      "gender": "female",
+      "ipa": "/ɾeːʂmɐ/"
+    },
+    {
+      "name": "Sandhya",
+      "gender": "female",
+      "ipa": "/sɐn̪d̪ʱjɐ/"
+    },
+    {
+      "name": "Shalini",
+      "gender": "female",
+      "ipa": "/ʂaːlɪn̪iː/"
+    },
+    {
+      "name": "Shilpa",
+      "gender": "female",
+      "ipa": "/ʂɪlpɐ/"
+    },
+    {
+      "name": "Shruthi",
+      "gender": "female",
+      "ipa": "/ʂɾʊt̪ʰi/"
+    },
+    {
+      "name": "Sindhu",
+      "gender": "female",
+      "ipa": "/sɪn̪d̪ʱu/"
+    },
+    {
+      "name": "Sneha",
+      "gender": "female",
+      "ipa": "/sneːɦaː/"
+    },
+    {
+      "name": "Sowmya",
+      "gender": "female",
+      "ipa": "/soːmjɐ/"
+    },
+    {
+      "name": "Swathi",
+      "gender": "female",
+      "ipa": "/sʋaːt̪ʰi/"
+    },
+    {
+      "name": "Tanvi",
+      "gender": "female",
+      "ipa": "/t̪ɐn̪ʋiː/"
+    },
+    {
+      "name": "Vaishnavi",
+      "gender": "female",
+      "ipa": "/ʋaɪʂɳɐʋiː/"
+    },
+    {
+      "name": "Varsha",
+      "gender": "female",
+      "ipa": "/ʋɐɾʂɐ/"
+    },
+    {
+      "name": "Vidya",
+      "gender": "female",
+      "ipa": "/ʋɪd̪jɐ/"
+    },
+    {
+      "name": "Vinutha",
+      "gender": "female",
+      "ipa": "/ʋɪn̪uːt̪ʰɐ/"
+    },
+    {
+      "name": "Yamini",
+      "gender": "female",
+      "ipa": "/jɐmɪn̪iː/"
+    },
+    {
+      "name": "Zoya",
+      "gender": "female",
+      "ipa": "/zoːjɐ/"
+    },
+    {
+      "name": "Bhargavi",
+      "gender": "female",
+      "ipa": "/bʱaːɾɡɐʋiː/"
+    },
+    {
+      "name": "Deepthi",
+      "gender": "female",
+      "ipa": "/d̪iːpt̪ʰi/"
+    },
+    {
+      "name": "Jyothi",
+      "gender": "female",
+      "ipa": "/d͡ʒjoːt̪ʰi/"
+    },
+    {
+      "name": "Kalyani",
+      "gender": "female",
+      "ipa": "/kɐljaːɳiː/"
+    },
+    {
+      "name": "Manasa",
+      "gender": "female",
+      "ipa": "/mɐn̪ɐsɐ/"
+    },
+    {
+      "name": "Megha",
+      "gender": "female",
+      "ipa": "/meːɡʱɐ/"
+    },
+    {
+      "name": "Sahana",
+      "gender": "female",
+      "ipa": "/sɐɦɐn̪aː/"
+    },
+    {
+      "name": "Soujanya",
+      "gender": "female",
+      "ipa": "/soːd͡ʒɐn̪jɐ/"
+    },
+    {
+      "name": "Tejaswini",
+      "gender": "female",
+      "ipa": "/t̪eːd͡ʒɐsʋɪn̪iː/"
+    },
+    {
+      "name": "Trisha",
+      "gender": "female",
+      "ipa": "/t̪ɾɪʂaː/"
+    }
+  ]
+}

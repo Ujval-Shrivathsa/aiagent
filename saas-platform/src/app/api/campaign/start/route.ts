@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import twilio from 'twilio';
 import { prisma } from '@/lib/prisma';
 import { callLog } from '@/voice/call-capture/logger';
+import { LEAD_STATUS, SKIP_DIAL_STATUSES } from '@/lib/lead-status';
+import { markCalling, transitionLeadById } from '@/lib/lead-status-transitions';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,8 +14,6 @@ function toE164(phone: string): string {
   if (digits.startsWith('0') && digits.length === 11) return `+91${digits.slice(1)}`;
   return `+${digits}`;
 }
-
-const SKIP_STATUSES = ['calling', 'visit scheduled', 'scheduled visit'];
 
 export async function POST(req: Request) {
   try {
@@ -34,7 +34,7 @@ export async function POST(req: Request) {
     const leads = await prisma.lead.findMany({
       where: {
         campaignId,
-        status: { notIn: SKIP_STATUSES },
+        status: { notIn: [...SKIP_DIAL_STATUSES, 'scheduled visit'] },
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -53,10 +53,11 @@ export async function POST(req: Request) {
       const to = toE164(lead.phone);
 
       try {
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { status: 'calling' },
-        });
+        const marked = await markCalling(lead.id);
+        if (!marked.ok && marked.count === 0) {
+          results.push({ id: lead.id, phone: to, ok: false, error: 'status not dialable' });
+          continue;
+        }
 
         if (provider === 'plivo') {
           const authId = process.env.PLIVO_AUTH_ID;
@@ -117,10 +118,7 @@ export async function POST(req: Request) {
       } catch (err: any) {
         const message = err?.message || String(err);
         console.error(`[campaign/start] Failed ${to}: ${message}`);
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { status: 'failed' },
-        }).catch(() => {});
+        await transitionLeadById(lead.id, LEAD_STATUS.FAILED).catch(() => {});
         results.push({ id: lead.id, phone: to, ok: false, error: message });
       }
     }

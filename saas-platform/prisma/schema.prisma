@@ -37,7 +37,9 @@ model Lead {
   id          String   @id @default(cuid())
   name        String
   phone       String
-  status      String   @default("pending") // pending, calling, answered, failed, completed, Scheduled visit, Follow up, Not interested
+  status      String   @default("pending") // legacy composite: call lifecycle OR outcome (kept for dial/skip compat)
+  callStatus  String   @default("pending") // pending|calling|answered|not answered|call completed|call ended|failed
+  outcomeStatus String @default("unknown") // unknown|interested|follow up|visit scheduled|not interested
   duration    String?
   summary     String?
   interested  Boolean?

@@ -52,15 +52,15 @@ export function DashboardCard({
 }) {
   return (
     <div
-      className={`bg-white dark:bg-stone-900 rounded-2xl sm:rounded-[2rem] border border-stone-200 dark:border-stone-800 overflow-hidden shadow-lg ${className}`}
+      className={`bg-white dark:bg-stone-900 rounded-2xl sm:rounded-[1.75rem] border border-stone-200/90 dark:border-stone-800 overflow-hidden shadow-sm dark:shadow-none ${className}`}
     >
       {(title || actions) && (
-        <div className="p-4 sm:p-6 lg:p-8 border-b border-stone-100 dark:border-stone-800 flex flex-col gap-3 sm:gap-4 bg-stone-50/40 dark:bg-stone-800/20">
+        <div className="p-4 sm:p-5 lg:p-6 border-b border-stone-100 dark:border-stone-800/80 flex flex-col gap-4">
           <div className="min-w-0">
             {title && (
-              <h3 className="text-lg sm:text-xl lg:text-2xl font-serif font-bold dark:text-white">{title}</h3>
+              <h3 className="text-lg sm:text-xl font-serif font-bold dark:text-white tracking-tight">{title}</h3>
             )}
-            {subtitle && <p className="text-xs sm:text-sm text-stone-500 mt-1">{subtitle}</p>}
+            {subtitle && <p className="text-sm text-stone-500 dark:text-stone-400 mt-1">{subtitle}</p>}
           </div>
           {actions && <div className="w-full min-w-0">{actions}</div>}
         </div>

@@ -1,16 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   Mic,
-  LogOut,
   PhoneCall,
   Menu,
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { STATUS_BADGE_STYLES, normalizeLeadStatus } from "@/lib/lead-status";
 
 const NAV = [
   { href: "/dashboard", icon: LayoutDashboard, label: "Overview", exact: true },
@@ -27,7 +27,6 @@ function SidebarNav({
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
-  const router = useRouter();
 
   const isActive = (href: string, exact?: boolean) =>
     exact ? pathname === href : pathname.startsWith(href);
@@ -86,17 +85,6 @@ function SidebarNav({
           </div>
           Plivo · Gemini Live
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            onNavigate?.();
-            router.push("/auth/login");
-          }}
-          className="w-full flex items-center gap-3 px-4 py-3.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-2xl transition-all text-sm font-semibold min-h-[48px]"
-        >
-          <LogOut size={18} />
-          Logout
-        </button>
       </div>
     </>
   );
@@ -186,26 +174,14 @@ export function DashboardSidebar({
   );
 }
 
-export function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status, label }: { status: string; label?: string }) {
   const s = (status || "pending").toLowerCase();
-  const styles: Record<string, string> = {
-    calling: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 animate-pulse",
-    "visit scheduled": "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-    "scheduled visit": "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-    "follow up": "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-    "not interested": "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
-    "not - interested": "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
-    "call ended": "bg-stone-200 text-stone-700 dark:bg-stone-700 dark:text-stone-300",
-    "call completed": "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-    completed: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-    failed: "bg-red-100 text-red-600 dark:bg-red-900/20 dark:text-red-400",
-    answered: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
-    pending: "bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400",
-  };
-  const cls = styles[s] || styles.pending;
+  const normalized = s === "unknown" ? "unknown" : normalizeLeadStatus(s);
+  const cls = STATUS_BADGE_STYLES[s] || STATUS_BADGE_STYLES[normalized] || STATUS_BADGE_STYLES.pending;
   return (
-    <span className={`px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest whitespace-nowrap ${cls}`}>
-      {status || "pending"}
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold tracking-tight whitespace-nowrap ${cls}`}>
+      <span className="w-1.5 h-1.5 rounded-full bg-current opacity-70 shrink-0" />
+      {label || normalized}
     </span>
   );
 }

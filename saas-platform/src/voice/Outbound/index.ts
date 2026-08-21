@@ -6,6 +6,7 @@ export {
   GREETING_NO_NAME,
   GREETING,
   getGreeting,
+  getOutboundGreetingInstruction,
   REDIRECT_VARIANTS,
   UNKNOWN_DETAIL_VARIANTS,
   UNKNOWN_AREA_VARIANTS,

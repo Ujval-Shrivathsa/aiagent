@@ -2,10 +2,28 @@ import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { WebSocket } from 'ws';
 import { prisma } from '../lib/prisma';
 import { fetchLiveSiteData, formatLiveDataForPrompt } from '../lib/live-site-data';
-import { buildInboundSystemInstruction, getGreeting as getInboundGreeting } from '../voice/Inbound/index';
-import { buildOutboundSystemInstruction, getGreeting as getOutboundGreeting } from '../voice/Outbound/index';
+import { buildInboundSystemInstruction, getGreeting as getInboundGreeting, getInboundGreetingInstruction } from '../voice/Inbound/index';
+import { buildOutboundSystemInstruction, getGreeting as getOutboundGreeting, getOutboundGreetingInstruction } from '../voice/Outbound/index';
+import { OUTBOUND_OPENING_QUESTION_KN } from '../voice/kannada-style';
 import { CallCaptureSession } from '../voice/call-capture/session';
 import { callLog } from '../voice/call-capture/logger';
+import { loadAudioPipelineConfig } from '../voice/audio-pipeline-config';
+import { buildLiveSpeechConfig, describeSpeechConfig, loadLiveSpeechSettings } from '../voice/tts/speech-config';
+import { detectScriptLanguage } from '../voice/language/script-detect';
+import { evaluateBargeIn, evaluateLocalSpeech } from '../voice/turn-policy';
+import { LEAD_STATUS, outcomeFromFlags } from '../lib/lead-status';
+import {
+  markAnsweredByPhone,
+  markCallCompletedByPhone,
+  markOutcomeByPhone,
+  transitionLeadsByPhone,
+} from '../lib/lead-status-transitions';
+import {
+  emptyIdentity,
+  formatIdentityContext,
+  resolveCustomerIdentity,
+  type CustomerIdentity,
+} from '../voice/customer-identity';
 
 function parseHeaderBag(raw: any): Record<string, string> {
   const out: Record<string, string> = {};
@@ -150,13 +168,30 @@ const SET_FOLLOW_UP_TOOL = {
 
 const SET_NAME_TOOL = {
   name: "setName",
-  description: "Update the customer's name in the system once they provide it.",
+  description:
+    "Update the customer's name and optional form of address once they provide it or correct it. " +
+    "Pass the exact name they said (do not substitute a dictionary name). " +
+    "If they said Mr/Mrs/Ms/Dr/Prof/Er/CA, pass title. " +
+    "If they say they are married / prefer Mrs., set maritalStatus=married. " +
+    "If they say 'just call me <name>', set preferFirstNameOnly=true.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       name: {
         type: Type.STRING,
-        description: "The full name of the customer.",
+        description: "The customer's actual name as spoken (may include a title prefix).",
+      },
+      title: {
+        type: Type.STRING,
+        description: "Optional explicit title: Mr., Mrs., Ms., Dr., Prof., Er., or CA.",
+      },
+      maritalStatus: {
+        type: Type.STRING,
+        description: "Optional: married | unmarried | unknown. Use married only when stated or CRM-confirmed.",
+      },
+      preferFirstNameOnly: {
+        type: Type.BOOLEAN,
+        description: "True when the customer asks to be addressed by first name only (no Mr/Mrs/Ms).",
       },
     },
     required: ["name"],
@@ -204,14 +239,8 @@ function pcmToMuLaw(sample: number) {
   return res & 0xFF;
 }
 
-// Cleaned-up, deduplicated lead status values used throughout this file.
-const STATUS = {
-  VISIT_SCHEDULED: 'visit scheduled',
-  FOLLOW_UP: 'follow up',
-  NOT_INTERESTED: 'not interested', // was 'not - interested' — inconsistent formatting vs the others, fixed here. Double check nothing downstream (dashboards/filters) still expects the old string before deploying this.
-  CALL_COMPLETED: 'call completed', // neutral default (see NOT_INTERESTED_TOOL comment above)
-};
-const PROTECTED_STATUSES = [STATUS.VISIT_SCHEDULED, STATUS.FOLLOW_UP];
+// Lead call lifecycle — see src/lib/lead-status.ts
+const STATUS = LEAD_STATUS;
 
 export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
@@ -234,12 +263,20 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let fullTranscription: string = "";
   let isFirstResponse = true;
   let isOutboundCall = false;
+  /** Single canonical name/gender/salutation object for this call. */
+  let customerIdentity: CustomerIdentity = emptyIdentity();
   let outboundOpeningRepeatDone = false;
   let outboundGreetingSpoken = false;
   let outboundOpeningWaitTimer: NodeJS.Timeout | null = null;
   const OPENING_WAIT_MS = 4000;
-  const OPENING_QUESTION = "Are you looking for a site in Mysuru?";
-  const inputGain = 2.5;
+  const OPENING_QUESTION = OUTBOUND_OPENING_QUESTION_KN;
+  const audioCfg = loadAudioPipelineConfig();
+  const ttsSettings = loadLiveSpeechSettings();
+  const inputGain = audioCfg.inputGain;
+  const voiceDebug = audioCfg.voiceDebug;
+  const vadLog = (msg: string) => {
+    if (voiceDebug) console.log(`[VAD] ${msg}`);
+  };
 
   // --- Live input noise suppression: lightweight per-packet DSP on the
   //     EXISTING telephony stream (Plivo mu-law 8kHz mono). No ML model, no
@@ -248,12 +285,10 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   //     1) Biquad high-pass @100Hz (Q=0.707): removes mains hum (50Hz +
   //        harmonics), handling rumble, and line thump far better than the old
   //        6Hz DC blocker, while leaving telephony speech (300–3400Hz) intact.
-  //     2) Adaptive noise-floor gate: instead of fixed 320/240 RMS thresholds
-  //        (wrong for both quiet callers and noisy lines), the background
-  //        level is tracked continuously and the gate thresholds ride ~2.2x
-  //        above it. Quiet callers keep a low threshold; fan/AC/traffic lines
-  //        get a proportionally higher one. Closed = duck to 25%, never mute,
-  //        so speech onsets still reach Gemini's own VAD. ---
+  //     2) Adaptive noise-floor gate: thresholds ride above the measured floor
+  //        so quiet callers keep a low open threshold; fan/AC/TV lines get a
+  //        higher one. Closed = duck (never hard-mute) so quiet Kannada
+  //        onsets still reach Gemini. ---
   const HP_F0 = 100, HP_Q = 0.7071, HP_FS = 8000;
   const hpW = 2 * Math.PI * HP_F0 / HP_FS;
   const hpAlpha = Math.sin(hpW) / (2 * HP_Q);
@@ -266,14 +301,19 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let hpX1 = 0, hpX2 = 0, hpY1 = 0, hpY2 = 0;
 
   let noiseFloorRms = 150;       // per-call estimate of the line's background level
-  const NOISE_FLOOR_MIN = 40, NOISE_FLOOR_MAX = 900;
+  const NOISE_FLOOR_MIN = audioCfg.noiseFloorMin;
+  const NOISE_FLOOR_MAX = audioCfg.noiseFloorMax;
   let gateOpen = false;
   let gateBelowSince: number | null = null;
-  const GATE_OPEN_MIN_RMS = 260;   // floor so quiet callers are never gated out
-  const GATE_OPEN_MAX_RMS = 1200;  // cap so shouting isn't required on noisy lines
-  const GATE_RELEASE_MS = 300;     // ride through short intra-sentence pauses
-  const GATE_FLOOR = 0.25;         // duck ~12dB when closed, never hard-mute
+  const GATE_OPEN_MIN_RMS = audioCfg.gateOpenMinRms;
+  const GATE_OPEN_MAX_RMS = audioCfg.gateOpenMaxRms;
+  const GATE_FLOOR_MULT = audioCfg.gateFloorMult;
+  const GATE_CLOSE_RATIO = audioCfg.gateCloseRatio;
+  const GATE_RELEASE_MS = audioCfg.gateReleaseMs;
+  const GATE_FLOOR = audioCfg.gateFloor;
   let lastUpsampleSample = 0;      // continuity for linear-interpolation upsampling
+  let lastGateLogAt = 0;
+  let lastNoiseMetricLogAt = 0;
 
   // Preallocated scratch buffers — the media handler runs every ~20ms, so we
   // avoid per-packet allocations (Plivo packets are 160 bytes; 3200 samples =
@@ -282,17 +322,19 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const scratchCleaned = new Int16Array(SCRATCH_SAMPLES);
   const scratchPcm16k = Buffer.allocUnsafe(SCRATCH_SAMPLES * 4);
 
-  // Local barge-in: how long the audio already queued at Plivo will keep
-  // playing on the phone. While that clock is running and the customer talks
-  // loudly + sustained, we clear playback immediately instead of waiting
-  // ~0.5s for Gemini's own `interrupted` round trip. The trigger threshold is
-  // adaptive (>= 5x the line's noise floor, min 900 RMS) so background noise
-  // can't clip the AI but genuine speech triggers fast.
+  // Local barge-in: require sustained speech well above the noise floor (and
+  // usually an open gate) so TV blips / keyboard clicks don't clear AI audio.
   let aiPlaybackEndsAt = 0;
   let bargeInStartedAt: number | null = null;
-  const BARGE_IN_MIN_RMS = 900;
-  const BARGE_IN_FLOOR_MULT = 5;
-  const BARGE_IN_MIN_MS = 140; // sustained voice, not a cough/thud
+  const BARGE_IN_MIN_RMS = audioCfg.bargeInMinRms;
+  const BARGE_IN_FLOOR_MULT = audioCfg.bargeInFloorMult;
+  const BARGE_IN_MIN_MS = audioCfg.bargeInMinMs;
+  const BARGE_IN_REQUIRE_GATE = audioCfg.bargeInRequireGateOpen;
+  // After barge-in / Gemini `interrupted`, keep dropping model audio until the
+  // customer finishes speaking. Without this, late TTS chunks for the aborted
+  // turn are still sent to Plivo AND the stereo recorder — AI talks over the
+  // customer in the WAV for the rest of that overlap (and can skew sync).
+  let suppressAiOutput = false;
 
   // Dev-only latency instrumentation (set LATENCY_DEBUG=1). Marks:
   // AUDIO_IN (speech start) → GEMINI_AUDIO_SENT (turn committed) →
@@ -323,7 +365,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const looksLikeOpeningEcho = (text: string) => {
     const t = text.trim().toLowerCase();
     if (t.length < 4) return true;
-    return /this is bhoomi|alliance square|looking for a site in mysuru|are you looking for a site/.test(t);
+    return /this is bhoomi|alliance square|looking for a site in mysuru|are you looking for a site|ನೋಡ್ತಿದ್ದೀರಾ|ಮಾತಾಡ್ತಿದ್ದೀನಿ|enquiry ಮಾಡಿದ್ದೀರಲ್ಲ|ನಮಸ್ಕಾರ ಸರ್/.test(t);
   };
 
   let pendingLiveData: Awaited<ReturnType<typeof fetchLiveSiteData>> | null = null;
@@ -407,7 +449,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       }
       outboundOpeningRepeatDone = true;
       console.log("[GEMINI] No reply ~4s after opening question — repeating once");
-      const repeat = `The customer did not answer. Speak this question out loud once, with audio, then wait. Exact words only — do not add a greeting or a second question: ${OPENING_QUESTION}`;
+      const repeat = `The customer did not answer. Speak this ONE question calmly in simple Kannada, then STOP and listen. Exact words only — no greeting, no second question: ${OPENING_QUESTION}`;
       try {
         if (typeof geminiSession.sendClientContent === "function") {
           geminiSession.sendClientContent({
@@ -437,6 +479,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   const sendPcmToTwilio = (pcm: Buffer, flush = false) => {
     if (!streamSid) return;
+    // Drop late/aborted-turn audio so the phone and the recording stay aligned.
+    if (suppressAiOutput) {
+      outputLeftover = Buffer.alloc(0);
+      return;
+    }
     const samplesPerOut = Math.max(1, Math.round(geminiPlaybackRate / 8000));
     const groupBytes = samplesPerOut * 2;
     let combined = outputLeftover.length > 0 ? Buffer.concat([outputLeftover, pcm]) : pcm;
@@ -486,6 +533,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const clearPlayback = () => {
+    suppressAiOutput = true;
     capture?.onAiPlaybackCleared();
     outputLeftover = Buffer.alloc(0);
     aiPlaybackEndsAt = 0;
@@ -495,6 +543,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     } else {
       ws.send(JSON.stringify({ event: "clear", streamSid }));
     }
+  };
+
+  const allowAiOutput = () => {
+    suppressAiOutput = false;
+    capture?.onAiRecordingAllow();
   };
 
   const hangupStream = () => {
@@ -522,10 +575,12 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   // single 'media' WebSocket event (~50x/second while the customer is
   // talking), which is unnecessary timer churn on the event loop during
   // exactly the part of the call where responsiveness matters most.
-  const VAD_ENERGY_THRESHOLD = 500;
-  // 450 → 350ms: commit the customer's turn to Gemini sooner after they stop
-  // (still above Gemini's own 250ms AAD window, so no double-trigger churn).
-  const VAD_SILENCE_MS = 350;
+  // Local VAD is for capture/logging and re-arming AI after barge-in — Gemini
+  // AAD owns turn-end. Silence window is intentionally longer than AAD so we
+  // don't declare "customer finished" on a breath.
+  const VAD_ENERGY_MIN_RMS = audioCfg.vadEnergyMinRms;
+  const VAD_ENERGY_FLOOR_MULT = audioCfg.vadEnergyFloorMult;
+  const VAD_SILENCE_MS = audioCfg.vadSilenceMs;
   let vadIsSpeaking = false;
   let vadSilenceStartedAt: number | null = null;
 
@@ -586,18 +641,36 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
         const blacklistedNames = ['customer', 'contact', 'lead', 'unknown', 'null', 'undefined', 'unnamed', ''];
         const hasValidName = rawName && !blacklistedNames.includes(rawName.toLowerCase().trim());
         const customerName = hasValidName ? rawName.trim() : '';
+        customerIdentity = customerName
+          ? resolveCustomerIdentity({
+              rawName: customerName,
+              source: isOutbound ? 'campaign' : 'crm',
+            })
+          : emptyIdentity();
         const rawPhone = customParams.customerPhone || '';
         const phoneDigits = String(rawPhone).replace(/\D/g, '');
         customerPhone = phoneDigits
           ? (phoneDigits.length === 10 ? `+91${phoneDigits}` : `+${phoneDigits}`)
           : null;
 
-        console.log(`[WS] Stream started: ${streamSid} | Name: ${customerName || 'N/A'} | Phone: ${customerPhone || 'N/A'} | Outbound: ${isOutboundCall} | Sink: ${audioSink}`);
+        console.log(
+          `[WS] Stream started: ${streamSid} | Name: ${customerIdentity.customer_name_normalized || 'N/A'} | ` +
+            `Gender: ${customerIdentity.customer_gender}@${customerIdentity.customer_gender_confidence.toFixed(2)} | ` +
+            `Salutation: ${customerIdentity.customer_salutation || 'none'} | ` +
+            `Spoken: ${customerIdentity.spoken_address || 'n/a'} | Phone: ${customerPhone || 'N/A'} | Outbound: ${isOutboundCall} | Sink: ${audioSink}`,
+        );
         capture = new CallCaptureSession({
           streamSid,
           phone: customerPhone,
           outbound: isOutboundCall,
         });
+
+        // Media stream connected ⇒ callee answered (or inbound picked up).
+        if (customerPhone) {
+          void markAnsweredByPhone(customerPhone)
+            .then((r) => console.log(`[DB] Stream start → answered updated=${r.count}`))
+            .catch((e) => console.error('[DB] mark answered failed:', e));
+        }
 
         const currentDateStr = new Date().toLocaleDateString('en-IN');
         const activeSystemInstruction = isOutboundCall
@@ -624,20 +697,24 @@ TOOL USAGE NOTES:
 - If they explicitly ask for a callback later (busy/driving), follow the BUSY / DRIVING / CALL BACK LATER script, then call endCall.
 - endCall ONLY when the customer clearly wants to hang up (bye / goodbye / thank you for your time / thanks that's all / I'm done / that's all I needed / you can end the call / clear equivalent in any language), OR after finishing a busy/callback-later script they requested. NEVER call endCall because a few minutes have passed, for silence, pauses, "okay"/"hmm", topic changes, or incomplete answers. No arbitrary call-duration cutoff.
 
-LANGUAGE REMINDER: Reply in whatever Indian language the customer is using (Hindi, Kannada, Tamil, Telugu, Malayalam, Marathi, Gujarati, Punjabi, Bengali, etc., or mixed). Never refuse a language; never stay in English if they switched away from English.
-KANNADA REMINDER: Natural everyday Mysuru Kannada — polite, friendly, respectful, professional (not rude/abrupt, not formal textbook). Native pronunciation: correct Kannada consonants/vowels, natural intonation — not English-accented Kannada. Only the five PDF projects. If they only ask office hours: 10–7 (site visits 10–5:30 if relevant) — never 11–7; never push scheduling unless they asked to book.
+LANGUAGE REMINDER: Prefer simple professional Kannada for Mysuru/Karnataka callers. Generate Kannada directly — never English-then-translate. Match the customer's language/mix; never refuse a language.
+KANNADA REMINDER: Calm 30-year-old Karnataka sales professional. Short everyday Mysuru Kannada (not formal/textbook). One thought per sentence. Natural site/budget/loan English loanwords OK. No excitement or drama. After a question, STOP and listen. Only the five PDF projects. Office 10–7; site visits 10–5:30 — never 11–7; never push scheduling unless they asked to book.
 PROJECT FACTS REMINDER: CNM Apex = South-facing only at ₹5,450/sqft (not North). Booking amount = ₹59,000. Agreement amount / maintenance cost-duration → Sales Manager callback. Do not invent non-PDF projects.
-LISTENING REMINDER: Never speak over the customer. If interrupted, stop immediately. Start speaking as soon as they have finished — do not wait for a long pause. Keep replies short so the first words start quickly.
+LISTENING REMINDER: Never speak over the customer. Allow natural pauses and hesitations. If they interrupt, stop immediately. First 30s: intro + why calling + one interest question + WAIT. Max one question per turn.
 ${isOutboundCall ? `PRONUNCIATION: Hunsur is hun-sur / hun-soor ([hˈʌn.sɜː] or [hʊn.suːr]) — never hoo-na-soo-ru, never "Hoo-n-sur".
 SPEAK: Always answer with spoken audio. Never stay silent after the customer finishes. Keep the first spoken sentence short so playback starts immediately.
 QUALIFY: After interest = yes → purpose (invest vs construct) → budget → only matching projects. Do not dump unrelated layouts. Sridevi landmarks include Near Upcoming Electronic City. UK Square ~1 year / under construction ONLY if they specifically ask whether the project is ready. UK Square site sizes are not in the spec — never 50×80 / 50*80; do not invent a size.
 ` : ''}
 
 CURRENT DATE: ${currentDateStr}
+
+${formatIdentityContext(customerIdentity)}
 `;
 
         let localSession: any;
         try {
+          console.log(`[VOICE] Audio pipeline: gain=${inputGain} gateMin=${GATE_OPEN_MIN_RMS} gateRel=${GATE_RELEASE_MS}ms bargeMinRms=${BARGE_IN_MIN_RMS} bargeHold=${BARGE_IN_MIN_MS}ms vadSilence=${VAD_SILENCE_MS}ms aadSilence=${audioCfg.aadSilenceDurationMs}ms aadEnd=${audioCfg.aadEndSensitivity} aadStart=${audioCfg.aadStartSensitivity}`);
+          console.log(`[VOICE] TTS: ${describeSpeechConfig(ttsSettings)}`);
           localSession = await ai.live.connect({
             model: "gemini-3.1-flash-live-preview",
             config: {
@@ -646,20 +723,17 @@ CURRENT DATE: ${currentDateStr}
               realtimeInputConfig: {
                 automaticActivityDetection: {
                   disabled: false,
-                  // 400 → 250ms: Gemini starts replying ~150ms sooner after the
-                  // customer stops talking. END_SENSITIVITY_HIGH detects the end
-                  // of speech faster; start sensitivity is left at default so
-                  // background noise doesn't cause false barge-in interruptions.
-                  endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-                  silenceDurationMs: 250,
-                  prefixPaddingMs: 20,
+                  // Tolerate breaths/hesitations: longer silence + low end/start
+                  // sensitivity. Tunable via VOICE_AAD_* env vars.
+                  endOfSpeechSensitivity: audioCfg.aadEndSensitivity,
+                  startOfSpeechSensitivity: audioCfg.aadStartSensitivity,
+                  silenceDurationMs: audioCfg.aadSilenceDurationMs,
+                  prefixPaddingMs: audioCfg.aadPrefixPaddingMs,
                 } as any,
               },
-              speechConfig: {
-                // Indian English voice (en-IN). Female consultant timbre via Kore.
-                languageCode: "en-IN",
-                voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } }
-              },
+              // Native-audio Live: omit languageCode by default so Kannada (kn)
+              // and other Indic languages auto-select. See tts/speech-config.ts.
+              speechConfig: buildLiveSpeechConfig(ttsSettings) as any,
               systemInstruction: `${activeSystemInstruction}\n${runtimeInstructionBase}`,
               tools: [
                 { functionDeclarations: [END_CALL_TOOL, BOOK_APPOINTMENT_TOOL, SET_NAME_TOOL, SET_FOLLOW_UP_TOOL, NOT_INTERESTED_TOOL] },
@@ -681,7 +755,7 @@ CURRENT DATE: ${currentDateStr}
               },
               onmessage: async (response: any) => {
                 if (response.serverContent?.interrupted) {
-                  console.log("[GEMINI] Turn interrupted — clearing playback, listening...");
+                  console.log(`[GEMINI] Turn interrupted — clearing playback (aiPlaying=${Date.now() < aiPlaybackEndsAt} vadSpeaking=${vadIsSpeaking} gateOpen=${gateOpen} floor=${noiseFloorRms.toFixed(0)})`);
                   capture?.onAiSpeakEnd();
                   clearPlayback();
                   outputLeftover = Buffer.alloc(0);
@@ -698,6 +772,11 @@ CURRENT DATE: ${currentDateStr}
                   sendPcmToTwilio(Buffer.alloc(0), true);
                   capture?.onAiTurnComplete();
                   capture?.onAiSpeakEnd();
+                  // If the aborted turn finished after barge-in and the customer
+                  // is already quiet, re-arm output for the next reply.
+                  if (suppressAiOutput && !vadIsSpeaking) {
+                    allowAiOutput();
+                  }
                   if (isOutboundCall && !outboundOpeningRepeatDone) {
                     if (!outboundGreetingSpoken) {
                       outboundGreetingSpoken = true;
@@ -755,12 +834,18 @@ CURRENT DATE: ${currentDateStr}
                 const outTx = response.serverContent?.outputTranscription?.text
                   || response.serverContent?.outputAudioTranscription?.text;
                 if (outTx) {
+                  const lang = detectScriptLanguage(outTx);
+                  if (voiceDebug || lang === 'kn' || lang === 'mixed') {
+                    console.log(`[LANG] AI transcript lang=${lang} tts=${describeSpeechConfig(ttsSettings)} text="${String(outTx).slice(0, 80)}"`);
+                  }
                   capture?.onAiTranscriptChunk(outTx);
                 }
 
                 if (response.serverContent?.inputTranscription?.text) {
                   resetSilenceTimer();
                   const userText = response.serverContent.inputTranscription.text;
+                  const userLang = detectScriptLanguage(userText);
+                  console.log(`[LANG] Customer STT lang=${userLang} text="${String(userText).slice(0, 100)}"`);
                   customerAnsweredOpening(userText);
                   if (!looksLikeOpeningEcho(userText)) {
                     repromptCount = 0; // customer spoke — clear soft-reprompt streak
@@ -782,35 +867,26 @@ CURRENT DATE: ${currentDateStr}
 
                   if (isFirstResponse && customerPhone) {
                       isFirstResponse = false;
-                      const cleanPhone = customerPhone.replace(/\D/g, '');
                       const lowerText = userText.toLowerCase();
 
                       const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'plot', 'mysore', 'looking', 'haan', 'han', 'beku', 'vadu', 'sari'];
                       const notInterestedKeywords = ['no', 'not interested', 'stop', 'don\'t', 'busy', 'wrong number', 'nahi', 'beda', 'vaddu', 'alla'];
 
-                      let status: string = 'answered';
+                      // During the live call stay on `answered`. Only set the
+                      // interested flag / lastResponse; outcomes are applied by
+                      // tools or after endCall → call completed.
                       let interested: boolean | null = null;
-
                       if (interestedKeywords.some(kw => lowerText.includes(kw))) {
-                        status = STATUS.FOLLOW_UP;
                         interested = true;
                       } else if (notInterestedKeywords.some(kw => lowerText.includes(kw))) {
-                        status = STATUS.NOT_INTERESTED;
                         interested = false;
                       }
 
                       try {
-                        void prisma.lead.updateMany({
-                          where: {
-                            phone: { contains: cleanPhone.slice(-10) },
-                            status: { notIn: PROTECTED_STATUSES }
-                          },
-                          data: {
-                            status,
-                            interested,
-                            lastResponse: userText
-                          }
-                        }).then(() => console.log(`[DB] First response tracked for ${customerPhone}: ${status}`))
+                        void transitionLeadsByPhone(customerPhone, STATUS.ANSWERED, {
+                          interested,
+                          lastResponse: userText,
+                        }).then((r) => console.log(`[DB] First response tracked for ${customerPhone}: answered (interested=${interested}) rows=${r.count}`))
                           .catch((e) => console.error("[DB Error] Failed to track first response:", e));
                       } catch (e) {
                         console.error("[DB Error] Failed to track first response:", e);
@@ -838,25 +914,26 @@ CURRENT DATE: ${currentDateStr}
                       }
 
                       if (customerPhone) {
-                        const cleanPhone = customerPhone.replace(/\D/g, '');
                         try {
-                          // FIX (data integrity): previously this unconditionally set
-                          // status: 'not - interested' for any lead not already
-                          // visit-scheduled/follow-up — silently mislabeling every
-                          // customer who got useful info and hung up without an
-                          // explicit outcome. Now endCall sets a neutral
-                          // "call completed" status, and only the notInterested
-                          // tool (below) marks a lead as not interested.
-                          await prisma.lead.updateMany({
+                          // Conversation finished → call completed, then promote
+                          // to a known outcome from the interested flag when set.
+                          const completed = await markCallCompletedByPhone(customerPhone);
+                          console.log(`[DB] Marked call completed for ${customerPhone} rows=${completed.count}`);
+                          const tail = customerPhone.replace(/\D/g, '').slice(-10);
+                          const leads = await prisma.lead.findMany({
                             where: {
-                              phone: { contains: cleanPhone.slice(-10) },
-                              status: { notIn: [...PROTECTED_STATUSES, STATUS.NOT_INTERESTED] }
-                            },
-                            data: {
+                              phone: { contains: tail },
                               status: STATUS.CALL_COMPLETED,
-                            }
+                            },
                           });
-                          console.log(`[DB] Marked call completed for ${customerPhone} (if not already scheduled/followed-up/not-interested)`);
+                          for (const lead of leads) {
+                            const outcome = outcomeFromFlags({ interested: lead.interested });
+                            if (!outcome) continue;
+                            const r = await markOutcomeByPhone(customerPhone, outcome, {
+                              interested: lead.interested,
+                            });
+                            console.log(`[DB] Promoted ${customerPhone} call completed → ${outcome} rows=${r.count}`);
+                          }
                         } catch (e) {
                           console.error("[DB Error] Failed to mark call completed:", e);
                         }
@@ -869,40 +946,17 @@ CURRENT DATE: ${currentDateStr}
                     if (call.name === "notInterested") {
                       console.log(`[GEMINI] Customer marked not interested`);
                       if (customerPhone) {
-                        const cleanPhone = customerPhone.replace(/\D/g, '');
                         try {
-                          await prisma.lead.updateMany({
-                            where: {
-                              phone: { contains: cleanPhone.slice(-10) },
-                              // FIX (data integrity bug): was
-                              // `status: { notIn: PROTECTED_STATUSES }`, which
-                              // includes FOLLOW_UP. FOLLOW_UP can be set purely
-                              // by the crude first-response keyword heuristic
-                              // above (a loose match on "yeah"/"okay"/etc. on
-                              // the customer's very first utterance) — that's
-                              // not an explicit signal and shouldn't be able to
-                              // block an explicit, later "no, not interested"
-                              // from the same call. Only a confirmed booking
-                              // (VISIT_SCHEDULED) is a strong enough signal to
-                              // survive an explicit notInterested tool call.
-                              status: { notIn: [STATUS.VISIT_SCHEDULED] }
-                            },
-                            data: { status: STATUS.NOT_INTERESTED, interested: false }
+                          const r = await markOutcomeByPhone(customerPhone, STATUS.NOT_INTERESTED, {
+                            interested: false,
                           });
-                          console.log(`[DB] Not-interested set for ${customerPhone}`);
+                          console.log(`[DB] Not-interested set for ${customerPhone} rows=${r.count}`);
                           toolResponses.push({ name: call.name, response: { success: true }, id: call.id });
                         } catch (e) {
                           console.error("[DB Error] Failed to set not-interested:", e);
                           toolResponses.push({ name: call.name, response: { success: false, error: "Database error" }, id: call.id });
                         }
                       } else {
-                        // FIX (silent failure): previously, when customerPhone was
-                        // missing, execution fell through with no response pushed
-                        // here, and the generic fallback at the bottom of this loop
-                        // reported success: true regardless — so the model believed
-                        // the update saved when nothing was written. Every branch
-                        // below now explicitly reports failure when there's no
-                        // phone number to update.
                         toolResponses.push({ name: call.name, response: { success: false, error: "No phone number on file for this call — could not update lead status." }, id: call.id });
                       }
                       continue;
@@ -915,7 +969,6 @@ CURRENT DATE: ${currentDateStr}
                         toolResponses.push({ name: call.name, response: { success: false, error: "No phone number on file for this call — could not save the appointment. Ask the customer to confirm their number, or let them know the sales team will follow up to confirm the booking." }, id: call.id });
                         continue;
                       }
-                      const cleanPhone = customerPhone.replace(/\D/g, '');
                       try {
                         let parsedDate = new Date(dateTime);
 
@@ -953,15 +1006,11 @@ CURRENT DATE: ${currentDateStr}
                           continue;
                         }
 
-                        await prisma.lead.updateMany({
-                          where: { phone: { contains: cleanPhone.slice(-10) } },
-                          data: {
-                            appointmentTime: parsedDate,
-                            status: STATUS.VISIT_SCHEDULED,
-                            interested: true
-                          }
+                        const r = await markOutcomeByPhone(customerPhone, STATUS.VISIT_SCHEDULED, {
+                          appointmentTime: parsedDate,
+                          interested: true,
                         });
-                        console.log(`[DB] Appointment booked for ${customerPhone} at ${dateTime} (within 10:00–17:30 site-visit window ✓)`);
+                        console.log(`[DB] Appointment booked for ${customerPhone} at ${dateTime} rows=${r.count}`);
                         toolResponses.push({ name: call.name, response: { success: true, message: `Appointment booked for ${dateTime} (within preferred site-visit window 10:00 AM–5:30 PM). Status updated to visit scheduled.` }, id: call.id });
                       } catch (e) {
                         console.error("[DB Error] Failed to book appointment:", e);
@@ -977,16 +1026,11 @@ CURRENT DATE: ${currentDateStr}
                         toolResponses.push({ name: call.name, response: { success: false, error: "No phone number on file for this call — could not save the follow-up." }, id: call.id });
                         continue;
                       }
-                      const cleanPhone = customerPhone.replace(/\D/g, '');
                       try {
-                        await prisma.lead.updateMany({
-                          where: { phone: { contains: cleanPhone.slice(-10) } },
-                          data: {
-                            status: STATUS.FOLLOW_UP,
-                            interested: true
-                          }
+                        const r = await markOutcomeByPhone(customerPhone, STATUS.FOLLOW_UP, {
+                          interested: true,
                         });
-                        console.log(`[DB] Follow up set for ${customerPhone} (Reason: ${reason})`);
+                        console.log(`[DB] Follow up set for ${customerPhone} (Reason: ${reason}) rows=${r.count}`);
                         toolResponses.push({ name: call.name, response: { success: true, message: `Follow up set. Status updated to follow up.` }, id: call.id });
                       } catch (e) {
                         console.error("[DB Error] Failed to set follow up:", e);
@@ -996,20 +1040,86 @@ CURRENT DATE: ${currentDateStr}
                     }
 
                     if (call.name === "setName") {
-                      const { name } = call.args;
-                      console.log(`[GEMINI] Setting name to ${name}`);
+                      const {
+                        name,
+                        title,
+                        maritalStatus,
+                        preferFirstNameOnly,
+                      } = call.args as {
+                        name: string;
+                        title?: string;
+                        maritalStatus?: string;
+                        preferFirstNameOnly?: boolean;
+                      };
+                      console.log(`[GEMINI] Setting name to ${name} title=${title || ''} marital=${maritalStatus || ''}`);
+                      customerIdentity = resolveCustomerIdentity({
+                        rawName: name,
+                        source: 'user_spoken',
+                        explicitTitle: title ?? null,
+                        maritalStatus:
+                          maritalStatus === 'married' || maritalStatus === 'unmarried'
+                            ? maritalStatus
+                            : null,
+                        preferFirstNameOnly: preferFirstNameOnly === true,
+                        previous: customerIdentity,
+                      });
+                      const saveName =
+                        customerIdentity.customer_name_normalized || String(name).trim();
+                      // Push canonical identity so TTS/prompt layers do not re-guess gender.
+                      try {
+                        const identityNote = formatIdentityContext(customerIdentity);
+                        if (typeof geminiSession.sendClientContent === 'function') {
+                          geminiSession.sendClientContent({
+                            turns: [{ role: 'user', parts: [{ text: identityNote }] }],
+                            turnComplete: false,
+                          });
+                        } else if (geminiSession) {
+                          geminiSession.sendRealtimeInput({ text: identityNote });
+                        }
+                      } catch (idErr) {
+                        console.error('[GEMINI] Failed to push identity context:', idErr);
+                      }
                       if (!customerPhone) {
-                        toolResponses.push({ name: call.name, response: { success: false, error: "No phone number on file for this call — could not save the name." }, id: call.id });
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: true,
+                            message: `Name noted as ${saveName} (no phone on file — session only).`,
+                            identity: {
+                              formal_display_name: customerIdentity.formal_display_name,
+                              spoken_address: customerIdentity.spoken_address,
+                              customer_salutation: customerIdentity.customer_salutation,
+                              customer_gender: customerIdentity.customer_gender,
+                            },
+                          },
+                          id: call.id,
+                        });
                         continue;
                       }
                       const cleanPhone = customerPhone.replace(/\D/g, '');
                       try {
                         await prisma.lead.updateMany({
                           where: { phone: { contains: cleanPhone.slice(-10) } },
-                          data: { name }
+                          data: { name: saveName },
                         });
-                        console.log(`[DB] Name updated for ${customerPhone}: ${name}`);
-                        toolResponses.push({ name: call.name, response: { success: true, message: `Name updated to ${name}` }, id: call.id });
+                        console.log(
+                          `[DB] Name updated for ${customerPhone}: ${saveName} | ` +
+                            `display=${customerIdentity.formal_display_name} spoken=${customerIdentity.spoken_address}`,
+                        );
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: true,
+                            message: `Name updated to ${saveName}. Formal: ${customerIdentity.formal_display_name}. Spoken: ${customerIdentity.spoken_address}.`,
+                            identity: {
+                              formal_display_name: customerIdentity.formal_display_name,
+                              spoken_address: customerIdentity.spoken_address,
+                              customer_salutation: customerIdentity.customer_salutation,
+                              customer_gender: customerIdentity.customer_gender,
+                            },
+                          },
+                          id: call.id,
+                        });
                       } catch (e) {
                         console.error("[DB Error] Failed to update name:", e);
                         toolResponses.push({ name: call.name, response: { success: false, error: "Database error" }, id: call.id });
@@ -1100,11 +1210,16 @@ CURRENT DATE: ${currentDateStr}
 
         // Send greeting only after the session handle is assigned (see onopen note).
         try {
+          const greetingName = customerIdentity.customer_name_normalized
+            ? customerIdentity
+            : null;
           const greetingText: string = isOutboundCall
-            ? getOutboundGreeting()
-            : getInboundGreeting(customerName);
-          const instruction = `Speak this greeting out loud now with audio. Exact words: ${greetingText}`;
-          console.log(`[GEMINI] Sending greeting for spoken audio`);
+            ? getOutboundGreeting(greetingName)
+            : getInboundGreeting(greetingName?.customer_name_normalized ?? null);
+          const instruction = isOutboundCall
+            ? getOutboundGreetingInstruction(greetingName)
+            : getInboundGreetingInstruction(greetingName);
+          console.log(`[GEMINI] Sending calm Kannada-first greeting for spoken audio`);
           capture?.onAiText(greetingText);
           if (typeof geminiSession.sendClientContent === 'function') {
             geminiSession.sendClientContent({
@@ -1175,11 +1290,10 @@ CURRENT DATE: ${currentDateStr}
           if (noiseFloorRms < NOISE_FLOOR_MIN) noiseFloorRms = NOISE_FLOOR_MIN;
           if (noiseFloorRms > NOISE_FLOOR_MAX) noiseFloorRms = NOISE_FLOOR_MAX;
 
-          // 3) Gate thresholds ride the measured floor (2.2x open, 0.72x of
-          //    open to close) instead of fixed values — quiet callers keep a
-          //    low threshold, noisy fan/AC/traffic lines get a higher one.
-          const gateOpenRms = Math.min(GATE_OPEN_MAX_RMS, Math.max(GATE_OPEN_MIN_RMS, noiseFloorRms * 2.2));
-          const gateCloseRms = gateOpenRms * 0.72;
+          // 3) Gate thresholds ride the measured floor instead of fixed values.
+          const gateOpenRms = Math.min(GATE_OPEN_MAX_RMS, Math.max(GATE_OPEN_MIN_RMS, noiseFloorRms * GATE_FLOOR_MULT));
+          const gateCloseRms = gateOpenRms * GATE_CLOSE_RATIO;
+          const wasGateOpen = gateOpen;
           if (rms >= gateOpenRms) {
             gateOpen = true;
             gateBelowSince = null;
@@ -1190,6 +1304,14 @@ CURRENT DATE: ${currentDateStr}
               gateOpen = false;
               gateBelowSince = null;
             }
+          }
+          if (voiceDebug && wasGateOpen !== gateOpen && now - lastGateLogAt > 250) {
+            lastGateLogAt = now;
+            vadLog(`gate ${gateOpen ? 'OPEN' : 'CLOSE'} rms=${rms.toFixed(0)} thrOpen=${gateOpenRms.toFixed(0)} floor=${noiseFloorRms.toFixed(0)}`);
+          }
+          if (voiceDebug && now - lastNoiseMetricLogAt > 5000) {
+            lastNoiseMetricLogAt = now;
+            vadLog(`metrics floor=${noiseFloorRms.toFixed(0)} rms=${rms.toFixed(0)} gate=${gateOpen ? 'open' : 'closed'} aiPlaying=${now < aiPlaybackEndsAt}`);
           }
           const effectiveGain = (gateOpen ? 1 : GATE_FLOOR) * inputGain;
 
@@ -1215,54 +1337,75 @@ CURRENT DATE: ${currentDateStr}
               }
             });
 
-            // Instant barge-in: if the AI is still audible on the phone and the
-            // customer speaks sustained at well above the line's noise floor,
-            // cut playback locally right away instead of waiting for Gemini's
-            // `interrupted` round trip (~0.5s). Threshold adapts to the line
-            // (5x noise floor, min 900 RMS) so background noise can't clip the
-            // AI. Gemini's interrupted event remains the authoritative fallback.
+            // Local barge-in: sustained speech well above floor, preferably with
+            // an open gate, so transient spikes / background TV don't clear AI.
             const bargeInRms = Math.max(BARGE_IN_MIN_RMS, noiseFloorRms * BARGE_IN_FLOOR_MULT);
-            if (now < aiPlaybackEndsAt && rms >= bargeInRms) {
-              if (bargeInStartedAt === null) {
-                bargeInStartedAt = now;
-              } else if (now - bargeInStartedAt >= BARGE_IN_MIN_MS) {
-                console.log("[VAD] Local barge-in — clearing AI playback immediately");
-                capture?.onAiSpeakEnd();
-                clearPlayback(); // clears Plivo queue + outputLeftover + playback clock + recorder pending
-              }
-            } else if (rms < gateCloseRms) {
+            const bargeDecision = evaluateBargeIn({
+              now,
+              aiPlaybackEndsAt,
+              rms,
+              bargeInRms,
+              gateOpen,
+              requireGateOpen: BARGE_IN_REQUIRE_GATE,
+              bargeInStartedAt,
+              minHoldMs: BARGE_IN_MIN_MS,
+            });
+            if (bargeDecision.action === 'arm') {
+              bargeInStartedAt = bargeDecision.startedAt;
+            } else if (bargeDecision.action === 'fire') {
+              console.log(
+                `[VAD] Local barge-in — clearing AI playback ` +
+                  `(rms=${rms.toFixed(0)} thr=${bargeInRms.toFixed(0)} hold=${BARGE_IN_MIN_MS}ms gateOpen=${gateOpen} floor=${noiseFloorRms.toFixed(0)})`
+              );
+              capture?.onAiSpeakEnd();
+              clearPlayback();
               bargeInStartedAt = null;
+            } else if (bargeDecision.action === 'reset') {
+              if (bargeInStartedAt !== null && voiceDebug) {
+                vadLog(`barge-in reset (rms=${rms.toFixed(0)} thr=${bargeInRms.toFixed(0)} gateOpen=${gateOpen})`);
+              }
+              bargeInStartedAt = null;
+            } else {
+              bargeInStartedAt = bargeDecision.startedAt;
             }
 
-            if (rms > VAD_ENERGY_THRESHOLD) {
-              if (!vadIsSpeaking) {
-                repromptCount = 0;
-                capture?.onCustomerSpeakStart();
-                // Cancel the opening-question retry on ACTUAL AUDIO, not on the
-                // transcript (which lags speech by seconds) — see bugfix note.
-                customerStartedAnsweringOpening();
-                latLog('AUDIO_IN (customer speech start)');
-              }
+            const vadEnergyThr = Math.max(VAD_ENERGY_MIN_RMS, noiseFloorRms * VAD_ENERGY_FLOOR_MULT);
+            // Prefer gated speech for local speech-start so background doesn't
+            // flip vadIsSpeaking; still allow energy only when the gate is open.
+            const speechEnergy = gateOpen && rms > vadEnergyThr;
+            const speechDecision = evaluateLocalSpeech({
+              vadIsSpeaking,
+              speechEnergy,
+              now,
+              silenceStartedAt: vadSilenceStartedAt,
+              silenceMs: VAD_SILENCE_MS,
+            });
+            if (speechDecision.event === 'start') {
+              repromptCount = 0;
               vadIsSpeaking = true;
               vadSilenceStartedAt = null;
-            } else if (vadIsSpeaking) {
-              if (vadSilenceStartedAt === null) {
-                vadSilenceStartedAt = now;
-              } else if (now - vadSilenceStartedAt >= VAD_SILENCE_MS) {
-                vadIsSpeaking = false;
-                vadSilenceStartedAt = null;
-                capture?.onCustomerSpeakEnd();
-                speechEndAt = now;
-                awaitingFirstAiAudio = true;
-                latLog('GEMINI_AUDIO_SENT (local speech end; AAD committed turn ~100ms earlier)');
-                // NOTE: we deliberately do NOT send audioStreamEnd here. Per the
-                // installed @google/genai SDK, with automaticActivityDetection
-                // enabled audioStreamEnd means "the audio stream stopped (mic
-                // off)" — not "the speaker paused". Gemini's AAD already ends
-                // the turn 250ms after silence (before this 350ms VAD fires);
-                // sending audioStreamEnd on every pause forced a redundant
-                // stream close/reopen cycle per turn.
-              }
+              capture?.onCustomerSpeakStart();
+              console.log(
+                `[VAD] Customer speech START rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} floor=${noiseFloorRms.toFixed(0)}`
+              );
+              customerStartedAnsweringOpening();
+              latLog('AUDIO_IN (customer speech start)');
+            } else if (speechDecision.event === 'silence_arm') {
+              vadSilenceStartedAt = speechDecision.silenceStartedAt;
+            } else if (speechDecision.event === 'end') {
+              vadIsSpeaking = false;
+              vadSilenceStartedAt = null;
+              capture?.onCustomerSpeakEnd();
+              allowAiOutput();
+              speechEndAt = now;
+              awaitingFirstAiAudio = true;
+              console.log(
+                `[VAD] Customer speech END after ${speechDecision.pausedFor}ms silence (vadSilenceMs=${VAD_SILENCE_MS} aadSilenceMs=${audioCfg.aadSilenceDurationMs})`
+              );
+              latLog('GEMINI_AUDIO_SENT (local speech end; AAD owns turn commit)');
+            } else if (speechDecision.event === 'none') {
+              vadIsSpeaking = speechDecision.vadIsSpeaking;
+              vadSilenceStartedAt = speechDecision.silenceStartedAt;
             }
           } catch (e: any) {
             console.error("[GEMINI] Failed to send audio:", e.message);
