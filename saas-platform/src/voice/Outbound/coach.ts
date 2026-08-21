@@ -1,4 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
+import { getSarvamClient, sarvamChatModel } from '../sarvam/config';
+import { getVoiceStack } from '../stack';
 
 const COACH_MODEL_PRIMARY = 'gemini-2.5-flash';
 const COACH_MODEL_FALLBACK = 'gemini-2.0-flash';
@@ -47,7 +49,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   });
 }
 
-async function generateCoach(ai: GoogleGenAI, model: string, userText: string, recent: string): Promise<string> {
+async function generateCoachGemini(ai: GoogleGenAI, model: string, userText: string, recent: string): Promise<string> {
   const res = await ai.models.generateContent({
     model,
     contents: `Recent call (may be incomplete):\n${recent.slice(-1800)}\n\nLatest customer utterance:\n${userText}\n\nCoach Bhoomi now.`,
@@ -60,25 +62,43 @@ async function generateCoach(ai: GoogleGenAI, model: string, userText: string, r
   return (res.text || '').trim();
 }
 
+async function generateCoachSarvam(userText: string, recent: string): Promise<string> {
+  const client = getSarvamClient();
+  const res: any = await client.chat.completions({
+    model: sarvamChatModel() as any,
+    messages: [
+      { role: 'system', content: COACH_SYSTEM },
+      {
+        role: 'user',
+        content: `Recent call (may be incomplete):\n${recent.slice(-1800)}\n\nLatest customer utterance:\n${userText}\n\nCoach Bhoomi now.`,
+      },
+    ],
+    temperature: 0.2,
+    max_tokens: 220,
+    reasoning_effort: null as any,
+  } as any);
+  return String(res?.choices?.[0]?.message?.content || '').trim();
+}
+
 /**
- * Outbound-only: a second Gemini listens to the customer and briefs the live voice agent.
- * Returns null on timeout/error so the voice path never stalls.
+ * Outbound-only: a second model listens to the customer and briefs the live voice agent.
+ * Uses Sarvam when VOICE_STACK=sarvam, otherwise Gemini. Returns null on timeout/error.
  */
 export async function coachOutboundTurn(userText: string, recentTranscript: string): Promise<string | null> {
   const trimmed = userText.trim();
   if (!trimmed || trimmed.length < 2) return null;
 
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-
   const run = async () => {
+    if (getVoiceStack() === 'sarvam') {
+      return await generateCoachSarvam(trimmed, recentTranscript);
+    }
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
     try {
-      return await generateCoach(ai, COACH_MODEL_PRIMARY, trimmed, recentTranscript);
+      return await generateCoachGemini(ai, COACH_MODEL_PRIMARY, trimmed, recentTranscript);
     } catch {
-      return await generateCoach(ai, COACH_MODEL_FALLBACK, trimmed, recentTranscript);
+      return await generateCoachGemini(ai, COACH_MODEL_FALLBACK, trimmed, recentTranscript);
     }
   };
 
-  const text = await withTimeout(run(), COACH_TIMEOUT_MS);
-  if (!text) return null;
-  return text.slice(0, 900);
+  return withTimeout(run(), COACH_TIMEOUT_MS);
 }

@@ -14,7 +14,10 @@ export function recordingSampleRate(): number {
 }
 
 export function sttProvider(): string {
-  return (process.env.STT_PROVIDER || 'gemini').toLowerCase();
+  const stack = (process.env.VOICE_STACK || 'sarvam').toLowerCase();
+  const explicit = (process.env.STT_PROVIDER || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  return stack === 'gemini' ? 'gemini' : 'sarvam';
 }
 
 /** Gain applied to the customer channel in the recording (phone audio is quiet). */
