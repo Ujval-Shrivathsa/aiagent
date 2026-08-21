@@ -51,15 +51,15 @@ export function isLeadStatus(value: string): value is LeadStatus {
 }
 
 /** Outcomes that mean the customer’s commercial result is known. */
-export const OUTCOME_STATUSES: readonly LeadStatus[] = [
+export const OUTCOME_STATUSES = [
   LEAD_STATUS.INTERESTED,
   LEAD_STATUS.FOLLOW_UP,
   LEAD_STATUS.VISIT_SCHEDULED,
   LEAD_STATUS.NOT_INTERESTED,
-];
+] as const;
 
 /** Phone-call lifecycle only (not customer intent). */
-export const CALL_STATUSES: readonly LeadStatus[] = [
+export const CALL_STATUSES = [
   LEAD_STATUS.PENDING,
   LEAD_STATUS.CALLING,
   LEAD_STATUS.ANSWERED,
@@ -67,7 +67,7 @@ export const CALL_STATUSES: readonly LeadStatus[] = [
   LEAD_STATUS.CALL_COMPLETED,
   LEAD_STATUS.CALL_ENDED,
   LEAD_STATUS.FAILED,
-];
+] as const;
 
 /** Explicit “no outcome yet” for the Customer Outcome container. */
 export const OUTCOME_UNKNOWN = 'unknown' as const;

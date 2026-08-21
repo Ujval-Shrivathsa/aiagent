@@ -48,7 +48,7 @@ export const GREETING = GREETING_NO_NAME;
 export function getGreeting(customerName?: OpeningNameInput): string {
   if (customerName && typeof customerName !== 'string') {
     const spoken = inboundGreetingSpeakInstruction(customerName);
-    const m = spoken.match(/Exact words:\s*(.+)$/s);
+    const m = spoken.match(/Exact words:\s*([\s\S]+)$/);
     return m?.[1]?.trim() || GREETING_NO_NAME;
   }
   const name = typeof customerName === 'string' ? customerName.trim() : '';
