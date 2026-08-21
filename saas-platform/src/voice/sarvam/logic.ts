@@ -664,7 +664,7 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         if (fellBack || closed) return;
         fellBack = true;
         console.warn(`[SARVAM] Realtime STT unusable (${reason}) — falling back to legacy`);
-        callLog('WARN', `SARVAM STT REALTIME FALLBACK: ${reason}`);
+        callLog('RECONNECT', `SARVAM STT REALTIME FALLBACK: ${reason}`);
         try {
           sttSocket?.close?.();
         } catch {
