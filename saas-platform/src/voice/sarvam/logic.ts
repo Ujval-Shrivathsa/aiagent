@@ -194,14 +194,16 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
 
   const configureTts = () => {
     if (!ttsSocket) return;
+    // Keep codec/mulaw + sample rate telephony-friendly. Do NOT set
+    // min_buffer_size below 50 — Sarvam returns 422 and closes the socket
+    // (silent calls).
     ttsSocket.configureConnection({
       speaker: sarvamTtsSpeaker(),
       language_code: ttsLanguageCode,
       speech_sample_rate: 8000,
       output_audio_codec: 'mulaw',
-      pace: sarvamTtsPace(),
+      pace: Math.min(2, Math.max(0.5, sarvamTtsPace())),
       min_buffer_size: sarvamTtsMinBuffer(),
-      max_chunk_length: 120,
     });
   };
 
@@ -235,12 +237,31 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
       }
     } else if (msg?.type === 'error') {
       console.error('[SARVAM TTS]', msg.data);
+      // Config 422 closes the socket — reopen so the call can still speak.
+      const code = msg?.data?.code;
+      if (code === 422 || /valid dictionary/i.test(String(msg?.data?.message || ''))) {
+        console.warn('[SARVAM TTS] Bad config — reconnecting TTS socket');
+        void reconnectTts();
+      }
       if (ttsWaiter) {
         clearTimeout(ttsWaiter.timer);
         const done = ttsWaiter.resolve;
         ttsWaiter = null;
         done();
       }
+    }
+  };
+
+  const reconnectTts = async () => {
+    try {
+      try {
+        ttsSocket?.close?.();
+      } catch {
+        /* ignore */
+      }
+      await connectTts();
+    } catch (e: any) {
+      console.error('[SARVAM TTS] reconnect failed:', e?.message || e);
     }
   };
 
@@ -638,6 +659,25 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         'Api-Subscription-Key': sarvamApiKey(),
       } as any);
       await sttSocket.waitForOpen();
+      let fellBack = false;
+      const fallbackLegacy = async (reason: string) => {
+        if (fellBack || closed) return;
+        fellBack = true;
+        console.warn(`[SARVAM] Realtime STT unusable (${reason}) — falling back to legacy`);
+        callLog('WARN', `SARVAM STT REALTIME FALLBACK: ${reason}`);
+        try {
+          sttSocket?.close?.();
+        } catch {
+          /* ignore */
+        }
+        sttSocket = null;
+        try {
+          await connectSttLegacy();
+        } catch (e: any) {
+          console.error('[SARVAM] Legacy STT fallback failed:', e?.message || e);
+        }
+      };
+
       sttSocket.on('message', (msg: any) => {
         const ev = msg?.event;
         if (ev === 'transcript.final' && msg?.text) {
@@ -651,7 +691,16 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         } else if (ev === 'error') {
           console.error('[SARVAM STT realtime]', msg);
           callLog('ERROR', `SARVAM STT REALTIME ERROR: ${JSON.stringify(msg)}`);
-          capture?.onSttError(String(msg?.message || msg?.error || 'stt error'));
+          const code = String(msg?.code || '');
+          const text = String(msg?.message || msg?.error || 'stt error');
+          capture?.onSttError(text);
+          if (
+            msg?.is_fatal ||
+            code === 'invalid_subscription_key' ||
+            /invalid subscription key/i.test(text)
+          ) {
+            void fallbackLegacy(code || text);
+          }
         }
       });
       callLog('SUCCESS', 'SARVAM STT REALTIME SESSION OPEN');

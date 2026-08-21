@@ -40,10 +40,11 @@ export function sarvamTtsPace(): number {
   return Number.isFinite(n) && n > 0 ? n : 1.08;
 }
 
-/** TTS WebSocket min buffer — lower = faster first audio byte. */
+/** TTS WebSocket min buffer — Sarvam rejects values below ~50 (422 closes the socket). */
 export function sarvamTtsMinBuffer(): number {
-  const n = Number(process.env.SARVAM_TTS_MIN_BUFFER || 20);
-  return Number.isFinite(n) && n >= 10 ? Math.floor(n) : 20;
+  const n = Number(process.env.SARVAM_TTS_MIN_BUFFER || 50);
+  if (!Number.isFinite(n)) return 50;
+  return Math.max(50, Math.floor(n));
 }
 
 /** Max completion tokens for spoken turns (keep short). */
