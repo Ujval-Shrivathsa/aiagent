@@ -10,17 +10,18 @@ import { detectScriptLanguage, isPrimarilyKannada } from '../language/script-det
 import { evaluateBargeIn, evaluateLocalSpeech } from '../turn-policy';
 
 describe('audio-pipeline-config', () => {
-  it('loads tolerant defaults for pauses and barge-in', () => {
+  it('loads 50ms turn latency defaults', () => {
     const cfg = loadAudioPipelineConfig();
-    assert.ok(cfg.aadSilenceDurationMs >= 500, 'AAD silence should tolerate short pauses');
-    assert.ok(cfg.vadSilenceMs >= 600, 'local VAD silence should tolerate hesitations');
-    assert.ok(cfg.bargeInMinMs >= 200, 'barge-in hold should ignore transient spikes');
+    assert.equal(cfg.aadSilenceDurationMs, 50);
+    assert.equal(cfg.vadSilenceMs, 50);
+    assert.equal(cfg.responseWatchdogMs, 50);
+    assert.ok(cfg.bargeInMinMs >= 180, 'barge-in hold should ignore transient spikes');
     assert.ok(cfg.bargeInMinRms >= 1000, 'barge-in RMS should sit above casual noise');
     assert.equal(cfg.bargeInRequireGateOpen, true);
-    assert.ok(cfg.gateReleaseMs >= 400);
-    assert.ok(cfg.gateFloor <= 0.2, 'closed gate should duck background into Gemini');
-    assert.match(cfg.aadEndSensitivity, /LOW|MEDIUM/);
-    assert.match(cfg.aadStartSensitivity, /LOW|MEDIUM/);
+    assert.ok(cfg.gateReleaseMs >= 250);
+    assert.ok(cfg.gateFloor >= 0.15, 'closed gate should still pass speech to Gemini');
+    assert.match(cfg.aadEndSensitivity, /HIGH|MEDIUM/);
+    assert.match(cfg.aadStartSensitivity, /HIGH|MEDIUM/);
   });
 
   it('honours env overrides', () => {
@@ -44,12 +45,12 @@ describe('tts speech-config', () => {
     try {
       const settings = loadLiveSpeechSettings();
       assert.equal(settings.languageCode, 'kn-IN');
-      assert.equal(settings.voiceName, 'Sulafat');
+      assert.equal(settings.voiceName, 'Kore');
       const cfg = buildLiveSpeechConfig(settings);
       assert.equal(cfg.languageCode, 'kn-IN');
       assert.deepEqual(
         (cfg.voiceConfig as any).prebuiltVoiceConfig.voiceName,
-        'Sulafat'
+        'Kore'
       );
       assert.match(describeSpeechConfig(settings), /kn-IN/);
     } finally {
@@ -84,7 +85,7 @@ describe('script-detect', () => {
 
   it('covers Kannada sample sentences used for TTS articulation checks', () => {
     const samples = [
-      'ಸರಿ, ನಿಮಗೆ site ಬೇಕಾ construction ಗೋಸ್ಕರ ಅಥವಾ investment ಗೋಸ್ಕರ?',
+      'ಸರಿ, ನಿಮಗೆ construction site ಬೇಕಾ ಅಥವಾ investment site ಬೇಕಾ?',
       'Rate ಸುಮಾರು ಮೂರು ಸಾವಿರದಿಂದ ಮೂರು ಸಾವಿರ ನಾನೂರು per sqft ಇರುತ್ತೆ.',
       'ನಂಜನಗೂಡು ಬಳಿ layout ಇದೆ.',
       'ಸರಿ, ಬೇರೆ ಏನಾದ್ರೂ doubt ಇದ್ರೆ ಕೇಳಿ.',
@@ -136,23 +137,23 @@ describe('turn-policy', () => {
       speechEnergy: false,
       now: 1000,
       silenceStartedAt: null,
-      silenceMs: 800,
+      silenceMs: 50,
     });
     assert.equal(arm.event, 'silence_arm');
     const still = evaluateLocalSpeech({
       vadIsSpeaking: true,
       speechEnergy: false,
-      now: 1500,
+      now: 1030,
       silenceStartedAt: 1000,
-      silenceMs: 800,
+      silenceMs: 50,
     });
     assert.equal(still.event, 'none');
     const end = evaluateLocalSpeech({
       vadIsSpeaking: true,
       speechEnergy: false,
-      now: 1900,
+      now: 1060,
       silenceStartedAt: 1000,
-      silenceMs: 800,
+      silenceMs: 50,
     });
     assert.equal(end.event, 'end');
   });
