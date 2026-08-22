@@ -20,6 +20,12 @@ services:
         value: "--max-old-space-size=460"
       - key: VOICE_PROVIDER
         value: plivo
+      - key: VOICE_STACK
+        value: gemini
+      - key: VOICE_TTS_VOICE_NAME
+        value: Sulafat
+      - key: VOICE_TTS_LANGUAGE_CODE
+        value: kn-IN
       - key: APP_URL
         sync: false
       - key: VOICE_SERVER_URL
