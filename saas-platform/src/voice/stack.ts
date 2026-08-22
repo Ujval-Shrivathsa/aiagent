@@ -1,7 +1,7 @@
 /**
  * Voice brain selector.
  *
- *   VOICE_STACK=sarvam  → Sarvam STT (Saaras) + LLM + TTS (Bulbul)
+ *   VOICE_STACK=sarvam  → Sarvam STT + hybrid LLM (Gemini/Sarvam) + Bulbul TTS (default)
  *   VOICE_STACK=gemini  → Gemini Live native audio (previous default)
  *
  * Revert anytime by setting VOICE_STACK=gemini and restarting the server.

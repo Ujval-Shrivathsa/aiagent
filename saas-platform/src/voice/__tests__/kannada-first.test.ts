@@ -14,17 +14,17 @@ import { buildLiveSpeechConfig, loadLiveSpeechSettings } from '../tts/speech-con
 describe('opening-config + Kannada-first opening', () => {
   it('matches the short Bhoomi / Alliance Square / plot intent', () => {
     const opening = buildOutboundKannadaOpening(null);
-    assert.match(opening, /^ನಮಸ್ಕಾರ,/);
-    assert.match(opening, /Alliance Square ಇಂದ ಭೂಮಿ ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
-    assert.match(opening, /ನೀವು plot ನೋಡ್ತಿದ್ದೀರಾ\?/);
+    assert.match(opening, /^ನಮಸ್ಕಾರ/);
+    assert.match(opening, /ನಾನು ಭೂಮಿ Alliance Square ಇಂದ ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
+    assert.match(opening, /ನೀವು Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ\?/);
     assert.doesNotMatch(opening, /enquiry|site visit|budget/i);
-    assert.ok(opening.length < 160, 'opening must stay short');
+    assert.ok(opening.length < 200, 'opening must stay short');
   });
 
   it('may include a known name naturally without forcing honorifics', () => {
     const opening = buildOutboundKannadaOpening('Prajwal');
     assert.match(opening, /ನಮಸ್ಕಾರ Prajwal/);
-    assert.match(opening, /ಭೂಮಿ ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
+    assert.match(opening, /ನಾನು ಭೂಮಿ/);
     assert.doesNotMatch(opening, /ನಮಸ್ಕಾರ Prajwal ಸರ್/);
   });
 

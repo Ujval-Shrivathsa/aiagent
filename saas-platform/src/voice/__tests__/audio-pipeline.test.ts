@@ -44,12 +44,12 @@ describe('tts speech-config', () => {
     try {
       const settings = loadLiveSpeechSettings();
       assert.equal(settings.languageCode, 'kn-IN');
-      assert.equal(settings.voiceName, 'Kore');
+      assert.equal(settings.voiceName, 'Sulafat');
       const cfg = buildLiveSpeechConfig(settings);
       assert.equal(cfg.languageCode, 'kn-IN');
       assert.deepEqual(
         (cfg.voiceConfig as any).prebuiltVoiceConfig.voiceName,
-        'Kore'
+        'Sulafat'
       );
       assert.match(describeSpeechConfig(settings), /kn-IN/);
     } finally {

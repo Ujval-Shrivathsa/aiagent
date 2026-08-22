@@ -19,11 +19,12 @@ import {
 describe('outbound Kannada opening', () => {
   it('uses short simple Kannada beats and ends with listen question', () => {
     const opening = buildOutboundKannadaOpening(null);
-    assert.match(opening, /ನಮಸ್ಕಾರ/);
+    assert.match(opening, /^ನಮಸ್ಕಾರ/);
     assert.match(opening, /ಭೂಮಿ/);
     assert.match(opening, /Alliance Square/);
-    assert.match(opening, /plot ನೋಡ್ತಿದ್ದೀರಾ/);
-    assert.ok(opening.length < 160, 'opening should stay short');
+    assert.match(opening, /ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
+    assert.match(opening, /Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ/);
+    assert.ok(opening.length < 200, 'opening should stay short');
   });
 
   it('includes customer name when provided', () => {
@@ -33,7 +34,7 @@ describe('outbound Kannada opening', () => {
 
   it('stays neutral when no name or gender is known', () => {
     const opening = buildOutboundKannadaOpening(null);
-    assert.match(opening, /ನಮಸ್ಕಾರ,/);
+    assert.match(opening, /^ನಮಸ್ಕಾರ/);
     assert.doesNotMatch(opening, /ನಮಸ್ಕಾರ ಸರ್/);
   });
 
@@ -47,13 +48,17 @@ describe('outbound Kannada opening', () => {
 });
 
 describe('shared style blocks', () => {
-  it('forbids theatrical delivery and requires simple Kannada', () => {
-    assert.match(VOICE_DELIVERY_STYLE, /Enthusiasm ~4\.5/);
-    assert.match(VOICE_DELIVERY_STYLE, /Do NOT exaggerate/);
-    assert.match(SIMPLE_KANNADA_STYLE, /do NOT think in English and translate/i);
+  it('forbids choppy IVR delivery and requires simple Kannada', () => {
+    assert.match(VOICE_DELIVERY_STYLE, /real Mysuru telecaller rhythm/);
+    assert.match(VOICE_DELIVERY_STYLE, /HARD STOP/);
+    assert.match(VOICE_DELIVERY_STYLE, /Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ/);
+    assert.match(SIMPLE_KANNADA_STYLE, /Think in Kannada/i);
     assert.match(SIMPLE_KANNADA_STYLE, /START THE CALL IN KANNADA/i);
+    assert.match(SIMPLE_KANNADA_STYLE, /JUST AS effortless/i);
+    assert.match(SIMPLE_KANNADA_STYLE, /Kanglish/i);
+    assert.match(SIMPLE_KANNADA_STYLE, /ENGLISH ↔ KANNADA PARITY/);
     assert.match(TURN_TAKING_STYLE, /stop speaking/i);
-    assert.match(TURN_TAKING_STYLE, /Speak → Ask → Stop → Listen/);
+    assert.match(TURN_TAKING_STYLE, /Intro beat → Ask → Stop → Listen/);
   });
 
   it('forbids inventing customer intent', () => {
@@ -68,7 +73,7 @@ describe('shared style blocks', () => {
   });
 
   it('opening retry question is Kannada', () => {
-    assert.match(OUTBOUND_OPENING_QUESTION_KN, /ನೋಡ್ತಿದ್ದೀರಾ/);
+    assert.match(OUTBOUND_OPENING_QUESTION_KN, /Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ/);
   });
 
   it('inbound greeting instruction is Kannada-first and calm', () => {

@@ -155,15 +155,16 @@ export function languageSwitchSystemPrompt(
 ): string {
   if (lang === 'en') {
     return (
-      'LANGUAGE SWITCH: The customer\'s latest meaningful utterance is clear English. ' +
-      'Reply in calm Indian English for this turn and until they switch again. ' +
-      'Preserve all conversation context. Do not restart the greeting. Do not announce the language switch.'
+      'LANGUAGE SWITCH: Customer is speaking clear English. Reply in polished, natural Indian English only. ' +
+      'Fluent, concise, professional — like a strong Mysuru sales executive on a phone call. ' +
+      'Correct grammar, smooth rhythm, no stiff translationese, no filler fluff. ' +
+      '1–2 short sentences + at most one question. Preserve context. Do not restart the greeting or announce the switch.'
     );
   }
   return (
-    'LANGUAGE SWITCH: The customer\'s latest meaningful utterance is Kannada (or Kanglish). ' +
-    'Reply in simple spoken Mysuru Kannada for this turn and until they switch again. ' +
-    'Preserve all conversation context. Do not restart the greeting. Do not announce the language switch. ' +
-    'Isolated English loanwords (plot, budget, site, …) are NOT a reason to stay in English.'
+    'LANGUAGE SWITCH: Customer is speaking Kannada / Kanglish. Reply in everyday spoken Mysuru Kannada (Kannada script). ' +
+    'Same ease as English — short, clear, human, not textbook or translated. Think in Kannada; never English-then-translate. ' +
+    'Use spoken forms (ಮಾತಾಡ್ತಿದ್ದೀನಿ, ನೋಡ್ತಿದ್ದೀರಾ, ಬೇಕಾ, ಸರಿ, ಹೇಳಿ). Keep natural English loanwords (site, plot, budget, project). ' +
+    'Match their Kanglish mix and tone. 1–2 short sentences + at most one question. Preserve context. Do not restart the greeting.'
   );
 }

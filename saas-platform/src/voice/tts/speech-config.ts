@@ -10,7 +10,7 @@
  * Conversation language tracker switches to en-IN (and back) from STT.
  *
  * Env:
- *   VOICE_TTS_VOICE_NAME=Kore|Aoede|Leda|...  (calm female default: Kore)
+ *   VOICE_TTS_VOICE_NAME=Sulafat|Kore|Aoede|Achernar|...  (default: Sulafat — warm/natural)
  *   VOICE_TTS_LANGUAGE_CODE=kn-IN|en-IN|auto
  *   VOICE_TTS_VOICE_NAME_EN=...  (optional English voice; defaults to same)
  */
@@ -26,7 +26,7 @@ export type LiveSpeechConfig = {
 };
 
 export function loadLiveSpeechSettings(): LiveSpeechConfig {
-  const voiceName = (process.env.VOICE_TTS_VOICE_NAME || 'Kore').trim() || 'Kore';
+  const voiceName = (process.env.VOICE_TTS_VOICE_NAME || 'Sulafat').trim() || 'Sulafat';
   const voiceNameEn =
     (process.env.VOICE_TTS_VOICE_NAME_EN || voiceName).trim() || voiceName;
   const raw = (process.env.VOICE_TTS_LANGUAGE_CODE || 'kn-IN').trim();

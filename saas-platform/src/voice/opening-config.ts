@@ -6,8 +6,8 @@
  *   VOICE_OPENING_AGENT_NAME_KN=ಭೂಮಿ
  *   VOICE_OPENING_AGENT_NAME_EN=Bhoomi
  *   VOICE_OPENING_COMPANY_NAME=Alliance Square
- *   VOICE_OPENING_QUESTION_KN=ನೀವು plot ನೋಡ್ತಿದ್ದೀರಾ?
- *   VOICE_OPENING_QUESTION_EN=Are you looking for a plot?
+ *   VOICE_OPENING_QUESTION_KN=ನೀವು Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ?
+ *   VOICE_OPENING_QUESTION_EN=Are you looking at a site in Mysore?
  *   VOICE_OPENING_INCLUDE_NAME=1   (0 = never use lead name in opening)
  */
 
@@ -31,8 +31,8 @@ export function loadOpeningConfig(): OpeningConfig {
     agentNameKn: str(process.env.VOICE_OPENING_AGENT_NAME_KN, 'ಭೂಮಿ'),
     agentNameEn: str(process.env.VOICE_OPENING_AGENT_NAME_EN, 'Bhoomi'),
     companyName: str(process.env.VOICE_OPENING_COMPANY_NAME, 'Alliance Square'),
-    questionKn: str(process.env.VOICE_OPENING_QUESTION_KN, 'ನೀವು plot ನೋಡ್ತಿದ್ದೀರಾ?'),
-    questionEn: str(process.env.VOICE_OPENING_QUESTION_EN, 'Are you looking for a plot?'),
+    questionKn: str(process.env.VOICE_OPENING_QUESTION_KN, 'ನೀವು Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ?'),
+    questionEn: str(process.env.VOICE_OPENING_QUESTION_EN, 'Are you looking at a site in Mysore?'),
     includeNameWhenAvailable: str(process.env.VOICE_OPENING_INCLUDE_NAME, '1') !== '0',
   };
 }

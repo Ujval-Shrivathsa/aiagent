@@ -2,8 +2,8 @@ import { GoogleGenAI } from '@google/genai';
 import { getSarvamClient, sarvamChatModel } from '../sarvam/config';
 import { getVoiceStack } from '../stack';
 
-const COACH_MODEL_PRIMARY = 'gemini-2.5-flash';
-const COACH_MODEL_FALLBACK = 'gemini-2.0-flash';
+const COACH_MODEL_PRIMARY = 'gemini-3.1-flash-lite';
+const COACH_MODEL_FALLBACK = 'gemini-3.5-flash';
 const COACH_TIMEOUT_MS = 900;
 
 const COACH_SYSTEM = `You are a silent coach for Bhoomi, Alliance Square's outbound voice agent in Mysuru.

@@ -43,3 +43,26 @@ export function pcm16leBufferToMuLaw(pcm: Buffer): Buffer {
   }
   return out;
 }
+
+/** Average / linear resample arbitrary PCM rate → 8 kHz µ-law (telephony). */
+export function pcm16leResampleToMuLaw8k(pcm: Buffer, inRate: number): Buffer {
+  if (inRate <= 0 || pcm.length < 2) return Buffer.alloc(0);
+  const inSamples = Math.floor(pcm.length / 2);
+  if (inSamples === 0) return Buffer.alloc(0);
+  const outSamples = Math.max(1, Math.floor((inSamples * 8000) / inRate));
+  const out = Buffer.allocUnsafe(outSamples);
+  for (let i = 0; i < outSamples; i++) {
+    const srcPos = (i * inRate) / 8000;
+    const idx = Math.min(Math.floor(srcPos), inSamples - 1);
+    const frac = srcPos - Math.floor(srcPos);
+    const s0 = pcm.readInt16LE(idx * 2);
+    const s1 = pcm.readInt16LE(Math.min(idx + 1, inSamples - 1) * 2);
+    out[i] = pcmToMuLaw(Math.round(s0 + frac * (s1 - s0)));
+  }
+  return out;
+}
+
+/** @deprecated use pcm16leResampleToMuLaw8k for arbitrary rates */
+export function pcm16leRateToMuLaw8k(pcm: Buffer, inRate: number): Buffer {
+  return pcm16leResampleToMuLaw8k(pcm, inRate);
+}

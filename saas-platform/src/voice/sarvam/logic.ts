@@ -1,14 +1,15 @@
 /**
- * Sarvam voice stack: Saaras STT → Sarvam chat LLM → Bulbul TTS.
+ * Hybrid voice stack: Sarvam STT → Gemini/Sarvam LLM → Bulbul TTS.
  * Plivo/Twilio media stays µ-law 8 kHz; STT gets PCM s16le; TTS returns µ-law.
  *
- * Revert: set VOICE_STACK=gemini and restart.
+ * Revert full Gemini Live: set VOICE_STACK=gemini and restart.
  */
 import type { WebSocket } from 'ws';
 import { prisma } from '../../lib/prisma';
 import { fetchLiveSiteData, formatLiveDataForPrompt } from '../../lib/live-site-data';
 import { buildInboundSystemInstruction, getGreeting as getInboundGreeting } from '../Inbound/index';
-import { buildOutboundSystemInstruction, getGreeting as getOutboundGreeting } from '../Outbound/index';
+import { buildOutboundSystemInstruction } from '../Outbound/index';
+import { buildOutboundKannadaOpeningBeats } from '../kannada-style';
 import { CallCaptureSession } from '../call-capture/session';
 import { callLog } from '../call-capture/logger';
 import { LEAD_STATUS, outcomeFromFlags } from '../../lib/lead-status';
@@ -27,46 +28,44 @@ import {
 import { detectScriptLanguage } from '../language/script-detect';
 import {
   languageCodeForConversation,
+  languageSwitchSystemPrompt,
   resolveNextConversationLanguage,
   type ConversationLanguage,
 } from '../language/conversation-language';
 import { evaluateBargeIn } from '../turn-policy';
+import { SttRingBuffer } from '../stt-ring-buffer';
+import { VOICE_SPOKEN_OUTPUT_RULES } from '../voice-spoken-rules';
 import {
   getSarvamClient,
   sarvamApiKey,
   sarvamChatModel,
   sarvamMaxTokens,
+  sarvamSttLanguage,
   sarvamSttModel,
+  sarvamSttNegativeFrames,
   sarvamSttSilenceMs,
-  sarvamTtsMinBuffer,
-  sarvamTtsModel,
-  sarvamTtsPace,
-  sarvamTtsSpeaker,
+  sttPrerollFrames,
   useSarvamRealtimeStt,
 } from './config';
-import { muLawByteToPcm, muLawBufferToPcm16le, pcm16leBufferToMuLaw } from './mulaw';
+import { muLawByteToPcm, muLawBufferToPcm16le } from './mulaw';
+import { SarvamConvertStreamPlayer, ttsConvertStreamConfig } from './tts-convert-stream';
 import { normalizeVoiceEvent } from './normalize-event';
+import { prepareTtsText, takeSpeakableChunks } from './tts-text';
+import {
+  logTurnLatency,
+  markFirstPlayout,
+  markFirstToken,
+  markFirstTtsEnqueue,
+  markSpeechEnd,
+  markSttFinal,
+  type TurnLatency,
+} from './latency';
+import { streamVoiceChatTurn } from '../llm/hybrid-chat';
+import { resolveActiveLlmProvider } from '../llm/config';
 import { SARVAM_TOOLS } from './tools';
 
 const STATUS = LEAD_STATUS;
 const MAX_HISTORY_MESSAGES = 24;
-
-/** Split on sentence boundaries for early TTS (Kannada danda + Latin punct). */
-function takeCompleteSentences(buffer: string): { ready: string[]; rest: string } {
-  const ready: string[] = [];
-  let rest = buffer;
-  const re = /[.!?।\n]+[\s]*/g;
-  let match: RegExpExecArray | null;
-  let last = 0;
-  while ((match = re.exec(buffer)) !== null) {
-    const end = match.index + match[0].length;
-    const piece = buffer.slice(last, end).trim();
-    if (piece) ready.push(piece);
-    last = end;
-  }
-  rest = buffer.slice(last);
-  return { ready, rest };
-}
 
 type ChatMessage =
   | { role: 'system'; content: string }
@@ -101,14 +100,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   });
 }
 
-export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams) {
+export async function setupSarvam(ws: WebSocket, streamParams?: URLSearchParams) {
   const client = getSarvamClient();
   let audioSink: 'twilio' | 'plivo' =
     (process.env.VOICE_PROVIDER || 'twilio').toLowerCase() === 'plivo' ? 'plivo' : 'twilio';
   let streamSid: string | null = null;
   let capture: CallCaptureSession | null = null;
   let sttSocket: any = null;
-  let ttsSocket: any = null;
+  const ttsPlayer = new SarvamConvertStreamPlayer(client);
   let transcriptCount = 0;
   let startTime = Date.now();
   let customerPhone: string | null = null;
@@ -120,16 +119,30 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
   let ttsLanguageCode: 'kn-IN' | 'en-IN' = 'kn-IN';
   let closed = false;
   let turnBusy = false;
+  /** User speech while a turn is in flight — process after current reply. */
+  let pendingUserText: string | null = null;
   let endCallInvoked = false;
   let suppressAiOutput = false;
   let aiPlaybackEndsAt = 0;
   let bargeInStartedAt: number | null = null;
+  /** Block barge-in / clear while the opening line is still speaking. */
+  let openingSpeechInProgress = false;
+  let loggedFirstPlivoAudio = false;
+  /** Active turn latency tracker (STT→first audio). */
+  let turnLatency: TurnLatency | null = null;
+  /** Media-stream clock for opening TTFA (<500ms target). */
+  let openingCallT0: number | null = null;
+  /** Hold telephony audio until STT socket is open (avoids dropped first words). */
+  let sttReady = false;
+  const sttAudioQueue: Buffer[] = [];
+  const STT_QUEUE_MAX = 80; // ~1.6s of 20ms frames
   const messages: ChatMessage[] = [];
 
+  /** Active turn abort — stops LLM/TTS when user barges in. */
+  let activeTurnAbort: AbortController | null = null;
+  let lastSpeechEndAt: number | null = null;
+  const sttRing = new SttRingBuffer(sttPrerollFrames());
   let sttMode: 'realtime' | 'legacy' = 'realtime';
-
-  /** Single TTS completion waiter (SDK allows only one `on('message')` handler). */
-  let ttsWaiter: { resolve: () => void; timer: NodeJS.Timeout } | null = null;
 
   const hangupStream = () => {
     try {
@@ -148,11 +161,24 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
     }
   };
 
-  const clearPlayback = () => {
+  const abortActiveTurn = () => {
+    if (activeTurnAbort) {
+      activeTurnAbort.abort();
+      activeTurnAbort = null;
+    }
+    ttsPlayer.cancel();
     suppressAiOutput = true;
+  };
+
+  const clearPlayback = () => {
+    // Never cut the opening, and never clear while we still expect AI audio on the line
+    // unless the caller has held barge-in (handled by evaluateBargeIn with a high threshold).
+    if (openingSpeechInProgress) return;
+    abortActiveTurn();
     capture?.onAiPlaybackCleared();
     aiPlaybackEndsAt = 0;
     bargeInStartedAt = null;
+    sttRing.replay((frame) => feedStt(frame));
     if (!streamSid) return;
     try {
       if (audioSink === 'plivo') {
@@ -170,13 +196,27 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
     capture?.onAiRecordingAllow();
   };
 
+  /** Wait until queued Plivo µ-law should have finished playing (plus small cushion). */
+  const waitForPlaybackDrain = async (cushionMs = 120) => {
+    const wait = aiPlaybackEndsAt - Date.now() + cushionMs;
+    if (wait > 0) await new Promise((r) => setTimeout(r, Math.min(wait, 20000)));
+  };
+
   const sendMuLawToPhone = (muLaw: Buffer) => {
     if (!streamSid || suppressAiOutput || muLaw.length === 0) return;
+    if (turnLatency) markFirstPlayout(turnLatency);
+    if (openingCallT0 != null && !loggedFirstPlivoAudio) {
+      console.log(`[SARVAM] Opening first playAudio +${Date.now() - openingCallT0}ms`);
+    }
     capture?.onAiSpeakStart();
     capture?.onAiMuLaw(muLaw);
     aiPlaybackEndsAt = Math.max(Date.now(), aiPlaybackEndsAt) + muLaw.length / 8;
     const payload = muLaw.toString('base64');
     if (audioSink === 'plivo') {
+      if (!loggedFirstPlivoAudio) {
+        loggedFirstPlivoAudio = true;
+        console.log(`[SARVAM] First playAudio → plivo (${muLaw.length} bytes µ-law)`);
+      }
       ws.send(
         JSON.stringify({
           event: 'playAudio',
@@ -192,20 +232,20 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
     }
   };
 
-  const configureTts = () => {
-    if (!ttsSocket) return;
-    // Keep codec/mulaw + sample rate telephony-friendly. Do NOT set
-    // min_buffer_size below 50 — Sarvam returns 422 and closes the socket
-    // (silent calls).
-    ttsSocket.configureConnection({
-      speaker: sarvamTtsSpeaker(),
-      language_code: ttsLanguageCode,
-      speech_sample_rate: 8000,
-      output_audio_codec: 'mulaw',
-      pace: Math.min(2, Math.max(0.5, sarvamTtsPace())),
-      min_buffer_size: sarvamTtsMinBuffer(),
-    });
+  const logTtsConfig = () => {
+    const cfg = ttsConvertStreamConfig(ttsLanguageCode);
+    console.log(
+      `[SARVAM TTS] convertStream model=${cfg.model} speaker=${cfg.speaker} lang=${cfg.language_code} pace=${cfg.pace} rate=${cfg.speech_sample_rate}`,
+    );
   };
+
+  const ttsHandlers = (signal?: AbortSignal) => ({
+    signal,
+    onMuLaw: (muLaw: Buffer) => sendMuLawToPhone(muLaw),
+    onFirstAudio: () => {
+      if (turnLatency) markFirstTtsEnqueue(turnLatency);
+    },
+  });
 
   const trimMessageHistory = () => {
     if (messages.length <= MAX_HISTORY_MESSAGES) return;
@@ -215,116 +255,86 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
     messages.push(...system.slice(0, 3), ...rest.slice(-(MAX_HISTORY_MESSAGES - 3)));
   };
 
-  const onTtsMessage = (msg: any) => {
-    if (msg?.type === 'audio' && msg?.data?.audio) {
-      const raw = Buffer.from(msg.data.audio, 'base64');
-      const codec = String(msg.data.content_type || '').toLowerCase();
-      let muLaw: Buffer;
-      if (codec.includes('linear') || codec.includes('l16') || codec.includes('pcm')) {
-        muLaw = pcm16leBufferToMuLaw(raw);
-      } else {
-        muLaw = raw;
-      }
-      sendMuLawToPhone(muLaw);
-    } else if (msg?.type === 'event' && msg?.data?.event_type === 'final') {
-      if (ttsWaiter) {
-        clearTimeout(ttsWaiter.timer);
-        const done = ttsWaiter.resolve;
-        ttsWaiter = null;
-        capture?.onAiTurnComplete();
-        capture?.onAiSpeakEnd();
-        done();
-      }
-    } else if (msg?.type === 'error') {
-      console.error('[SARVAM TTS]', msg.data);
-      // Config 422 closes the socket — reopen so the call can still speak.
-      const code = msg?.data?.code;
-      if (code === 422 || /valid dictionary/i.test(String(msg?.data?.message || ''))) {
-        console.warn('[SARVAM TTS] Bad config — reconnecting TTS socket');
-        void reconnectTts();
-      }
-      if (ttsWaiter) {
-        clearTimeout(ttsWaiter.timer);
-        const done = ttsWaiter.resolve;
-        ttsWaiter = null;
-        done();
-      }
+  /** Speak one phrase via Sarvam convertStream (Ishita @ 22050 → 8 kHz µ-law). */
+  const speakChunkNow = (text: string, opts?: { logText?: boolean }) => {
+    const trimmed = prepareTtsText(text, ttsLanguageCode);
+    if (!trimmed || closed) return;
+    if (opts?.logText !== false) {
+      capture?.onAiText(trimmed);
+      fullTranscription += `AI: ${trimmed}\n`;
+      transcriptCount++;
     }
-  };
-
-  const reconnectTts = async () => {
-    try {
-      try {
-        ttsSocket?.close?.();
-      } catch {
-        /* ignore */
-      }
-      await connectTts();
-    } catch (e: any) {
-      console.error('[SARVAM TTS] reconnect failed:', e?.message || e);
-    }
-  };
-
-  /** Queue text to TTS without waiting (for streamed LLM sentences). */
-  const enqueueTts = (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed || !ttsSocket) return;
     allowAiOutput();
-    try {
-      ttsSocket.convert(trimmed);
-    } catch (e: any) {
-      console.error('[SARVAM TTS] convert failed:', e?.message || e);
-    }
-  };
-
-  const flushTtsAndWait = async (): Promise<void> => {
-    if (!ttsSocket) return;
-    return new Promise((resolve) => {
-      if (ttsWaiter) {
-        clearTimeout(ttsWaiter.timer);
-        ttsWaiter.resolve();
-      }
-      const timer = setTimeout(() => {
-        ttsWaiter = null;
-        capture?.onAiTurnComplete();
-        capture?.onAiSpeakEnd();
-        resolve();
-      }, 20000);
-      ttsWaiter = { resolve, timer };
-      try {
-        ttsSocket.flush();
-      } catch (e: any) {
-        console.error('[SARVAM TTS] flush failed:', e?.message || e);
-        clearTimeout(timer);
-        ttsWaiter = null;
-        resolve();
-      }
-    });
+    void ttsPlayer.speak(trimmed, ttsLanguageCode, ttsHandlers(activeTurnAbort?.signal ?? undefined));
   };
 
   const speakText = async (text: string): Promise<void> => {
-    const trimmed = text.trim();
-    if (!trimmed || !ttsSocket) return;
+    const trimmed = prepareTtsText(text, ttsLanguageCode);
+    if (!trimmed || closed) return;
     capture?.onAiText(trimmed);
     fullTranscription += `AI: ${trimmed}\n`;
     transcriptCount++;
     allowAiOutput();
-    configureTts();
-    // Prefer short chunks for lower first-byte latency
-    const { ready, rest } = takeCompleteSentences(trimmed + ' ');
-    const parts = ready.length ? ready : [trimmed];
-    if (rest.trim()) parts.push(rest.trim());
-    for (const part of parts) enqueueTts(part);
-    await flushTtsAndWait();
+    await ttsPlayer.speak(trimmed, ttsLanguageCode, ttsHandlers());
+    await ttsPlayer.whenIdle();
+    capture?.onAiTurnComplete();
+    capture?.onAiSpeakEnd();
+  };
+
+  /** Speak opening as one continuous TTS stream (avoids gaps between micro-phrases). */
+  const speakOutboundOpening = async (
+    identity: CustomerIdentity | null,
+    callT0: number,
+  ) => {
+    const { intro, ask } = buildOutboundKannadaOpeningBeats(identity);
+    const full = prepareTtsText(`${intro}. ${ask}`.replace(/\s+/g, ' ').trim(), ttsLanguageCode);
+    console.log(`[SARVAM] Opening (single stream): ${full}`);
+
+    allowAiOutput();
+    if (closed || !full) return;
+
+    capture?.onAiText(full);
+    fullTranscription += `AI: ${full}\n`;
+    transcriptCount++;
+    console.log(`[SARVAM] Opening phrase queued +${Date.now() - callT0}ms`);
+    await ttsPlayer.speak(full, ttsLanguageCode, ttsHandlers());
+    await ttsPlayer.whenIdle();
+    capture?.onAiTurnComplete();
+    capture?.onAiSpeakEnd();
+  };
+
+  const speakInboundOpening = async (greeting: string, callT0: number) => {
+    allowAiOutput();
+    if (closed) return;
+    const trimmed = prepareTtsText(greeting, ttsLanguageCode);
+    if (!trimmed) return;
+    capture?.onAiText(trimmed);
+    fullTranscription += `AI: ${trimmed}\n`;
+    transcriptCount++;
+    console.log(`[SARVAM] Opening phrase queued +${Date.now() - callT0}ms`);
+    await ttsPlayer.speak(trimmed, ttsLanguageCode, ttsHandlers());
+    await ttsPlayer.whenIdle();
+    capture?.onAiTurnComplete();
+    capture?.onAiSpeakEnd();
   };
 
   const applyLanguageFromTranscript = (text: string) => {
     const resolved = resolveNextConversationLanguage(conversationLanguage, text);
-    if (resolved.switched || resolved.language !== conversationLanguage) {
+    if (resolved.switched) {
       conversationLanguage = resolved.language;
       ttsLanguageCode = languageCodeForConversation(resolved.language);
       console.log(`[SARVAM] Language → ${conversationLanguage} tts=${ttsLanguageCode}`);
-      configureTts();
+      logTtsConfig();
+      // Lightweight routing — no extra model hop; steers the next chat turn only.
+      messages.push({
+        role: 'system',
+        content: languageSwitchSystemPrompt(resolved.language),
+      });
+      trimMessageHistory();
+    } else if (resolved.language !== conversationLanguage) {
+      conversationLanguage = resolved.language;
+      ttsLanguageCode = languageCodeForConversation(resolved.language);
+      logTtsConfig();
     }
   };
 
@@ -437,97 +447,79 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
   };
 
   const chatTurn = async (userText: string) => {
-    if (turnBusy || closed || endCallInvoked) return;
+    const text = (userText || '').trim();
+    if (!text || closed || endCallInvoked) return;
+    if (turnBusy) {
+      pendingUserText = pendingUserText ? `${pendingUserText} ${text}` : text;
+      console.log(`[SARVAM] Queued user speech while busy: "${text.slice(0, 60)}"`);
+      return;
+    }
     turnBusy = true;
     const turnStart = Date.now();
+    turnLatency = { turnStart };
+    if (lastSpeechEndAt != null) markSpeechEnd(turnLatency, lastSpeechEndAt);
+    markSttFinal(turnLatency);
+    const turnAbort = new AbortController();
+    activeTurnAbort = turnAbort;
     try {
-      messages.push({ role: 'user', content: userText });
+      messages.push({ role: 'user', content: text });
       trimMessageHistory();
       let loops = 0;
-      while (loops < 4 && !endCallInvoked) {
+      while (loops < 4 && !endCallInvoked && !turnAbort.signal.aborted) {
         loops++;
-        configureTts();
-
-        // Stream tokens → speak complete sentences ASAP (lower time-to-first-audio).
-        const stream = await client.chat.completions({
-          model: sarvamChatModel() as any,
-          messages: messages as any,
-          tools: SARVAM_TOOLS as any,
-          tool_choice: 'auto' as any,
-          temperature: 0.25,
-          max_tokens: sarvamMaxTokens(),
-          reasoning_effort: null as any,
-          stream: true,
-        } as any);
 
         let contentBuf = '';
-        let spokenBuf = '';
+        let streamBuf = '';
         let toolCalls: any[] | undefined;
-        let firstTokenAt = 0;
+        let skipSpeech = false;
 
-        for await (const chunk of stream as AsyncIterable<any>) {
-          const delta = chunk?.choices?.[0]?.delta;
-          if (!delta) continue;
-          if (delta.tool_calls?.length) {
-            toolCalls = toolCalls || [];
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index ?? toolCalls.length;
-              if (!toolCalls[idx]) {
-                toolCalls[idx] = {
-                  id: tc.id || `tool_${Date.now()}_${idx}`,
-                  type: 'function',
-                  function: { name: tc.function?.name || '', arguments: '' },
-                };
-              }
-              if (tc.id) toolCalls[idx].id = tc.id;
-              if (tc.function?.name) toolCalls[idx].function.name = tc.function.name;
-              if (tc.function?.arguments) {
-                toolCalls[idx].function.arguments += tc.function.arguments;
-              }
-            }
+        if (!closed) logTtsConfig();
+
+        for await (const event of streamVoiceChatTurn({
+          messages,
+          language: conversationLanguage,
+          sarvamClient: client,
+          signal: turnAbort.signal,
+        })) {
+          if (turnAbort.signal.aborted) break;
+
+          if (event.type === 'tool_pending') {
+            skipSpeech = true;
+            streamBuf = '';
+            continue;
           }
-          if (typeof delta.content === 'string' && delta.content) {
-            if (!firstTokenAt) {
-              firstTokenAt = Date.now();
-              console.log(`[SARVAM] LLM first token +${firstTokenAt - turnStart}ms`);
+
+          if (event.type === 'token') {
+            if (skipSpeech) continue;
+            if (turnLatency) markFirstToken(turnLatency);
+            contentBuf += event.delta;
+            streamBuf += event.delta;
+            const { ready, rest } = takeSpeakableChunks(streamBuf, {
+              allowEarlyPhrase: false,
+              minPhraseChars: conversationLanguage === 'kn' ? 20 : 24,
+              kannadaSafe: conversationLanguage === 'kn',
+            });
+            streamBuf = rest;
+            for (const piece of ready) {
+              if (turnAbort.signal.aborted) break;
+              if (turnLatency) markFirstTtsEnqueue(turnLatency);
+              speakChunkNow(piece);
             }
-            contentBuf += delta.content;
-            const { ready, rest } = takeCompleteSentences(contentBuf);
-            if (ready.length) {
-              for (const sentence of ready) {
-                if (!spokenBuf) {
-                  capture?.onAiText(sentence);
-                  fullTranscription += `AI: ${sentence}`;
-                  transcriptCount++;
-                } else {
-                  fullTranscription += ` ${sentence}`;
-                  capture?.onAiText(sentence);
-                }
-                spokenBuf += (spokenBuf ? ' ' : '') + sentence;
-                enqueueTts(sentence);
-              }
-              contentBuf = rest;
-            }
+          } else if (event.type === 'done') {
+            toolCalls = event.toolCalls;
+            if (!contentBuf && event.content) contentBuf = event.content;
           }
         }
 
-        const leftover = contentBuf.trim();
-        if (leftover) {
-          if (!spokenBuf) {
-            capture?.onAiText(leftover);
-            fullTranscription += `AI: ${leftover}\n`;
-            transcriptCount++;
-          } else {
-            fullTranscription += ` ${leftover}\n`;
-            capture?.onAiText(leftover);
-          }
-          spokenBuf += (spokenBuf ? ' ' : '') + leftover;
-          enqueueTts(leftover);
-        } else if (spokenBuf) {
-          fullTranscription += '\n';
+        if (turnAbort.signal.aborted) break;
+
+        if (streamBuf.trim() && !toolCalls?.length && !skipSpeech) {
+          if (turnLatency) markFirstTtsEnqueue(turnLatency);
+          speakChunkNow(streamBuf);
+          streamBuf = '';
         }
 
-        const content = spokenBuf.trim() || leftover;
+        const content = prepareTtsText(contentBuf, ttsLanguageCode);
         const cleanToolCalls = toolCalls?.filter(Boolean);
 
         messages.push({
@@ -536,7 +528,10 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
           tool_calls: cleanToolCalls || undefined,
         });
 
-        if (spokenBuf) await flushTtsAndWait();
+        // Do NOT block on full TTS playback — agent must stay listenable (barge-in + STT).
+        if (cleanToolCalls?.length) {
+          await ttsPlayer.whenIdle();
+        }
 
         if (cleanToolCalls?.length) {
           const toolMsgs = await runTools(cleanToolCalls);
@@ -546,11 +541,12 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         }
         break;
       }
-      console.log(`[SARVAM] Turn done +${Date.now() - turnStart}ms`);
+      if (turnLatency) {
+        logTurnLatency(turnLatency, `lang=${conversationLanguage} llm=${resolveActiveLlmProvider()}`);
+      }
     } catch (e: any) {
       console.error('[SARVAM LLM]', e?.message || e);
       callLog('ERROR', `SARVAM LLM ERROR: ${e?.message || e}`);
-      // Fallback non-streaming if stream fails
       try {
         const res: any = await client.chat.completions({
           model: sarvamChatModel() as any,
@@ -567,13 +563,65 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         console.error('[SARVAM LLM fallback]', e2?.message || e2);
       }
     } finally {
+      if (activeTurnAbort === turnAbort) activeTurnAbort = null;
+      turnLatency = null;
       turnBusy = false;
+      if (pendingUserText && !closed && !endCallInvoked) {
+        const queued = pendingUserText;
+        pendingUserText = null;
+        void chatTurn(queued);
+      }
+    }
+  };
+
+  const feedStt = (muLawData: Buffer) => {
+    if (!sttSocket || !sttReady) {
+      if (sttAudioQueue.length < STT_QUEUE_MAX) sttAudioQueue.push(Buffer.from(muLawData));
+      return;
+    }
+    try {
+      if (sttMode === 'realtime') {
+        sttSocket.sendRealtimeAudioInput({
+          event: 'audio_input',
+          audio: muLawData.toString('base64'),
+        });
+      } else {
+        const pcm = muLawBufferToPcm16le(muLawData);
+        sttSocket.transcribe({
+          audio: pcm.toString('base64'),
+          sample_rate: 8000,
+          encoding: 'audio/wav',
+        });
+      }
+    } catch (e: any) {
+      // Avoid log spam when socket briefly flaps
+      if (!/not open/i.test(String(e?.message || e))) {
+        console.error('[SARVAM] STT send failed:', e?.message || e);
+      }
+    }
+  };
+
+  const flushSttAudioQueue = () => {
+    while (sttAudioQueue.length && sttReady && sttSocket) {
+      const chunk = sttAudioQueue.shift();
+      if (chunk) feedStt(chunk);
     }
   };
 
   const onFinalTranscript = async (transcript: string, languageCode?: string | null) => {
     const text = (transcript || '').trim();
-    if (!text || text.length < 2) return;
+    if (!text || text.length < 1) return;
+    // Ignore punctuation-only / empty script noise
+    if (!/[\u0C80-\u0CFFa-zA-Z0-9\u0900-\u097F]/.test(text)) return;
+
+    if (turnBusy) {
+      console.log(`[SARVAM] User spoke during agent turn — abort & queue: "${text.slice(0, 80)}"`);
+      abortActiveTurn();
+      clearPlayback();
+      pendingUserText = pendingUserText ? `${pendingUserText} ${text}` : text;
+      return;
+    }
+
     const lang = detectScriptLanguage(text);
     console.log(
       `[SARVAM STT] lang=${lang} detected=${languageCode || '?'} text="${text.slice(0, 120)}"`,
@@ -585,10 +633,10 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
     if (isFirstResponse && customerPhone) {
       isFirstResponse = false;
       const lower = text.toLowerCase();
-      const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'plot', 'haan', 'beku', 'sari'];
-      const notInterestedKeywords = ['no', 'not interested', 'stop', 'busy', 'nahi', 'beda'];
+      const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'plot', 'haan', 'beku', 'sari', 'ಹೌದು', 'ಸರಿ'];
+      const notInterestedKeywords = ['no', 'not interested', 'stop', 'busy', 'nahi', 'beda', 'ಬೇಡ'];
       let interested: boolean | null = null;
-      if (interestedKeywords.some((kw) => lower.includes(kw))) interested = true;
+      if (interestedKeywords.some((kw) => lower.includes(kw)) || /ಹೌದು|ಸರಿ|ಬೇಕು/.test(text)) interested = true;
       else if (notInterestedKeywords.some((kw) => lower.includes(kw))) interested = false;
       void transitionLeadsByPhone(customerPhone, STATUS.ANSWERED, {
         interested,
@@ -601,15 +649,21 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
 
   const connectSttLegacy = async () => {
     sttMode = 'legacy';
+    sttReady = false;
+    const lang = sarvamSttLanguage();
+    const negFrames = sarvamSttNegativeFrames();
     sttSocket = await client.speechToTextStreaming.connect({
-      'language-code': 'unknown',
+      'language-code': lang as any,
       model: 'saaras:v3' as any,
       mode: 'transcribe',
       input_audio_codec: 'pcm_s16le',
       sample_rate: '8000',
-      high_vad_sensitivity: 'true',
+      // Fine VAD: high sensitivity alone ends speech in ~128ms — too choppy for Kannada.
+      high_vad_sensitivity: 'false',
       vad_signals: 'true',
       flush_signal: 'true',
+      negative_frames_window: String(negFrames),
+      negative_speech_threshold: '0.4',
     } as any);
     await sttSocket.waitForOpen();
     sttSocket.on('message', (msg: any) => {
@@ -619,8 +673,12 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         const signal = msg?.data?.signal_type;
         if (signal === 'START_SPEECH') {
           capture?.onCustomerSpeakStart();
-          if (Date.now() < aiPlaybackEndsAt) clearPlayback();
+          if (Date.now() < aiPlaybackEndsAt && !openingSpeechInProgress) {
+            console.log('[SARVAM] Barge-in via STT speech start');
+            clearPlayback();
+          }
         } else if (signal === 'END_SPEECH') {
+          lastSpeechEndAt = Date.now();
           capture?.onCustomerSpeakEnd();
           allowAiOutput();
           try {
@@ -635,8 +693,12 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         capture?.onSttError(String(msg?.data?.error || 'stt error'));
       }
     });
+    sttReady = true;
+    flushSttAudioQueue();
     callLog('SUCCESS', 'SARVAM STT LEGACY SESSION OPEN');
-    console.log('[SARVAM] STT legacy connected (pcm_s16le @ 8kHz)');
+    console.log(
+      `[SARVAM] STT legacy connected (pcm_s16le @ 8kHz lang=${lang} vadFrames=${negFrames})`,
+    );
   };
 
   const connectStt = async () => {
@@ -647,15 +709,15 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
     try {
       sttMode = 'realtime';
       sttSocket = await client.speechToTextRealtimeStreaming.connect({
-        language_code: 'auto',
+        language_code: sarvamSttLanguage() === 'unknown' ? 'auto' : sarvamSttLanguage(),
         model: 'saaras:v3-realtime',
         mode: 'transcribe',
         endpointing: 'vad',
         encoding: 'mulaw',
         sample_rate: '8000',
         silence_duration_ms: String(sarvamSttSilenceMs()),
-        prefix_padding_ms: '120',
-        min_speech_duration_ms: '120',
+        prefix_padding_ms: '160',
+        min_speech_duration_ms: '180',
         'Api-Subscription-Key': sarvamApiKey(),
       } as any);
       await sttSocket.waitForOpen();
@@ -663,6 +725,7 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
       const fallbackLegacy = async (reason: string) => {
         if (fellBack || closed) return;
         fellBack = true;
+        sttReady = false;
         console.warn(`[SARVAM] Realtime STT unusable (${reason}) — falling back to legacy`);
         callLog('RECONNECT', `SARVAM STT REALTIME FALLBACK: ${reason}`);
         try {
@@ -684,8 +747,12 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
           void onFinalTranscript(String(msg.text), msg.language);
         } else if (ev === 'vad.speech_start') {
           capture?.onCustomerSpeakStart();
-          if (Date.now() < aiPlaybackEndsAt) clearPlayback();
+          if (Date.now() < aiPlaybackEndsAt && !openingSpeechInProgress) {
+            console.log('[SARVAM] Barge-in via STT speech start');
+            clearPlayback();
+          }
         } else if (ev === 'vad.speech_end') {
+          lastSpeechEndAt = Date.now();
           capture?.onCustomerSpeakEnd();
           allowAiOutput();
         } else if (ev === 'error') {
@@ -703,6 +770,8 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
           }
         }
       });
+      sttReady = true;
+      flushSttAudioQueue();
       callLog('SUCCESS', 'SARVAM STT REALTIME SESSION OPEN');
       console.log(
         `[SARVAM] STT realtime connected (mulaw @ 8kHz, silence=${sarvamSttSilenceMs()}ms model=${sarvamSttModel()})`,
@@ -713,16 +782,9 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
     }
   };
 
-  const connectTts = async () => {
-    ttsSocket = await client.textToSpeechStreaming.connect({
-      model: sarvamTtsModel() as any,
-      send_completion_event: 'true',
-    } as any);
-    await ttsSocket.waitForOpen();
-    ttsSocket.on('message', onTtsMessage);
-    configureTts();
-    callLog('SUCCESS', 'SARVAM TTS SESSION OPEN');
-    console.log(`[SARVAM] TTS connected (speaker=${sarvamTtsSpeaker()} lang=${ttsLanguageCode})`);
+  const initTts = () => {
+    logTtsConfig();
+    callLog('SUCCESS', 'SARVAM TTS convertStream ready (bulbul:v3 / ishita)');
   };
 
   ws.on('message', async (data) => {
@@ -733,7 +795,14 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
       if (msg.event === 'start') {
         streamSid = msg.start.streamSid;
         if (msg.start.isPlivo) audioSink = 'plivo';
-        const customParams = msg.start.customParameters || {};
+        // Always prefer Plivo playAudio when provider is plivo (start payload varies).
+        if ((process.env.VOICE_PROVIDER || '').toLowerCase() === 'plivo') audioSink = 'plivo';
+
+        const fromUrl: Record<string, string> = {};
+        streamParams?.forEach((v, k) => {
+          fromUrl[k] = v;
+        });
+        const customParams = { ...fromUrl, ...(msg.start.customParameters || {}) };
         const isOutbound =
           customParams.isOutbound === 'true' ||
           customParams.direction === 'outbound' ||
@@ -776,29 +845,36 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
           void markAnsweredByPhone(customerPhone).catch(() => {});
         }
 
-        const currentDateStr = new Date().toLocaleDateString('en-IN');
+        const callT0 = Date.now();
         const greetingIdentity = customerIdentity.customer_name_normalized
           ? customerIdentity
           : null;
+
+        // STT in background — TTS is per-phrase convertStream (no persistent socket).
+        initTts();
+        const sttPromise = connectStt().catch((err: any) => {
+          console.error('[SARVAM] STT connect failed (non-fatal for opening):', err?.message || err);
+        });
+        const liveDataPromise = withTimeout(fetchLiveSiteData(), 1200);
+
+        // Build system prompt while TTS connects (does not block first audio).
+        const currentDateStr = new Date().toLocaleDateString('en-IN');
         let systemInstruction = isOutboundCall
           ? buildOutboundSystemInstruction(currentDateStr, greetingIdentity)
           : buildInboundSystemInstruction(currentDateStr, greetingIdentity);
         systemInstruction += `\n\n${formatIdentityContext(customerIdentity)}\n`;
+        systemInstruction += `\n\n${VOICE_SPOKEN_OUTPUT_RULES}\n`;
         systemInstruction +=
-          '\nVOICE STACK: Sarvam realtime STT+LLM+TTS. Keep every reply to 1–2 short spoken sentences. Start in Kannada (kn-IN). Prefer low latency over long explanations.\n';
-
+          `\nVOICE STACK: Sarvam ears (Saaras STT) + ${resolveActiveLlmProvider()} brain + Bulbul TTS.\n` +
+          'Pipeline: streaming STT → streaming LLM → streaming TTS. Replies must be speech-ready.\n';
+        console.log(`[SARVAM] LLM provider: ${resolveActiveLlmProvider()}`);
         messages.length = 0;
         messages.push({ role: 'system', content: systemInstruction });
 
-        // Connect STT/TTS in parallel; inject live data without blocking greeting long.
-        const liveDataPromise = withTimeout(fetchLiveSiteData(), 1200);
         try {
-          await Promise.all([connectStt(), connectTts()]);
-        } catch (err: any) {
-          console.error('[SARVAM] Failed to connect STT/TTS:', err?.message || err);
-          callLog('ERROR', `SARVAM CONNECT FAILED: ${err?.message || err}`);
-          hangupStream();
-          return;
+          await sttPromise.catch(() => {});
+        } catch {
+          /* opening already attempted */
         }
 
         liveDataPromise.then((liveData) => {
@@ -811,14 +887,28 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
           console.log('[SARVAM] Live site data injected');
         });
 
-        const greeting = isOutboundCall
-          ? getOutboundGreeting(greetingIdentity)
-          : getInboundGreeting(greetingIdentity);
-        console.log('[SARVAM] Speaking opening greeting');
-        await speakText(greeting);
+        openingSpeechInProgress = true;
+        openingCallT0 = callT0;
+        try {
+          if (isOutboundCall) {
+            await speakOutboundOpening(greetingIdentity, callT0);
+          } else {
+            const greeting = getInboundGreeting(greetingIdentity);
+            console.log(`[SARVAM] Speaking inbound greeting → ${audioSink}: ${greeting.slice(0, 80)}…`);
+            await speakInboundOpening(greeting, callT0);
+          }
+        } finally {
+          openingSpeechInProgress = false;
+          openingCallT0 = null;
+          allowAiOutput();
+        }
+
+        // STT should be up (or still connecting); opening already playing/done.
+        void sttPromise;
       } else if (msg.event === 'media') {
         const muLawData = Buffer.from(msg.media.payload, 'base64');
         capture?.onCustomerMuLaw(muLawData);
+        sttRing.push(muLawData);
 
         let sumSq = 0;
         for (let i = 0; i < muLawData.length; i++) {
@@ -830,7 +920,8 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
           now: Date.now(),
           aiPlaybackEndsAt,
           rms,
-          bargeInRms: 900,
+          // Barge-in during agent speech — tuned for phone echo vs real voice
+          bargeInRms: 1400,
           gateOpen: true,
           requireGateOpen: false,
           bargeInStartedAt,
@@ -838,31 +929,15 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
         });
         if (barge.action === 'arm') bargeInStartedAt = barge.startedAt;
         else if (barge.action === 'fire') {
-          clearPlayback();
+          if (!openingSpeechInProgress) {
+            console.log(`[SARVAM] Barge-in clear (rms=${rms.toFixed(0)})`);
+            clearPlayback();
+          }
           bargeInStartedAt = null;
         } else if (barge.action === 'reset') bargeInStartedAt = null;
         else bargeInStartedAt = barge.startedAt;
 
-        if (sttSocket) {
-          try {
-            if (sttMode === 'realtime') {
-              // Realtime path accepts telephony µ-law directly — skip PCM upsample.
-              sttSocket.sendRealtimeAudioInput({
-                event: 'audio_input',
-                audio: muLawData.toString('base64'),
-              });
-            } else {
-              const pcm = muLawBufferToPcm16le(muLawData);
-              sttSocket.transcribe({
-                audio: pcm.toString('base64'),
-                sample_rate: 8000,
-                encoding: 'audio/wav',
-              });
-            }
-          } catch (e: any) {
-            console.error('[SARVAM] STT send failed:', e?.message || e);
-          }
-        }
+        feedStt(muLawData);
       } else if (msg.event === 'stop') {
         console.log('[SARVAM] Call stopped');
         closed = true;
@@ -874,7 +949,7 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
           /* ignore */
         }
         try {
-          ttsSocket?.close?.();
+          ttsPlayer.cancel();
         } catch {
           /* ignore */
         }
@@ -894,7 +969,7 @@ export async function setupSarvam(ws: WebSocket, _streamParams?: URLSearchParams
       /* ignore */
     }
     try {
-      ttsSocket?.close?.();
+      ttsPlayer.cancel();
     } catch {
       /* ignore */
     }

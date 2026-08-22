@@ -102,11 +102,12 @@ describe('Kannada opening with identity', () => {
   it('uses the lead name naturally without forcing ಸರ್ in the greeting', () => {
     const male = buildOutboundKannadaOpening('Manjunath');
     assert.match(male, /ನಮಸ್ಕಾರ Manjunath/);
-    assert.match(male, /ಭೂಮಿ ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
-    assert.match(male, /plot ನೋಡ್ತಿದ್ದೀರಾ/);
+    assert.match(male, /ನಾನು ಭೂಮಿ/);
+    assert.match(male, /ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
+    assert.match(male, /Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ/);
 
     const neutral = buildOutboundKannadaOpening(null);
-    assert.match(neutral, /^ನಮಸ್ಕಾರ,/);
+    assert.match(neutral, /^ನಮಸ್ಕಾರ/);
     assert.doesNotMatch(neutral, /ನಮಸ್ಕಾರ ಸರ್/);
   });
 
