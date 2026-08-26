@@ -35,6 +35,7 @@ import {
   POLISHED_ENGLISH_STYLE,
   MYSORE_NATIVE_DIALECT,
   SITE_DETAIL_DISCLOSURE_RULES,
+  KANNADA_AKSHARA_SPELLING_RULES,
   buildOutboundKannadaOpening,
   buildOutboundKannadaOpeningBeats,
   getOutboundOpeningQuestionKn,
@@ -238,6 +239,8 @@ export function buildOutboundFastConnectInstruction(
   return `${AGENT_PERSONA_OUTBOUND}
 Alliance Square residential sites, Mysuru. Outbound — you called them. Kannada/Kanglish. Say "site" not "plot".
 
+SPELLING: "tell/say" = exact "ಹೇಳಿ" or "ಹೇಳು" (ಹೇ+ಳ). Never ಹೆಲ್ಉ / heli / helu.
+
 FAST OPENING (CRITICAL — beats everything else):
 - First audio within 0.3 seconds of connect. Speak IMMEDIATELY — do NOT wait for customer speech or silence.
 - Beat 1 NOW: say ONLY this intro line, then STOP (do not ask the question yet):
@@ -297,6 +300,8 @@ ${AGENT_PERSONA_OUTBOUND}
 You work at Alliance Square, a residential sites and layout company in Mysuru (say it like "${PRONUNCIATION_GUIDE["Mysuru"]}") (reference: https://www.alliancesquare.com/).
 
 ${MYSORE_NATIVE_DIALECT}
+
+${KANNADA_AKSHARA_SPELLING_RULES}
 
 WORDING — "SITE" ONLY (PDF section N):
 - Always say "site" when speaking to the customer — NEVER "plot".

@@ -30,9 +30,39 @@ export function stripAiBoilerplate(raw: string, language: 'kn-IN' | 'en-IN'): st
   return text.replace(/^\s+[,.\-–—]+\s*/, '').trim();
 }
 
+/**
+ * Fix Gemini / Latin-bleed misspellings that sound wrong on phone TTS.
+ * ಹೆಲ್ಉ / heli → ಹೇಳು / ಹೇಳಿ (ಹೇ + ಳ, not ಹೆ + ಲ್).
+ */
+export function fixKannadaAksharaSpellings(raw: string): string {
+  let text = raw;
+  const swaps: Array<[RegExp, string]> = [
+    // Wrong aksharas for "tell/say"
+    [/ಹೆಲ್ಉ/g, 'ಹೇಳು'],
+    [/ಹೆಲು/g, 'ಹೇಳು'],
+    [/ಹೆಳು/g, 'ಹೇಳು'],
+    [/ಹೇಲು/g, 'ಹೇಳು'],
+    [/ಹೆಲಿ/g, 'ಹೇಳಿ'],
+    [/ಹೆಳಿ/g, 'ಹೇಳಿ'],
+    [/ಹೇಲಿ/g, 'ಹೇಳಿ'],
+    [/ಹೆಲ್ತೀನಿ/g, 'ಹೇಳ್ತೀನಿ'],
+    [/ಹೆಲ್ತೀರಾ/g, 'ಹೇಳ್ತೀರಾ'],
+    [/ಹೆಲ್ತೀರಿ/g, 'ಹೇಳ್ತೀರಿ'],
+    // Latin romanizations that TTS misreads
+    [/\bhe+l+u\b/gi, 'ಹೇಳು'],
+    [/\bhe+l+i\b/gi, 'ಹೇಳಿ'],
+    [/\bheLi\b/g, 'ಹೇಳಿ'],
+    [/\bheLu\b/g, 'ಹೇಳು'],
+    [/\bhēḷu\b/gi, 'ಹೇಳು'],
+    [/\bhēḷi\b/gi, 'ಹೇಳಿ'],
+  ];
+  for (const [re, to] of swaps) text = text.replace(re, to);
+  return text;
+}
+
 /** Soften common textbook / formal Kannada into everyday spoken Mysuru forms. */
 export function softenTextbookKannada(raw: string): string {
-  let text = raw;
+  let text = fixKannadaAksharaSpellings(raw);
   const regexSwaps: Array<[RegExp, string]> = [
     [/ತಾವು/g, 'ನೀವು'],
     [/ತಮ್ಮ/g, 'ನಿಮ್ಮ'],

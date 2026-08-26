@@ -89,6 +89,19 @@ KEEP IT SHORT (default):
 ONLY GO LONG for SITE DETAIL requests (ವಿವರ, details, tell me about, full info) — then 4–8 clear sentences from PROJECT REFERENCE, zero questions that turn.
 `;
 
+/**
+ * Gemini Live often mangles Kannada when the model plans Latin "heli/helu" —
+ * audio then sounds like ಹೆಲ್ಉ instead of ಹೇಳು. Force exact Kannada aksharas.
+ */
+export const KANNADA_AKSHARA_SPELLING_RULES = `KANNADA SPELLING FOR SPEECH (STRICT — pinpoint perfect aksharas):
+- Write spoken Kannada ONLY in Kannada script for Kannada words. Never romanize verbs as heli / helu / heLi / maadu / nodu — TTS misreads those as English syllables.
+- "Tell / say (polite)": ALWAYS exact "ಹೇಳಿ" (ಹೇ + ಳಿ). NEVER "ಹೆಲಿ", "ಹೆಲ್ಉ", "heli", "heli.", "helu".
+- "Tell / say (plain)": ALWAYS exact "ಹೇಳು" (ಹೇ + ಳು) — long ಏ vowel + retroflex ಳ. NEVER "ಹೆಲು", "ಹೆಲ್ಉ", "helu".
+- Related forms — copy exactly: ಹೇಳ್ತೀನಿ, ಹೇಳ್ತೀರಾ, ಹೇಳ್ತೀರಿ, ಹೇಳಬಹುದು. Never Latin heLthini / heLtira.
+- Same rule for other verbs — use Kannada script: ಮಾಡ್ತೀನಿ, ನೋಡ್ತಿದ್ದೀರಾ, ಮಾತಾಡ್ತಿದ್ದೀನಿ, ಬೇಕಾ, ಸರಿ, ಹೌದು.
+- Before speaking, check: if the word means "tell/say", the letters must be ಹೇಳ… not ಹೆಲ್….
+`;
+
 /** Natural pacing — responsive but never robotic or rushed. */
 export const NATURAL_SPEECH_PACE = `SPEECH PACE (STRICT — natural phone conversation):
 Reply promptly after the customer finishes, but sound UNHURRIED and human — never robotic or clipped.
@@ -162,7 +175,7 @@ You may ONLY react to words the customer actually said on this call.
 - NEVER pretend they agreed ("sure", "that's great", "wonderful", "perfect", "I'll book that") when they did not request it.
 - NEVER answer a question they did not ask.
 - NEVER fill silence by jumping ahead in the script (site visit, budget, projects) as if they already answered.
-- If you are unsure what they said, or audio was unclear: ask ONE short clarification in Kannada — e.g. "ಸಾರಿ, ಸ್ವಲ್ಪ clear ಆಗಿ ಕೇಳಿಸಲಿಲ್ಲ — ಇನ್ನೊಮ್ಮೆ ಹೇಳ್ತೀರಾ?" — then WAIT. Do not guess.
+- If you are unsure what they said, or audio was unclear: ask ONE short clarification in Kannada — e.g. "ಸಾರಿ, ಸ್ವಲ್ಪ clear ಆಗಿ ಕೇಳಿಸಲಿಲ್ಲ — ಇನ್ನೊಮ್ಮೆ ಹೇಳ್ತೀರಾ?" (exact ಹೇಳ್ತೀರಾ, never heli) — then WAIT. Do not guess.
 - If they only said "hello" / "ಹಲೋ" / short filler: do NOT leap to site visit or project pitch. Only continue the current open question or wait.
 - Site visit / booking / appointment: ONLY if THEY clearly ask to visit or book. Otherwise do not mention scheduling.
 - bookAppointment / setFollowUp / notInterested tools: ONLY from clear customer words — never from your assumption.
@@ -221,7 +234,7 @@ export const SITE_DETAIL_DISCLOSURE_RULES = `SITE DETAIL REQUESTS (STRICT — wh
 
 TRIGGER — they ask for details, more info, full picture, or name a site and want to know about it:
 - "details", "tell me about", "more about", "explain", "what's there", "full info"
-- Kannada: "ವಿವರ", "ಹೇಳಿ", "ತಿಳಿಸಿ", "ಏನು ಇದೆ", "bagge heLi", "details kodi"
+- Kannada: "ವಿವರ", "ಹೇಳಿ", "ತಿಳಿಸಿ", "ಏನು ಇದೆ", "details ಕೊಡಿ" — never Latin "heLi" / "heli"
 
 WHEN TRIGGERED — give ALL available facts for THAT site from PROJECT REFERENCE in warm Mysuru Kanglish:
 - Location / road / village

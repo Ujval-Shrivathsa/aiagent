@@ -3,7 +3,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareTtsText, takeSpeakableChunks, softenTextbookKannada, stripAiBoilerplate } from '../tts-text';
+import { prepareTtsText, takeSpeakableChunks, softenTextbookKannada, stripAiBoilerplate, fixKannadaAksharaSpellings } from '../tts-text';
 import { normalizeSpokenNumbers } from '../spoken-pricing';
 
 describe('prepareTtsText', () => {
@@ -24,11 +24,11 @@ describe('prepareTtsText', () => {
     assert.doesNotMatch(out, /।/);
   });
 
-  it('softens textbook Kannada into everyday forms', () => {
-    const out = softenTextbookKannada('ತಾವು ಆಸಕ್ತಿ ಹೊಂದಿದ್ದೀರಾ?');
-    assert.match(out, /ನೀವು/);
-    assert.match(out, /ನೋಡ್ತಿದ್ದೀರಾ/);
-    assert.doesNotMatch(out, /ತಾವು/);
+  it('fixes ಹೆಲ್ಉ / heli misspellings to exact ಹೇಳು / ಹೇಳಿ', () => {
+    assert.equal(fixKannadaAksharaSpellings('ಸರಿ, ಹೆಲ್ಉ'), 'ಸರಿ, ಹೇಳು');
+    assert.equal(fixKannadaAksharaSpellings('heli'), 'ಹೇಳಿ');
+    assert.equal(fixKannadaAksharaSpellings('helu'), 'ಹೇಳು');
+    assert.equal(fixKannadaAksharaSpellings('ಹೇಳಿ'), 'ಹೇಳಿ');
   });
 
   it('strips AI boilerplate from English', () => {

@@ -5,6 +5,7 @@
 import { SPOKEN_PRICING_AND_DIMENSIONS_RULES } from './spoken-pricing';
 import {
   CLEAR_SHORT_REPLY_RULES,
+  KANNADA_AKSHARA_SPELLING_RULES,
   KANNADA_ANSWER_SITE_RULES,
   KANNADA_ENGLISH_MIX_RULES,
   MYSORE_NATIVE_DIALECT,
@@ -21,6 +22,8 @@ export const VOICE_SPOKEN_OUTPUT_RULES = `SPOKEN OUTPUT FOR TTS (STRICT — high
 - Preserve exact customer wording for Kanglish — do not translate their English loanwords into formal Kannada.
 - No AI filler: no "Certainly", "Absolutely", "I understand your concern", "Please be advised", "Great question".
 - Match their pace: brief customer → brief you; never faster or more intense than them.
+
+${KANNADA_AKSHARA_SPELLING_RULES}
 
 ${MYSORE_NATIVE_DIALECT}
 
