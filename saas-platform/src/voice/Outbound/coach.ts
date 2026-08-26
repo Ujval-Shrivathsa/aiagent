@@ -1,6 +1,4 @@
 import { GoogleGenAI } from '@google/genai';
-import { getSarvamClient, sarvamChatModel } from '../sarvam/config';
-import { getVoiceStack } from '../stack';
 
 const COACH_MODEL_PRIMARY = 'gemini-3.1-flash-lite';
 const COACH_MODEL_FALLBACK = 'gemini-3.5-flash';
@@ -20,9 +18,12 @@ ALLOWED PROJECTS ONLY:
 4) Alliance Serene Phase 2 — ready construction; off Bannur Road; South ₹3,350 / North ₹3,450; N/S only.
 5) Adhya Enclave — ready construction; Chamalapura, Nanjangud; ₹3,500; ask-only West facing; 3 acres / 48; SR ₹2,000.
 
+NEVER mention: Jeevan Vihar, Dhatri Square, Dr. Daya Nagar, Serene Phase 1, or any layout outside the five above.
+
 RULES:
 - Always say "site" never "plot".
-- After opening Yes → next ask budget; do not dump projects before budget.
+- Site dimensions: "30 by 40" not ×. Prices: "3300 per sqft", "59 thousand rupees" — clear in Kannada, English, and other languages.
+- After opening Yes → purpose ask: "ನೀವು construction site ನೋಡ್ತಿದ್ದೀರಾ ಅಥವಾ investment site ನೋಡ್ತಿದ್ದೀರಾ?" — NOT ಹೂಡಿಕೆಗಾಗಿ/ಮನೆಗಾಗಿ. Then budget; do not dump projects before budget.
 - Investment → UK Square / Sridevi. Construction → Serene Phase 2 / CNM Apex.
 - Budget gap ≤ ₹5 lakh: stay on current project, invite a stretch; > ₹5 lakh: other listed projects.
 - Unknown fact → AI agent + Sales Manager callback. Never invent prices, distances, or projects.
@@ -62,36 +63,15 @@ async function generateCoachGemini(ai: GoogleGenAI, model: string, userText: str
   return (res.text || '').trim();
 }
 
-async function generateCoachSarvam(userText: string, recent: string): Promise<string> {
-  const client = getSarvamClient();
-  const res: any = await client.chat.completions({
-    model: sarvamChatModel() as any,
-    messages: [
-      { role: 'system', content: COACH_SYSTEM },
-      {
-        role: 'user',
-        content: `Recent call (may be incomplete):\n${recent.slice(-1800)}\n\nLatest customer utterance:\n${userText}\n\nCoach Bhoomi now.`,
-      },
-    ],
-    temperature: 0.2,
-    max_tokens: 220,
-    reasoning_effort: null as any,
-  } as any);
-  return String(res?.choices?.[0]?.message?.content || '').trim();
-}
-
 /**
- * Outbound-only: a second model listens to the customer and briefs the live voice agent.
- * Uses Sarvam when VOICE_STACK=sarvam, otherwise Gemini. Returns null on timeout/error.
+ * Outbound-only: a second Gemini model briefs the live voice agent.
+ * Returns null on timeout/error.
  */
 export async function coachOutboundTurn(userText: string, recentTranscript: string): Promise<string | null> {
   const trimmed = userText.trim();
   if (!trimmed || trimmed.length < 2) return null;
 
   const run = async () => {
-    if (getVoiceStack() === 'sarvam') {
-      return await generateCoachSarvam(trimmed, recentTranscript);
-    }
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
     try {
       return await generateCoachGemini(ai, COACH_MODEL_PRIMARY, trimmed, recentTranscript);

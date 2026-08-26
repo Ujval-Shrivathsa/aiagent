@@ -82,6 +82,14 @@ function stripLoanwordsAndNoise(text: string): string {
 const FILLER_ONLY =
   /^(hmm+|hmm+|uh+|um+|ah+|ha+|haan+|han+|ok+|okay+|yes+|no+|yeah+|sari|ಸರಿ|ಹೌದು|ಇಲ್ಲ|ಹಲೋ|hello|hi|bye)[.!?]*$/i;
 
+export type LanguageSwitchState = {
+  /** Consecutive clear-English customer turns before leaving Kannada. */
+  englishStreak: number;
+};
+
+const EXPLICIT_ENGLISH_REQUEST =
+  /\b(speak|talk|continue|reply|tell me|explain|switch)\s+(in\s+)?english\b|\bin\s+english\b|\benglish\s+(please|only)\b|\benglish\s+(alli|nalli|lo)\b|ಇಂಗ್ಲಿಷ್|English\s+(alli|nalli|lo)/i;
+
 /**
  * Classify the customer's latest utterance for reply language.
  * Returns null when the utterance should not change the current language.
@@ -108,42 +116,92 @@ export function detectMeaningfulConversationLanguage(
   }
 
   const stripped = stripLoanwordsAndNoise(raw);
-  const latinTokens = (stripped.match(/[A-Za-z]{3,}/g) || []).filter(Boolean);
-
-  if (script === 'en' || (latinTokens.length >= 2 && !/[\u0C80-\u0CFF]/.test(raw))) {
-    // Clear English after removing loanwords / short fillers
-    if (latinTokens.length >= 2 || /\b(i|i'm|im|we|we're|looking|interested|not|don't|dont|want|need|can|could|please|tell|about)\b/i.test(stripped)) {
-      return { language: 'en', confidence: 'high', reason: 'clear_english' };
-    }
-    if (latinTokens.length === 1) {
-      return { language: null, confidence: 'none', reason: 'single_latin_token' };
-    }
-  }
+  const rawLatinTokens = (raw.match(/[A-Za-z]{3,}/g) || []).filter(Boolean);
+  const strippedLatinTokens = (stripped.match(/[A-Za-z]{3,}/g) || []).filter(Boolean);
 
   if (!stripped && /[A-Za-z]/.test(raw)) {
     // Only loanwords / numbers left → stay on current language (usually Kannada)
     return { language: null, confidence: 'none', reason: 'loanwords_only' };
   }
 
+  if (script === 'en' || (rawLatinTokens.length >= 4 && !/[\u0C80-\u0CFF]/.test(raw))) {
+    // Clear English — use raw text so real-estate loanwords (plot, Mysore) do not hide English
+    if (
+      rawLatinTokens.length >= 5 ||
+      (rawLatinTokens.length >= 4 &&
+        /\b(i|i'm|im|we|we're|you|are|is|what|where|how|tell|please|looking|interested|want|need|can|could|don't|dont|yes)\b/i.test(
+          raw,
+        ))
+    ) {
+      return { language: 'en', confidence: 'high', reason: 'clear_english' };
+    }
+    if (strippedLatinTokens.length >= 3 || rawLatinTokens.length >= 3) {
+      return { language: 'en', confidence: 'medium', reason: 'partial_english' };
+    }
+    if (rawLatinTokens.length === 1) {
+      return { language: null, confidence: 'none', reason: 'single_latin_token' };
+    }
+  }
+
   return { language: null, confidence: 'none', reason: 'ambiguous' };
 }
 
 /**
- * Apply detection to prior conversation language. Switches immediately on
- * high/medium confidence; otherwise keeps previous.
+ * Apply detection to prior conversation language. Kannada is locked until the
+ * customer explicitly requests English or speaks clear English twice in a row.
  */
 export function resolveNextConversationLanguage(
   previous: ConversationLanguage,
   customerText: string,
-): { language: ConversationLanguage; switched: boolean; decision: MeaningfulLanguageDecision } {
+  state: LanguageSwitchState = { englishStreak: 0 },
+): {
+  language: ConversationLanguage;
+  switched: boolean;
+  decision: MeaningfulLanguageDecision;
+  state: LanguageSwitchState;
+} {
+  const raw = String(customerText || '').trim();
   const decision = detectMeaningfulConversationLanguage(customerText);
-  if (decision.language && decision.language !== previous) {
-    return { language: decision.language, switched: true, decision };
+
+  if (EXPLICIT_ENGLISH_REQUEST.test(raw)) {
+    const next = { englishStreak: 0 };
+    if (previous !== 'en') {
+      return {
+        language: 'en',
+        switched: true,
+        decision: { language: 'en', confidence: 'high', reason: 'explicit_english_request' },
+        state: next,
+      };
+    }
+    return { language: 'en', switched: false, decision, state: next };
   }
-  if (decision.language) {
-    return { language: decision.language, switched: false, decision };
+
+  if (decision.language === 'en' && decision.confidence === 'high') {
+    const englishStreak = state.englishStreak + 1;
+    const nextState = { englishStreak };
+    if (previous === 'kn' && englishStreak >= 2) {
+      return { language: 'en', switched: true, decision, state: nextState };
+    }
+    if (previous === 'en') {
+      return { language: 'en', switched: false, decision, state: nextState };
+    }
+    return {
+      language: 'kn',
+      switched: false,
+      decision: { language: null, confidence: 'none', reason: 'english_streak_stay_kannada' },
+      state: nextState,
+    };
   }
-  return { language: previous, switched: false, decision };
+
+  if (decision.language === 'kn') {
+    const nextState = { englishStreak: 0 };
+    if (previous !== 'kn') {
+      return { language: 'kn', switched: true, decision, state: nextState };
+    }
+    return { language: 'kn', switched: false, decision, state: nextState };
+  }
+
+  return { language: previous, switched: false, decision, state };
 }
 
 export function languageCodeForConversation(lang: ConversationLanguage): 'kn-IN' | 'en-IN' {
@@ -162,9 +220,10 @@ export function languageSwitchSystemPrompt(
     );
   }
   return (
-    'LANGUAGE SWITCH: Customer is speaking Kannada / Kanglish. Reply in everyday spoken Mysuru Kannada (Kannada script). ' +
-    'Same ease as English — short, clear, human, not textbook or translated. Think in Kannada; never English-then-translate. ' +
-    'Use spoken forms (ಮಾತಾಡ್ತಿದ್ದೀನಿ, ನೋಡ್ತಿದ್ದೀರಾ, ಬೇಕಾ, ಸರಿ, ಹೇಳಿ). Keep natural English loanwords (site, plot, budget, project). ' +
-    'Match their Kanglish mix and tone. 1–2 short sentences + at most one question. Preserve context. Do not restart the greeting.'
+    'LANGUAGE SWITCH: Customer is speaking Kannada / Kanglish. Reply in everyday spoken Mysuru Kannada (Kannada script) ' +
+    'with English kept for site names, plot sizes (30 by 40), project names, and prices (per sqft, lakhs). ' +
+    'Same ease as English — short, clear, human. Finish each sentence before pausing. ' +
+    'Use spoken forms (ಮಾತಾಡ್ತಿದ್ದೀನಿ, ನೋಡ್ತಿದ್ದೀರಾ, ಬೇಕಾ, ಸರಿ, ಹೇಳಿ). ' +
+    '1–2 short sentences + at most one question. Preserve context. Do not restart the greeting.'
   );
 }

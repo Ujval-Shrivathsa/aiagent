@@ -384,10 +384,10 @@ function fireAvailabilityCheck(
       action: 'availability_check',
       spokenLine: line,
       systemPrompt:
-        `AVAILABILITY CHECK: ~5+ seconds of unexplained silence (customer did NOT ask you to wait). ` +
-        `Speak ONLY this short natural confirmation, then STOP and listen. ` +
+        `SYSTEM (internal — never speak the words "AVAILABILITY CHECK" aloud): ~5+ seconds of unexplained silence (customer did NOT ask you to wait). ` +
+        `Speak ONLY this short natural confirmation to the customer, then STOP and listen: "${line}" ` +
         `Do NOT ask a new sales question. Do NOT restart the intro. Do NOT call endCall. ` +
-        `Do NOT treat silence as not interested. Exact words: ${line}`,
+        `Do NOT treat silence as not interested.`,
     },
   };
 }

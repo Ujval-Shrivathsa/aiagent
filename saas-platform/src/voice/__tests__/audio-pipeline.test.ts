@@ -8,20 +8,24 @@ import { loadAudioPipelineConfig } from '../audio-pipeline-config';
 import { buildLiveSpeechConfig, describeSpeechConfig, loadLiveSpeechSettings } from '../tts/speech-config';
 import { detectScriptLanguage, isPrimarilyKannada } from '../language/script-detect';
 import { evaluateBargeIn, evaluateLocalSpeech } from '../turn-policy';
+import { isSpeechLike, shouldOpenGate } from '../speech-likelihood';
 
 describe('audio-pipeline-config', () => {
-  it('loads 50ms turn latency defaults', () => {
+  it('loads stable turn-detection defaults (avoid mid-speech cuts)', () => {
     const cfg = loadAudioPipelineConfig();
-    assert.equal(cfg.aadSilenceDurationMs, 50);
-    assert.equal(cfg.vadSilenceMs, 50);
-    assert.equal(cfg.responseWatchdogMs, 50);
-    assert.ok(cfg.bargeInMinMs >= 180, 'barge-in hold should ignore transient spikes');
-    assert.ok(cfg.bargeInMinRms >= 1000, 'barge-in RMS should sit above casual noise');
+    assert.equal(cfg.aadSilenceDurationMs, 400);
+    assert.equal(cfg.vadSilenceMs, 480);
+    assert.ok(cfg.vadSilenceMs >= cfg.aadSilenceDurationMs, 'local VAD should outlast AAD');
+    assert.equal(cfg.responseWatchdogMs, 1400);
+    assert.ok(cfg.gateOpenMinRms <= 130, 'quiet speech gate threshold');
+    assert.ok(cfg.gateFloor >= 0.55, 'closed gate passes quiet speech');
+    assert.ok(cfg.speechLikeGateFloor >= 0.7, 'speech-like duck boost for quiet callers');
+    assert.ok(cfg.bargeInMinRms >= 1900, 'barge-in RMS should ignore background TV');
     assert.equal(cfg.bargeInRequireGateOpen, true);
-    assert.ok(cfg.gateReleaseMs >= 250);
+    assert.ok(cfg.gateReleaseMs >= 200);
     assert.ok(cfg.gateFloor >= 0.15, 'closed gate should still pass speech to Gemini');
-    assert.match(cfg.aadEndSensitivity, /HIGH|MEDIUM/);
-    assert.match(cfg.aadStartSensitivity, /HIGH|MEDIUM/);
+    assert.match(cfg.aadEndSensitivity, /LOW|MEDIUM/);
+    assert.match(cfg.aadStartSensitivity, /HIGH/);
   });
 
   it('honours env overrides', () => {
@@ -37,22 +41,22 @@ describe('audio-pipeline-config', () => {
 });
 
 describe('tts speech-config', () => {
-  it('defaults to kn-IN for Kannada-first openings', () => {
+  it('defaults to auto TTS for Kanglish mix', () => {
     const prevLang = process.env.VOICE_TTS_LANGUAGE_CODE;
     const prevVoice = process.env.VOICE_TTS_VOICE_NAME;
     delete process.env.VOICE_TTS_LANGUAGE_CODE;
     delete process.env.VOICE_TTS_VOICE_NAME;
     try {
       const settings = loadLiveSpeechSettings();
-      assert.equal(settings.languageCode, 'kn-IN');
+      assert.equal(settings.languageCode, null);
       assert.equal(settings.voiceName, 'Kore');
       const cfg = buildLiveSpeechConfig(settings);
-      assert.equal(cfg.languageCode, 'kn-IN');
+      assert.equal(cfg.languageCode, undefined);
       assert.deepEqual(
         (cfg.voiceConfig as any).prebuiltVoiceConfig.voiceName,
         'Kore'
       );
-      assert.match(describeSpeechConfig(settings), /kn-IN/);
+      assert.match(describeSpeechConfig(settings), /auto/);
     } finally {
       if (prevLang === undefined) delete process.env.VOICE_TTS_LANGUAGE_CODE;
       else process.env.VOICE_TTS_LANGUAGE_CODE = prevLang;
@@ -117,20 +121,6 @@ describe('turn-policy', () => {
     assert.equal(fire.action, 'fire');
   });
 
-  it('ignores loud noise when the gate is closed', () => {
-    const d = evaluateBargeIn({
-      now: 2000,
-      aiPlaybackEndsAt: 5000,
-      rms: 5000,
-      bargeInRms: 1400,
-      gateOpen: false,
-      requireGateOpen: true,
-      bargeInStartedAt: 1000,
-      minHoldMs: 280,
-    });
-    assert.equal(d.action, 'reset');
-  });
-
   it('does not end a turn on a brief pause under the silence window', () => {
     const arm = evaluateLocalSpeech({
       vadIsSpeaking: true,
@@ -156,5 +146,71 @@ describe('turn-policy', () => {
       silenceMs: 50,
     });
     assert.equal(end.event, 'end');
+  });
+
+  it('ignores loud noise when the gate is closed', () => {
+    const d = evaluateBargeIn({
+      now: 2000,
+      aiPlaybackEndsAt: 5000,
+      rms: 5000,
+      bargeInRms: 1400,
+      gateOpen: false,
+      requireGateOpen: true,
+      bargeInStartedAt: 1000,
+      minHoldMs: 280,
+    });
+    assert.equal(d.action, 'reset');
+  });
+
+  it('speech-likelihood rejects steady noise but accepts quiet speech', () => {
+    const cfg = { minCrestFactor: 2.15, minZeroCrossRate: 0.038, quietSpeechFloorMult: 1.22 };
+    assert.equal(
+      isSpeechLike({
+        rms: 900,
+        peak: 1200,
+        crestFactor: 1.33,
+        zeroCrossRate: 0.01,
+        noiseFloorRms: 100,
+        config: cfg,
+      }),
+      false,
+      'steady TV-like noise',
+    );
+    assert.equal(
+      isSpeechLike({
+        rms: 180,
+        peak: 520,
+        crestFactor: 2.9,
+        zeroCrossRate: 0.06,
+        noiseFloorRms: 100,
+        config: cfg,
+      }),
+      true,
+      'quiet speech',
+    );
+    assert.equal(
+      shouldOpenGate({
+        rms: 900,
+        gateOpenRms: 200,
+        gateCloseRms: 136,
+        quietOpenRms: 130,
+        gateOpen: false,
+        speechLike: false,
+      }),
+      false,
+      'loud non-speech should not open gate',
+    );
+    assert.equal(
+      shouldOpenGate({
+        rms: 150,
+        gateOpenRms: 200,
+        gateCloseRms: 136,
+        quietOpenRms: 130,
+        gateOpen: false,
+        speechLike: true,
+      }),
+      true,
+      'quiet speech-like should open gate',
+    );
   });
 });

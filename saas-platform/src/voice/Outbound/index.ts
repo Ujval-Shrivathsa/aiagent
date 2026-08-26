@@ -7,11 +7,15 @@ export {
   GREETING,
   getGreeting,
   getOutboundGreetingInstruction,
+  getOutboundGreetingIntroInstruction,
+  getOutboundGreetingQuestionInstruction,
   REDIRECT_VARIANTS,
   UNKNOWN_DETAIL_VARIANTS,
   UNKNOWN_AREA_VARIANTS,
   PRONUNCIATION_GUIDE,
   buildOutboundSystemInstruction,
+  buildOutboundFastConnectInstruction,
+  buildOutboundProjectReferenceContext,
   OUTBOUND_SYSTEM_INSTRUCTION,
 } from './callguide';
 

@@ -20,21 +20,13 @@ let cachedData: LiveSiteData | null = null;
 let cacheExpiry: number = 0;
 const CACHE_TTL_MS = 60 * 1000;
 
-const ALLOWED_PROJECT_NAMES = [
-  "UK Square",
-  "Sridevi Lake View",
-  "CNM Apex City",
-  "Alliance Serene Phase 2",
-  "Adhya Enclave",
-] as const;
-
-function isAllowedProject(name: string): boolean {
-  const n = name.toLowerCase();
-  return ALLOWED_PROJECT_NAMES.some((allowed) => n.includes(allowed.toLowerCase()) || allowed.toLowerCase().includes(n));
-}
+import {
+  ALLOWED_LAYOUT_NAMES,
+  isAllowedLayoutName,
+} from '../voice/allowed-layouts';
 
 function filterAllowedLayouts(layouts: LiveLayoutData[]): LiveLayoutData[] {
-  return layouts.filter((l) => isAllowedProject(l.name));
+  return layouts.filter((l) => isAllowedLayoutName(l.name));
 }
 
 const FALLBACK_DATA: LiveSiteData = {
@@ -99,20 +91,17 @@ function parseLayoutsFromHtml(html: string): LiveLayoutData[] {
     while ((pm = priceRegex.exec(html)) !== null) {
       prices.push(`₹ ${pm[1]} per sqft onwards`);
     }
-    for (let i = 0; i < Math.min(allLinks.length, 9); i++) {
+    for (let i = 0; i < allLinks.length; i++) {
       const link = allLinks[i];
+      if (!isAllowedLayoutName(link.name)) continue;
       if (seen.has(link.name.toLowerCase())) continue;
       seen.add(link.name.toLowerCase());
       const sizesMap: Record<string, string[]> = {
         "uk square": [],
         "cnm apex city": ["30x40", "Odd Dimensions"],
         "sridevi lake view": ["30x40", "Odd Dimensions"],
-        "jeevan vihar phase 2": ["30x40", "30x50", "40x60"],
         "alliance serene phase 2": ["30x40", "40x60"],
         "adhya enclave": ["30x40", "30x50"],
-        "dr. daya nagar": ["30x40", "40x60"],
-        "jeevan vihar": ["30x40", "30x50", "40x60"],
-        "dhatri square": ["30x40", "40x60", "50x80"]
       };
       layouts.push({
         name: link.name,
@@ -185,7 +174,7 @@ export function formatLiveDataForPrompt(data: LiveSiteData): string {
         : (l.name.toLowerCase().includes("uk square")
           ? " | Site sizes: not listed in spec — do not invent (never 50×80 / 50*80)"
           : "");
-      return `${i + 1}. ${l.name} — ${l.pricePerSqFt}${sizeBit}${l.totalPlots ? " | " + l.totalPlots : ""}`;
+      return `${i + 1}. ${l.name} — ${l.pricePerSqFt.replace(/\bsq\.?\s*ft\.?\b/gi, 'square feet').replace(/\bsqft\b/gi, 'square feet')}${sizeBit}${l.totalPlots ? " | " + l.totalPlots : ""}`;
     })
     .join("\n");
   return `
@@ -198,6 +187,6 @@ Company Overview (Live):
 Allowed projects only (ignore any other layout names from the website):
 ${layoutLines}
 
-[END LIVE DATA — Project-Specific Content in the system prompt OVERRIDES any conflicting live numbers for UK Square, Sridevi Lake View, CNM Apex City, Alliance Serene Phase 2, and Adhya Enclave. Do NOT discuss any other projects.]
+[END LIVE DATA — Project-Specific Content in the system prompt OVERRIDES any conflicting live numbers. ONLY these five projects may be discussed: ${ALLOWED_LAYOUT_NAMES.join(', ')}. Do NOT discuss any other projects.]
 `.trim();
 }

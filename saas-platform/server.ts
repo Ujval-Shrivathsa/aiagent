@@ -4,8 +4,6 @@ import next from 'next';
 import { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
 import { setupGemini } from './src/voice/logic';
-import { setupSarvam } from './src/voice/sarvam';
-import { getVoiceStack } from './src/voice/stack';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true });
 dotenv.config({ path: path.resolve(process.cwd(), '../.env.local') });
@@ -25,14 +23,9 @@ app.prepare().then(() => {
   const wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', (ws, req) => {
-    const stack = getVoiceStack();
-    console.log(`[WS] New voice connection received (VOICE_STACK=${stack})`);
+    console.log('[WS] New voice connection received (Gemini Live)');
     const reqUrl = new URL(req.url || '/media-stream', `http://${req.headers.host || 'localhost'}`);
-    if (stack === 'sarvam') {
-      setupSarvam(ws as any, reqUrl.searchParams);
-    } else {
-      setupGemini(ws as any, reqUrl.searchParams);
-    }
+    setupGemini(ws as any, reqUrl.searchParams);
   });
 
   server.on('upgrade', (req, socket, head) => {
@@ -49,7 +42,7 @@ app.prepare().then(() => {
     console.log(`> Ready on http://localhost:${port}`);
     console.log(`> WebSocket listening on ws://localhost:${port}/media-stream`);
     console.log(
-      `> Voice provider: ${process.env.VOICE_PROVIDER || 'twilio'} | VOICE_STACK: ${getVoiceStack()} | APP_URL: ${process.env.APP_URL ? 'set' : 'missing'}`,
+      `> Voice provider: ${process.env.VOICE_PROVIDER || 'twilio'} | Stack: Gemini Live | APP_URL: ${process.env.APP_URL ? 'set' : 'missing'}`,
     );
   });
 });

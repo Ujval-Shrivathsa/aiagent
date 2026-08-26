@@ -31,8 +31,8 @@ export function loadOpeningConfig(): OpeningConfig {
     agentNameKn: str(process.env.VOICE_OPENING_AGENT_NAME_KN, 'ಭೂಮಿ'),
     agentNameEn: str(process.env.VOICE_OPENING_AGENT_NAME_EN, 'Bhoomi'),
     companyName: str(process.env.VOICE_OPENING_COMPANY_NAME, 'Alliance Square'),
-    questionKn: str(process.env.VOICE_OPENING_QUESTION_KN, 'ನೀವು Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ?'),
-    questionEn: str(process.env.VOICE_OPENING_QUESTION_EN, 'Are you looking at a site in Mysore?'),
+    questionKn: str(process.env.VOICE_OPENING_QUESTION_KN, 'ನೀವು Mysuru ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ?'),
+    questionEn: str(process.env.VOICE_OPENING_QUESTION_EN, 'Are you looking for a site in Mysuru?'),
     includeNameWhenAvailable: str(process.env.VOICE_OPENING_INCLUDE_NAME, '1') !== '0',
   };
 }

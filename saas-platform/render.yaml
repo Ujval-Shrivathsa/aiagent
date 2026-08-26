@@ -20,6 +20,14 @@ services:
         value: Kore
       - key: VOICE_TTS_LANGUAGE_CODE
         value: kn-IN
+      - key: VOICE_AAD_SILENCE_MS
+        value: "400"
+      - key: VOICE_VAD_SILENCE_MS
+        value: "480"
+      - key: VOICE_AAD_PREFIX_PADDING_MS
+        value: "150"
+      - key: VOICE_RESPONSE_WATCHDOG_MS
+        value: "1400"
       - key: APP_URL
         sync: false
       - key: VOICE_SERVER_URL

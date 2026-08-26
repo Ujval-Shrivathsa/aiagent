@@ -3,11 +3,16 @@ import { WebSocket } from 'ws';
 import { prisma } from '../lib/prisma';
 import { fetchLiveSiteData, formatLiveDataForPrompt } from '../lib/live-site-data';
 import { buildInboundSystemInstruction, getGreeting as getInboundGreeting, getInboundGreetingInstruction } from '../voice/Inbound/index';
-import { buildOutboundSystemInstruction, getGreeting as getOutboundGreeting, getOutboundGreetingInstruction } from '../voice/Outbound/index';
+import { buildOutboundSystemInstruction, buildOutboundFastConnectInstruction, buildOutboundProjectReferenceContext, getOutboundGreetingIntroInstruction, getOutboundGreetingQuestionInstruction } from '../voice/Outbound/index';
+import { buildOutboundKannadaOpeningBeats } from '../voice/kannada-style';
 import { OUTBOUND_OPENING_QUESTION_KN, getOutboundOpeningQuestionKn } from '../voice/kannada-style';
 import { CallCaptureSession } from '../voice/call-capture/session';
 import { callLog } from '../voice/call-capture/logger';
 import { loadAudioPipelineConfig } from '../voice/audio-pipeline-config';
+import { allowedLayoutsList, detectForbiddenLayoutMention } from '../voice/allowed-layouts';
+import { SPOKEN_PRICING_RUNTIME_REMINDER } from '../voice/spoken-pricing';
+import { PHRASE_FIXES_RUNTIME } from '../voice/phrase-fixes';
+import { takeCachedOutboundOpeningInstruction } from '../voice/opening-prewarm-cache';
 import { buildLiveSpeechConfig, describeSpeechConfig, loadLiveSpeechSettings } from '../voice/tts/speech-config';
 import { detectScriptLanguage } from '../voice/language/script-detect';
 import {
@@ -15,8 +20,11 @@ import {
   languageSwitchSystemPrompt,
   resolveNextConversationLanguage,
   type ConversationLanguage,
+  type LanguageSwitchState,
 } from '../voice/language/conversation-language';
+import { KANNADA_THROUGHOUT_RULES } from '../voice/kannada-style';
 import { evaluateBargeIn, evaluateLocalSpeech } from '../voice/turn-policy';
+import { analyzePcmFrame, isSpeechLike, shouldOpenGate } from '../voice/speech-likelihood';
 import { LEAD_STATUS, outcomeFromFlags } from '../lib/lead-status';
 import {
   markAnsweredByPhone,
@@ -43,6 +51,18 @@ import {
   type HonorificKn,
   type WaitingState,
 } from '../voice/wait-policy';
+import { isMeaningfulCustomerUtterance, shouldAllowEndCall } from '../voice/end-call-guard';
+import {
+  CUSTOMER_QUESTION_ANSWER_NUDGE,
+  looksLikeCustomerQuestion,
+  looksLikeSiteDetailRequest,
+  SITE_DETAIL_ANSWER_NUDGE,
+} from '../voice/customer-question';
+import {
+  isCustomerTurnSignal,
+  isShortAffirmativeReply,
+  looksLikeOpeningEcho,
+} from '../voice/short-reply';
 
 function parseHeaderBag(raw: any): Record<string, string> {
   const out: Record<string, string> = {};
@@ -147,7 +167,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
 // --- Tools ---
 const END_CALL_TOOL = {
   name: "endCall",
-  description: "End the call ONLY when the customer has CLEARLY said they want to finish — e.g. bye, goodbye, thank you for your time, thanks that's all, I'm done, that's all I needed, you can end the call, or an equivalent clear goodbye in any language. Also allowed after completing a busy/callback-later script the customer requested, or after they clearly declined interest. NEVER call this because of elapsed time (3–5 minutes or any duration), silence, pauses, short replies (okay/hmm), topic changes, incomplete answers, or because you think the conversation is finished. There is no time-based hang-up. If unsure, do NOT end the call.",
+  description: "End the call ONLY when the customer has CLEARLY said they want to finish — e.g. bye, goodbye, thank you for your time, thanks that's all, I'm done, that's all I needed, you can end the call, or an equivalent clear goodbye in any language. Also allowed after completing a busy/callback-later script the customer requested, OR in the SAME turn immediately after notInterested when they clearly declined. NEVER call this because of elapsed time, silence, pauses, short replies (okay/hmm/hello alone), topic changes, incomplete answers, or because the opening question was asked. If unsure, do NOT end the call.",
   parameters: {
     type: Type.OBJECT,
     properties: {},
@@ -268,6 +288,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let streamSid: string | null = null;
   let capture: CallCaptureSession | null = null;
   let geminiSession: any = null;
+  let pendingFullSystemInstruction = '';
   let transcriptCount = 0;
   let startTime = Date.now();
   let customerPhone: string | null = null;
@@ -284,13 +305,15 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let outboundOpeningRepeatDone = false;
   let outboundGreetingSpoken = false;
   let outboundOpeningWaitTimer: NodeJS.Timeout | null = null;
-  const OPENING_WAIT_MS = 4000;
+  const OPENING_WAIT_MS = 7000;
   const OPENING_QUESTION = getOutboundOpeningQuestionKn() || OUTBOUND_OPENING_QUESTION_KN;
   const audioCfg = loadAudioPipelineConfig();
   const ttsSettings = loadLiveSpeechSettings();
-  /** Track reply language — every new call starts Kannada (kn-IN TTS). */
+  /** Track reply language — every new call starts Kannada / Kanglish. */
   let conversationLanguage: ConversationLanguage = 'kn';
-  let activeTtsLanguageCode: 'kn-IN' | 'en-IN' = 'kn-IN';
+  let languageSwitchState: LanguageSwitchState = { englishStreak: 0 };
+  let activeTtsLanguageCode: 'kn-IN' | 'en-IN' | null = ttsSettings.languageCode as 'kn-IN' | 'en-IN' | null;
+  let pendingLanguageSwitchPrompt: string | null = null;
   const inputGain = audioCfg.inputGain;
   const voiceDebug = audioCfg.voiceDebug;
   const vadLog = (msg: string) => {
@@ -308,7 +331,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   //        so quiet callers keep a low open threshold; fan/AC/TV lines get a
   //        higher one. Closed = duck (never hard-mute) so quiet Kannada
   //        onsets still reach Gemini. ---
-  const HP_F0 = 100, HP_Q = 0.7071, HP_FS = 8000;
+  const HP_F0 = 120, HP_Q = 0.7071, HP_FS = 8000;
   const hpW = 2 * Math.PI * HP_F0 / HP_FS;
   const hpAlpha = Math.sin(hpW) / (2 * HP_Q);
   const hpA0 = 1 + hpAlpha;
@@ -329,7 +352,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const GATE_FLOOR_MULT = audioCfg.gateFloorMult;
   const GATE_CLOSE_RATIO = audioCfg.gateCloseRatio;
   const GATE_RELEASE_MS = audioCfg.gateReleaseMs;
-  const GATE_FLOOR = audioCfg.gateFloor;
+  // Gate thresholds used for barge-in / VAD only — caller audio is sent at full gain.
   let lastUpsampleSample = 0;      // continuity for linear-interpolation upsampling
   let lastGateLogAt = 0;
   let lastNoiseMetricLogAt = 0;
@@ -345,26 +368,40 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   // usually an open gate) so TV blips / keyboard clicks don't clear AI audio.
   let aiPlaybackEndsAt = 0;
   let bargeInStartedAt: number | null = null;
+  let bargeInConfirmedAt = 0;
+  const BARGE_IN_CONFIRM_TTL_MS = 2000;
   const BARGE_IN_MIN_RMS = audioCfg.bargeInMinRms;
   const BARGE_IN_FLOOR_MULT = audioCfg.bargeInFloorMult;
   const BARGE_IN_MIN_MS = audioCfg.bargeInMinMs;
   const BARGE_IN_REQUIRE_GATE = audioCfg.bargeInRequireGateOpen;
+  const speechLikeConfig = {
+    minCrestFactor: audioCfg.speechMinCrestFactor,
+    minZeroCrossRate: audioCfg.speechMinZeroCrossRate,
+    quietSpeechFloorMult: audioCfg.speechQuietFloorMult,
+  };
   // After barge-in / Gemini `interrupted`, keep dropping model audio until the
   // customer finishes speaking. Without this, late TTS chunks for the aborted
   // turn are still sent to Plivo AND the stereo recorder — AI talks over the
   // customer in the WAV for the rest of that overlap (and can skew sync).
   let suppressAiOutput = false;
+  let suppressRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let responseWatchdog: ReturnType<typeof setTimeout> | null = null;
+  const RESPONSE_WATCHDOG_MS = audioCfg.responseWatchdogMs;
+  const SUPPRESS_RECOVERY_MS = 400;
+  let speakNudgeSentThisTurn = false;
 
   // Dev-only latency instrumentation (set LATENCY_DEBUG=1). Marks:
   // AUDIO_IN (speech start) → GEMINI_AUDIO_SENT (turn committed) →
   // GEMINI_FIRST_AUDIO (first model audio) → PLIVO_AUDIO_SENT (first chunk out).
   const LATENCY_DEBUG = process.env.LATENCY_DEBUG === '1';
+  let streamConnectAt = 0;
   let speechEndAt = 0;
   let awaitingFirstAiAudio = false;
   const latLog = (label: string) => {
     if (!LATENCY_DEBUG) return;
+    const sinceStream = streamConnectAt > 0 ? ` stream+${Date.now() - streamConnectAt}ms` : '';
     const delta = speechEndAt > 0 ? ` +${Date.now() - speechEndAt}ms` : '';
-    console.log(`[LAT] ${label}${delta}`);
+    console.log(`[LAT] ${label}${sinceStream}${delta}`);
   };
 
   // Heuristic, best-effort tracking of "ask once" offers made by the model,
@@ -376,29 +413,146 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   // offer it already made.
   let siteVisitOfferDetected = false;
   let followUpOfferDetected = false;
+  let lastForbiddenLayoutNudgeAt = 0;
   let customerClearGoodbye = false;
+  let customerUtteranceCount = 0;
   let endCallInvoked = false;
   let goodbyeEndCallNudgeSent = false;
   // Includes Kannada site-visit phrasings (ಸೈಟ್ ವಿಸಿಟ್ / ವಿಸಿಟ್ ಮಾಡ...) so the
   // repeat-offer guard also works when the call is happening in Kannada.
-  const looksLikeOpeningEcho = (text: string) => {
-    const t = text.trim().toLowerCase();
-    if (t.length < 4) return true;
-    return /this is bhoomi|alliance square|looking for a site in mysuru|are you looking for a site|ನೋಡ್ತಿದ್ದೀರಾ|ಮಾತಾಡ್ತಿದ್ದೀನಿ|enquiry ಮಾಡಿದ್ದೀರಲ್ಲ|ನಮಸ್ಕಾರ ಸರ್/.test(t);
-  };
-
   let pendingLiveData: Awaited<ReturnType<typeof fetchLiveSiteData>> | null = null;
   let liveDataInjected = false;
+  let projectReferenceInjected = false;
+  let greetingAudioHeard = false;
+  let deferredContextScheduled = false;
+  let greetingRetrySent = false;
+  let openingGreetingTurnFinished = false;
+  let runtimeInstructionsInjected = false;
+  let greetingSent = false;
+  let openingQuestionSent = false;
+  let fullCallGuideInjected = false;
+  let geminiSessionOpened = false;
+  let lastCustomerTranscript = '';
+
+  /** Suppress back-to-back duplicate AI lines (e.g. nudge + natural reply saying the same thing). */
+  let lastPlayedAiNorm = '';
+  let lastPlayedAiAt = 0;
+  const AI_DEDUP_WINDOW_MS = 14_000;
+
+  const normalizeAiDedup = (text: string) =>
+    text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+
+  const isNearDuplicateAiTurn = (text: string): boolean => {
+    const norm = normalizeAiDedup(text);
+    if (norm.length < 14) return false;
+    if (Date.now() - lastPlayedAiAt > AI_DEDUP_WINDOW_MS) return false;
+    const prev = lastPlayedAiNorm;
+    if (!prev || prev.length < 14) return false;
+    const prefixLen = Math.min(28, norm.length, prev.length);
+    if (prefixLen >= 14 && norm.slice(0, prefixLen) === prev.slice(0, prefixLen)) return true;
+    const needle = prev.slice(0, Math.min(prev.length, 36));
+    return needle.length >= 14 && norm.includes(needle);
+  };
+
+  const markAiTurnPlayed = (text: string) => {
+    const norm = normalizeAiDedup(text);
+    if (norm.length >= 14) {
+      lastPlayedAiNorm = norm;
+      lastPlayedAiAt = Date.now();
+    }
+  };
+
+  const injectSilentContext = (text: string, label: string) => {
+    if (!geminiSession) return;
+    const wrapped =
+      `[SYSTEM CONTEXT — ${label} — SILENT ONLY: absorb as background knowledge. ` +
+      `Do NOT speak, do NOT read aloud, do NOT repeat the greeting, do NOT start a new turn. ` +
+      `Stay quiet and wait for the customer]:\n${text}`;
+    try {
+      if (typeof geminiSession.sendClientContent === 'function') {
+        geminiSession.sendClientContent({
+          turns: [{ role: 'user', parts: [{ text: wrapped }] }],
+          turnComplete: false,
+        });
+      } else {
+        geminiSession.sendRealtimeInput({ text: wrapped });
+      }
+    } catch (e: any) {
+      console.error(`[GEMINI] Silent context inject failed (${label}):`, e?.message || e);
+      throw e;
+    }
+  };
+
+  const injectFullCallGuideIfReady = () => {
+    if (fullCallGuideInjected || !isOutboundCall || !geminiSession || !pendingFullSystemInstruction.trim()) return;
+    fullCallGuideInjected = true;
+    try {
+      injectSilentContext(pendingFullSystemInstruction, 'FULL CALL GUIDE');
+      console.log('[GEMINI] Full outbound call guide delivered (post-intro).');
+    } catch (e: any) {
+      fullCallGuideInjected = false;
+      console.error('[GEMINI] Full call guide inject failed:', e?.message || e);
+    }
+  };
+
+  const injectRuntimeInstructionsIfReady = (runtimeText: string) => {
+    if (runtimeInstructionsInjected || !geminiSession || !runtimeText.trim()) return;
+    runtimeInstructionsInjected = true;
+    try {
+      injectSilentContext(runtimeText.trim(), 'RUNTIME RULES');
+      console.log('[GEMINI] Runtime instructions delivered (deferred for fast intro).');
+    } catch (e: any) {
+      runtimeInstructionsInjected = false;
+      console.error('[GEMINI] Runtime instruction inject failed:', e?.message || e);
+    }
+  };
+
+  const sendClientTextTurn = (text: string) => {
+    if (!geminiSession || !text.trim()) return;
+    if (typeof geminiSession.sendClientContent === 'function') {
+      geminiSession.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text }] }],
+        turnComplete: true,
+      });
+    } else {
+      geminiSession.sendRealtimeInput({ text });
+    }
+  };
+
+  const injectDeferredContextAfterOpening = () => {
+    if (deferredContextScheduled) return;
+    deferredContextScheduled = true;
+    setTimeout(() => {
+      if (!geminiSession) return;
+      console.log('[GEMINI] Injecting deferred project/live context (after opening turn complete)');
+      injectProjectReferenceIfReady();
+      injectLiveDataIfReady();
+    }, 600);
+  };
+
+  const injectProjectReferenceIfReady = () => {
+    if (projectReferenceInjected || !geminiSession) return;
+    projectReferenceInjected = true;
+    try {
+      injectSilentContext(buildOutboundProjectReferenceContext(), 'PROJECT REFERENCE');
+      console.log('[GEMINI] Project reference delivered to session.');
+    } catch (e: any) {
+      projectReferenceInjected = false;
+      console.error('[GEMINI] Project reference inject failed:', e?.message || e);
+    }
+  };
 
   const injectLiveDataIfReady = () => {
     if (liveDataInjected || !geminiSession || !pendingLiveData) return;
-    if (isOutboundCall && !outboundOpeningRepeatDone) return;
+    // Never inject during the opening greeting — it cancels Gemini audio output.
+    if (!greetingAudioHeard && !deferredContextScheduled) return;
     liveDataInjected = true;
     const liveDataSection = formatLiveDataForPrompt(pendingLiveData);
     try {
-      geminiSession.sendRealtimeInput({
-        text: `LIVE INVENTORY/PRICING DATA (silent context only — do not read this aloud, do not restart the greeting):\n${liveDataSection}`
-      });
+      injectSilentContext(
+        `LIVE INVENTORY/PRICING DATA:\n${liveDataSection}`,
+        'LIVE SITE DATA',
+      );
       console.log("[GEMINI] Live site data delivered to session.");
     } catch (e: any) {
       liveDataInjected = false;
@@ -435,7 +589,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     openingGraceTimer = setTimeout(() => {
       openingGraceTimer = null;
       openingSpeechInProgress = false;
-      if (!outboundOpeningRepeatDone) {
+      if (!outboundOpeningRepeatDone && !vadIsSpeaking && customerUtteranceCount === 0) {
         console.log("[GEMINI] Opening speech produced no transcript — re-arming retry");
         armOpeningWait();
       }
@@ -444,7 +598,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   const customerAnsweredOpening = (raw?: string) => {
     if (!isOutboundCall) return;
-    if (!raw || looksLikeOpeningEcho(raw)) return;
+    if (!raw) return;
+    if (looksLikeOpeningEcho(raw) && !isShortAffirmativeReply(raw)) return;
     outboundOpeningRepeatDone = true;
     openingSpeechInProgress = false;
     if (openingGraceTimer) {
@@ -456,34 +611,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const armOpeningWait = () => {
-    if (!isOutboundCall || outboundOpeningRepeatDone) return;
-    if (openingSpeechInProgress) return;
-    if (outboundOpeningWaitTimer) return;
-    console.log("[GEMINI] Arming 4s opening-question retry");
-    outboundOpeningWaitTimer = setTimeout(() => {
-      outboundOpeningWaitTimer = null;
-      if (!geminiSession || outboundOpeningRepeatDone) {
-        console.log("[GEMINI] Opening retry skipped (already answered or session gone)");
-        return;
-      }
-      outboundOpeningRepeatDone = true;
-      console.log("[GEMINI] No reply ~4s after opening question — repeating once");
-      const repeat = `The customer did not answer. Speak this ONE question calmly in simple Kannada, then STOP and listen. Exact words only — no greeting, no second question: ${OPENING_QUESTION}`;
-      try {
-        if (typeof geminiSession.sendClientContent === "function") {
-          geminiSession.sendClientContent({
-            turns: [{ role: "user", parts: [{ text: repeat }] }],
-            turnComplete: true,
-          });
-        } else {
-          geminiSession.sendRealtimeInput({ text: repeat });
-        }
-      } catch (e: any) {
-        console.error("[GEMINI] Opening retry send failed:", e?.message || e);
-      }
-      // After the opening repeat is spoken, turnComplete will arm WAITING_FOR_CUSTOMER.
-      setTimeout(() => injectLiveDataIfReady(), 1200);
-    }, OPENING_WAIT_MS);
+    // Opening question retry disabled — it caused the agent to repeat lines aloud.
+    outboundOpeningRepeatDone = true;
   };
 
   const currentHonorific = (): HonorificKn => {
@@ -516,20 +645,36 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const applyCustomerLanguageFromTranscript = (userText: string) => {
-    const resolved = resolveNextConversationLanguage(conversationLanguage, userText);
+    const resolved = resolveNextConversationLanguage(
+      conversationLanguage,
+      userText,
+      languageSwitchState,
+    );
+    languageSwitchState = resolved.state;
     if (!resolved.switched) return;
     const prev = conversationLanguage;
     conversationLanguage = resolved.language;
     activeTtsLanguageCode = languageCodeForConversation(conversationLanguage);
     console.log(
       `[LANG] Conversation language ${prev} → ${conversationLanguage} ` +
-        `(tts=${activeTtsLanguageCode}, reason=${resolved.decision.reason})`,
+        `(tts=${activeTtsLanguageCode ?? 'auto'}, reason=${resolved.decision.reason})`,
     );
-    // Gemini Live speechConfig is set at connect (kn-IN). Mid-call language is
-    // enforced via an immediate system nudge — do not wait for multiple turns.
-    sendWaitSystemPrompt(
-      `${languageSwitchSystemPrompt(conversationLanguage)} SYSTEM TTS LANGUAGE TARGET: ${activeTtsLanguageCode}.`,
-    );
+    const prompt =
+      `${languageSwitchSystemPrompt(conversationLanguage)} ` +
+      `SYSTEM TTS LANGUAGE TARGET: ${activeTtsLanguageCode ?? 'auto (Kanglish — Kannada frame + English site names/sizes/prices)'}.`;
+    // Do not interrupt AI mid-sentence — defer until playback drains.
+    if (Date.now() < aiPlaybackEndsAt - 120) {
+      pendingLanguageSwitchPrompt = prompt;
+      return;
+    }
+    sendWaitSystemPrompt(prompt);
+  };
+
+  const flushPendingLanguageSwitch = () => {
+    if (!pendingLanguageSwitchPrompt) return;
+    if (Date.now() < aiPlaybackEndsAt - 80) return;
+    sendWaitSystemPrompt(pendingLanguageSwitchPrompt);
+    pendingLanguageSwitchPrompt = null;
   };
 
   const scheduleWaitTick = () => {
@@ -572,6 +717,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   /** Agent finished speaking → WAITING_FOR_CUSTOMER (after TTS drains). */
   const armWaitingForCustomer = () => {
+    // Outbound: never treat pre-opening silence as "customer unavailable".
+    if (isOutboundCall && !openingGreetingTurnFinished) return;
     if (isOutboundCall && !outboundOpeningRepeatDone && !outboundGreetingSpoken) {
       return;
     }
@@ -591,7 +738,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const handleCustomerTranscriptForWait = (userText: string) => {
-    if (looksLikeOpeningEcho(userText)) return;
+    if (!isCustomerTurnSignal(userText)) return;
     const classified = classifyCustomerWhileWaiting(userText, waitCfg);
     if (classified.kind === 'wait_request') {
       waitingState = enterCustomerRequestedWait(
@@ -681,11 +828,50 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     outputLeftover = Buffer.alloc(0);
     aiPlaybackEndsAt = 0;
     bargeInStartedAt = null;
+    if (suppressRecoveryTimer) clearTimeout(suppressRecoveryTimer);
+    suppressRecoveryTimer = setTimeout(() => {
+      if (suppressAiOutput && !vadIsSpeaking) {
+        console.warn('[GEMINI] suppressAiOutput recovery — re-arming AI output');
+        allowAiOutput();
+      }
+    }, SUPPRESS_RECOVERY_MS);
     if (audioSink === "plivo") {
       ws.send(JSON.stringify({ event: "clearAudio", streamId: streamSid }));
     } else {
       ws.send(JSON.stringify({ event: "clear", streamSid }));
     }
+  };
+
+  const clearResponseWatchdog = () => {
+    if (responseWatchdog) {
+      clearTimeout(responseWatchdog);
+      responseWatchdog = null;
+    }
+  };
+
+  const armResponseWatchdog = () => {
+    clearResponseWatchdog();
+    responseWatchdog = setTimeout(() => {
+      if (!geminiSession) return;
+      if (suppressAiOutput) return;
+      if (Date.now() < aiPlaybackEndsAt - 100) return;
+      console.warn('[GUARD] No AI response after customer speech — nudging model');
+      geminiSession.sendRealtimeInput({
+        text:
+          'SYSTEM: The customer spoke but you have not replied with audio yet. ' +
+          'Reply now in a warm, natural tone — complete 1–2 flowing sentences, then listen. ' +
+          'Do not restart the greeting. Do not speak internal system labels aloud.',
+      });
+    }, RESPONSE_WATCHDOG_MS);
+  };
+
+  const resetSpeakNudge = () => {
+    speakNudgeSentThisTurn = false;
+  };
+
+  const nudgeSpeakNowIfNeeded = () => {
+    // Disabled — immediate nudges made replies sound rushed/robotic.
+    // Response watchdog (2.5s) handles genuine dead air instead.
   };
 
   const allowAiOutput = () => {
@@ -706,6 +892,14 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     for (const part of parts) {
       const data = part.inlineData?.data || part.audio?.data;
       if (!data) continue;
+      if (!greetingAudioHeard) {
+        greetingAudioHeard = true;
+        if (isOutboundCall) injectFullCallGuideIfReady();
+        if (streamConnectAt > 0) {
+          console.log(`[GEMINI] First greeting audio (+${Date.now() - streamConnectAt}ms from stream connect)`);
+        }
+      }
+      clearResponseWatchdog();
       if (awaitingFirstAiAudio) latLog('GEMINI_FIRST_AUDIO');
       const mime = String(part.inlineData?.mimeType || part.audio?.mimeType || '');
       const rateMatch = mime.match(/rate=(\d+)/i);
@@ -728,6 +922,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let vadSilenceStartedAt: number | null = null;
 
   console.log(`[WS] Connected (Twilio/Plivo). Waiting for start event...`);
+  const earlyIsOutbound = String(streamParams?.get('isOutbound') || '').toLowerCase() === 'true';
+  if (earlyIsOutbound) {
+    streamConnectAt = Date.now();
+    console.log('[GEMINI] Outbound WS connected — intro latency clock started');
+  }
   console.log(
     `[WAIT] Config: checkAfter=${waitCfg.availabilityCheckAfterMs}ms maxChecks=${waitCfg.maxAvailabilityChecks} ` +
       `nextDelay=${waitCfg.nextCheckDelayMs}ms holdOn=${waitCfg.holdOnMs}ms justAMinute=${waitCfg.justAMinuteMs}ms`,
@@ -758,17 +957,39 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
         const restoredName = String(rawName).replace(/_/g, ' ').trim();
         const hasValidName = restoredName && !blacklistedNames.includes(restoredName.toLowerCase());
         const customerName = hasValidName ? restoredName : '';
+        const rawPhone =
+          customParams.customerPhone ||
+          streamParams?.get('customerPhone') ||
+          '';
+        const phoneDigits = String(rawPhone).replace(/\D/g, '');
+        customerPhone = phoneDigits
+          ? (phoneDigits.length === 10 ? `+91${phoneDigits}` : `+${phoneDigits}`)
+          : null;
         customerIdentity = customerName
           ? resolveCustomerIdentity({
               rawName: customerName,
               source: isOutbound ? 'campaign' : 'crm',
             })
           : emptyIdentity();
-        const rawPhone = customParams.customerPhone || '';
-        const phoneDigits = String(rawPhone).replace(/\D/g, '');
-        customerPhone = phoneDigits
-          ? (phoneDigits.length === 10 ? `+91${phoneDigits}` : `+${phoneDigits}`)
-          : null;
+        if (phoneDigits) {
+          void prisma.lead
+            .findFirst({
+              where: { phone: { contains: phoneDigits.slice(-10) } },
+              orderBy: { createdAt: 'desc' },
+              select: { name: true },
+            })
+            .then((lead) => {
+              const leadName = lead?.name?.trim() || '';
+              if (leadName && !blacklistedNames.includes(leadName.toLowerCase())) {
+                customerIdentity = resolveCustomerIdentity({
+                  rawName: leadName,
+                  source: 'campaign',
+                });
+                console.log(`[IDENTITY] Using lead name from DB: ${leadName}`);
+              }
+            })
+            .catch((e) => console.warn('[IDENTITY] Lead name lookup failed:', e));
+        }
 
         console.log(
           `[WS] Stream started: ${streamSid} | Name: ${customerIdentity.customer_name_normalized || 'N/A'} | ` +
@@ -776,37 +997,33 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
             `Salutation: ${customerIdentity.customer_salutation || 'none'} | ` +
             `Spoken: ${customerIdentity.spoken_address || 'n/a'} | Phone: ${customerPhone || 'N/A'} | Outbound: ${isOutboundCall} | Sink: ${audioSink}`,
         );
-        capture = new CallCaptureSession({
-          streamSid,
-          phone: customerPhone,
-          outbound: isOutboundCall,
-        });
 
-        // Media stream connected ⇒ callee answered (or inbound picked up).
-        if (customerPhone) {
-          void markAnsweredByPhone(customerPhone)
-            .then((r) => console.log(`[DB] Stream start → answered updated=${r.count}`))
-            .catch((e) => console.error('[DB] mark answered failed:', e));
+        if (streamConnectAt === 0) {
+          streamConnectAt = Date.now();
         }
+        latLog('STREAM_CONNECT');
 
         const currentDateStr = new Date().toLocaleDateString('en-IN');
         const greetingIdentity = customerIdentity.customer_name_normalized
           ? customerIdentity
           : null;
+        const cachedOutboundInstruction =
+          isOutboundCall && phoneDigits ? takeCachedOutboundOpeningInstruction(phoneDigits) : null;
         const activeSystemInstruction = isOutboundCall
-          ? buildOutboundSystemInstruction(currentDateStr, greetingIdentity)
+          ? (cachedOutboundInstruction ??
+            buildOutboundSystemInstruction(currentDateStr, greetingIdentity, { deferProjectReference: true }))
           : buildInboundSystemInstruction(currentDateStr, greetingIdentity);
+        pendingFullSystemInstruction = activeSystemInstruction;
+        const geminiSystemInstruction = isOutboundCall
+          ? buildOutboundFastConnectInstruction(currentDateStr, greetingIdentity)
+          : activeSystemInstruction;
+        if (cachedOutboundInstruction) {
+          console.log('[GEMINI] Using pre-cached outbound system instruction (answer URL warm)');
+        }
+        if (isOutboundCall) {
+          console.log('[GEMINI] Fast-connect prompt for intro (full guide deferred until first audio)');
+        }
 
-        // LATENCY FIX: previously this file did
-        //   const liveDataPromise = fetchLiveSiteData();
-        //   const liveData = await liveDataPromise.catch(() => null);
-        // BEFORE calling ai.live.connect(...) — meaning the Gemini session
-        // wasn't even created, let alone the greeting sent, until the live
-        // data fetch resolved. That's the single biggest avoidable source of
-        // "the agent takes a while to start talking." Now we kick off the
-        // fetch (capped at 1.2s) in parallel with connecting to Gemini, and
-        // push the data into the session afterward as additional context
-        // instead of gating session creation on it.
         const liveDataPromise = withTimeout(fetchLiveSiteData(), 1200);
 
         const runtimeInstructionBase = `
@@ -815,17 +1032,20 @@ TOOL USAGE NOTES:
 - If they agree on a specific date/time between 10:00 AM and 5:30 PM (preferred site-visit window), call bookAppointment.
 - If they're interested but unsure of timing, call setFollowUp.
 - If they explicitly ask for a callback later (busy/driving), follow the BUSY / DRIVING / CALL BACK LATER script, then call endCall.
-- endCall ONLY when the customer clearly wants to hang up (bye / goodbye / thank you for your time / thanks that's all / I'm done / that's all I needed / you can end the call / clear equivalent in any language), OR after finishing a busy/callback-later script they requested. NEVER call endCall because a few minutes have passed, for silence, pauses, "okay"/"hmm", topic changes, or incomplete answers. No arbitrary call-duration cutoff.
+- endCall ONLY when the customer clearly wants to hang up (bye / goodbye / thank you for your time / thanks that's all / I'm done / that's all I needed / you can end the call / clear equivalent in any language), OR after finishing a busy/callback-later script they requested, OR in the same turn immediately after notInterested when they clearly declined. NEVER call endCall because a few minutes have passed, for silence, pauses, "okay"/"hmm"/"hello" alone, topic changes, or incomplete answers. Never hang up right after the opening question.
 
-LANGUAGE REMINDER: START every call in simple Mysuru Kannada (kn-IN). First reply MUST be Kannada. After that, follow the customer's LATEST meaningful language immediately — clear English → English; clear Kannada → Kannada. Do NOT switch for isolated loanwords (plot, budget, site, property…). Never refuse a language. Preserve context when switching.
-KANNADA REMINDER: Calm 30-year-old Karnataka sales professional. Short everyday Mysuru Kannada (not formal/textbook). One thought per sentence. Natural site/plot/budget/loan English loanwords OK. No excitement or drama. After a question, STOP and listen. Only the five PDF projects. Office 10–7; site visits 10–5:30 — never 11–7; never push scheduling unless they asked to book.
-NO INVENTION: Never invent that the customer asked for a site visit, booking, or any question they did not ask. Never say "sure / that's great / wonderful" about something they did not say. If unclear, ask one short clarification in Kannada and WAIT.
-PROJECT FACTS REMINDER: CNM Apex = South-facing only at ₹5,450/sqft (not North). Booking amount = ₹59,000. Agreement amount / maintenance cost-duration → Sales Manager callback. Do not invent non-PDF projects.
-LISTENING REMINDER: Never speak over the customer. Allow natural pauses and hesitations. If they interrupt, stop immediately. Opening: Speak → Ask → Stop → Listen. Max one question per turn.
+LANGUAGE REMINDER: ${KANNADA_THROUGHOUT_RULES}
+${PHRASE_FIXES_RUNTIME}
+KANNADA REMINDER: Calm Mysuru local sales professional. EVERY reply in Kanglish unless customer clearly switched to English (explicit request or two full English turns). Always say "site" not "plot". One question per turn ONLY. Natural budget/loan English loanwords inside Kannada sentences OK. No excitement or drama. After a question, STOP and listen. Only the five PDF projects. Office 10–7; site visits 10–5:30.
+NO INVENTION: Never invent that the customer asked for a site visit, booking, or any question they did not ask. Never say "sure / that's great / wonderful" about something they did not say. NEVER guess or invent the customer's name (no "Mohan", "Ramesh", etc.) unless CANONICAL CUSTOMER IDENTITY lists a verified name — if unknown, do not use any name. If unclear, ask one short clarification in Kannada and WAIT.
+PROJECT FACTS REMINDER: ONLY these layouts: ${allowedLayoutsList()}. Never Jeevan Vihar, Dhatri Square, Dr. Daya Nagar, or any other project. CNM Apex = South-facing only at ₹5,450/sqft (not North). Booking amount = ₹59,000. Agreement amount / maintenance cost-duration → Sales Manager callback.
+LISTENING REMINDER: Never speak over the customer. Short replies (houda, haudu, ha, sari, ok, ಹೌದು, ಸರಿ, ಹೇಳಿ) are REAL turns — always reply with warm Mysuru Kanglish; never stay silent. Allow natural pauses inside a sentence. If they interrupt, stop immediately. Opening: Speak → ONE question → Stop → Listen.
+VOICE REMINDER: Speak CLEARLY — unhurried, every word audible, natural pauses. Short messages: 1–2 sentences default. Never rush, clip, or monologue. Long answers ONLY for site detail requests.
+ANSWER REMINDER: Direct questions — short Kanglish answer (1–2 sentences). Site DETAIL requests ONLY — full facts in 4–8 clear sentences, NO question that turn. Never pad short answers with extra pitch.
+${SPOKEN_PRICING_RUNTIME_REMINDER}
 SILENCE REMINDER: After a question, wait. Do not fill silence. If the customer says wait / hold on / ಒಂದು ನಿಮಿಷ / ಸ್ವಲ್ಪ wait ಮಾಡಿ, respect that and do NOT ask if they are still there during their wait. Only brief availability checks come from system "AVAILABILITY CHECK:" messages after unexplained silence — never treat silence as not interested or hang-up.
 ${isOutboundCall ? `PRONUNCIATION: Hunsur is hun-sur / hun-soor ([hˈʌn.sɜː] or [hʊn.suːr]) — never hoo-na-soo-ru, never "Hoo-n-sur".
-SPEAK: Answer with spoken audio when the customer has actually finished a turn. Do not invent content to avoid silence. Keep the first spoken sentence short so playback starts immediately.
-QUALIFY: After interest = yes → purpose (invest vs construct) → budget → only matching projects. Do not dump unrelated layouts. Sridevi landmarks include Near Upcoming Electronic City. UK Square ~1 year / under construction ONLY if they specifically ask whether the project is ready. UK Square site sizes are not in the spec — never 50×80 / 50*80; do not invent a size.
+QUALIFY: Opening once → wait silently for reply → purpose: Kannada "ನೀವು construction site ನೋಡ್ತಿದ್ದೀರಾ ಅಥವಾ investment site ನೋಡ್ತಿದ್ದೀರಾ?" (NOT ಹೂಡಿಕೆಗಾಗಿ/ಮನೆಗಾಗಿ labels) → budget → only matching projects. NEVER repeat the opening or the same question twice. Budget stretch up to ₹5L below price before switching projects. Do not dump unrelated layouts. Sridevi landmarks include Near Upcoming Electronic City. UK Square ~1 year / under construction ONLY if they specifically ask whether the project is ready. UK Square site sizes are not in the spec — never 50×80 / 50*80; do not invent a size.
 ` : ''}
 
 CURRENT DATE: ${currentDateStr}
@@ -833,13 +1053,90 @@ CURRENT DATE: ${currentDateStr}
 ${formatIdentityContext(customerIdentity)}
 `;
 
-        let localSession: any;
-        try {
-          console.log(`[VOICE] Audio pipeline: gain=${inputGain} gateMin=${GATE_OPEN_MIN_RMS} gateRel=${GATE_RELEASE_MS}ms bargeMinRms=${BARGE_IN_MIN_RMS} bargeHold=${BARGE_IN_MIN_MS}ms vadSilence=${VAD_SILENCE_MS}ms aadSilence=${audioCfg.aadSilenceDurationMs}ms aadEnd=${audioCfg.aadEndSensitivity} aadStart=${audioCfg.aadStartSensitivity}`);
-          conversationLanguage = 'kn';
-          activeTtsLanguageCode = 'kn-IN';
-          console.log(`[VOICE] TTS: ${describeSpeechConfig(ttsSettings, activeTtsLanguageCode)} (Kannada-first)`);
-          localSession = await ai.live.connect({
+        const fastOpeningBlock = isOutboundCall
+          ? `\nFAST OPENING (CRITICAL — highest priority on connect):\n` +
+            `- Beat 1: intro line ONLY within 0.3 seconds — do NOT wait for the customer.\n` +
+            `- Beat 2: opening question once after intro finishes — then STOP and LISTEN.\n` +
+            `- NEVER repeat the intro, greeting, or question.\n`
+          : `\nFAST OPENING: Speak the greeting once within 0.5 seconds. No preamble. Do not repeat.\n`;
+
+        console.log(`[VOICE] Audio pipeline: gain=${inputGain} gateMin=${GATE_OPEN_MIN_RMS} gateRel=${GATE_RELEASE_MS}ms bargeMinRms=${BARGE_IN_MIN_RMS} bargeHold=${BARGE_IN_MIN_MS}ms vadSilence=${VAD_SILENCE_MS}ms aadSilence=${audioCfg.aadSilenceDurationMs}ms aadEnd=${audioCfg.aadEndSensitivity} aadStart=${audioCfg.aadStartSensitivity}`);
+        conversationLanguage = 'kn';
+        languageSwitchState = { englishStreak: 0 };
+        activeTtsLanguageCode = (ttsSettings.languageCode as 'kn-IN' | 'en-IN' | null) ?? 'kn-IN';
+        console.log(
+          `[VOICE] TTS: ${describeSpeechConfig(ttsSettings, activeTtsLanguageCode)} (Kanglish-first)`,
+        );
+
+        let localSession: any = null;
+        let pendingRuntimeInstruction = runtimeInstructionBase;
+
+        const trySendOpening = () => {
+          if (!geminiSession || !geminiSessionOpened || greetingSent) return;
+          sendSpokenGreeting();
+        };
+
+        const sendSpokenGreetingIntro = () => {
+          if (!geminiSession || greetingSent) return;
+          greetingSent = true;
+          try {
+            const greetingName = customerIdentity.customer_name_normalized ? customerIdentity : null;
+            const { intro } = buildOutboundKannadaOpeningBeats(greetingName);
+            const instruction = isOutboundCall
+              ? getOutboundGreetingIntroInstruction(greetingName)
+              : getInboundGreetingInstruction(greetingName);
+            console.log(`[GEMINI] Sending intro line (+${Date.now() - streamConnectAt}ms from stream)`);
+            capture?.onAiText(intro);
+            sendClientTextTurn(
+              `${instruction}\n\nCRITICAL: Speak intro NOW within 0.3 seconds. Do NOT repeat. Do NOT ask the question yet.`,
+            );
+          } catch (greetErr) {
+            greetingSent = false;
+            console.error('[GEMINI] Failed to send intro:', greetErr);
+          }
+        };
+
+        const sendSpokenGreetingQuestion = () => {
+          if (!geminiSession || openingQuestionSent || !isOutboundCall) return;
+          openingQuestionSent = true;
+          try {
+            const greetingName = customerIdentity.customer_name_normalized ? customerIdentity : null;
+            const { ask } = buildOutboundKannadaOpeningBeats(greetingName);
+            const instruction = getOutboundGreetingQuestionInstruction(greetingName);
+            console.log(`[GEMINI] Sending opening question (+${Date.now() - streamConnectAt}ms from stream)`);
+            capture?.onAiText(ask);
+            sendClientTextTurn(
+              `${instruction}\n\nCRITICAL: Say the question ONCE only. Then STOP and listen.`,
+            );
+          } catch (e: any) {
+            openingQuestionSent = false;
+            console.error('[GEMINI] Failed to send opening question:', e?.message || e);
+          }
+        };
+
+        const sendSpokenGreeting = () => {
+          if (isOutboundCall) {
+            sendSpokenGreetingIntro();
+            return;
+          }
+          if (!geminiSession || greetingSent) return;
+          greetingSent = true;
+          try {
+            const greetingName = customerIdentity.customer_name_normalized ? customerIdentity : null;
+            const greetingText: string = getInboundGreeting(greetingName?.customer_name_normalized ?? null);
+            const instruction = getInboundGreetingInstruction(greetingName);
+            console.log(`[GEMINI] Sending opening greeting once (+${Date.now() - streamConnectAt}ms from stream)`);
+            capture?.onAiText(greetingText);
+            sendClientTextTurn(
+              `${instruction}\n\nCRITICAL: Say the full opening ONCE only. Do NOT repeat any sentence. Then STOP and listen for the customer.`,
+            );
+          } catch (greetErr) {
+            greetingSent = false;
+            console.error('[GEMINI] Failed to send greeting:', greetErr);
+          }
+        };
+
+        const geminiConnectOptions = {
             model: "gemini-3.1-flash-live-preview",
             config: {
               responseModalities: [Modality.AUDIO],
@@ -857,7 +1154,7 @@ ${formatIdentityContext(customerIdentity)}
               },
               // Kannada-first: kn-IN for the opening; follow customer language via prompts.
               speechConfig: buildLiveSpeechConfig(ttsSettings, activeTtsLanguageCode) as any,
-              systemInstruction: `${activeSystemInstruction}\n${runtimeInstructionBase}`,
+              systemInstruction: `${geminiSystemInstruction}${fastOpeningBlock}`,
               tools: [
                 { functionDeclarations: [END_CALL_TOOL, BOOK_APPOINTMENT_TOOL, SET_NAME_TOOL, SET_FOLLOW_UP_TOOL, NOT_INTERESTED_TOOL] },
               ],
@@ -866,8 +1163,10 @@ ${formatIdentityContext(customerIdentity)}
             },
             callbacks: {
               onopen: () => {
-                console.log("[GEMINI] Session opened!");
+                console.log(`[GEMINI] Session opened! (+${Date.now() - streamConnectAt}ms from stream)`);
                 callLog('SUCCESS', 'GEMINI LIVE SESSION OPEN');
+                geminiSessionOpened = true;
+                trySendOpening();
               },
               onerror: (err: any) => {
                 const msg = err?.message || String(err);
@@ -877,6 +1176,19 @@ ${formatIdentityContext(customerIdentity)}
               },
               onmessage: async (response: any) => {
                 if (response.serverContent?.interrupted) {
+                  if (isOutboundCall && !openingGreetingTurnFinished) {
+                    console.log('[GEMINI] Opening-phase interrupt ignored — keep intro playing');
+                  } else {
+                  const confirmedUserSpeech =
+                    Date.now() - bargeInConfirmedAt < BARGE_IN_CONFIRM_TTL_MS ||
+                    vadIsSpeaking;
+                  if (!confirmedUserSpeech) {
+                    console.log(
+                      `[GEMINI] Turn interrupted ignored — no confirmed user speech ` +
+                        `(aiPlaying=${Date.now() < aiPlaybackEndsAt} vadSpeaking=${vadIsSpeaking} gateOpen=${gateOpen} floor=${noiseFloorRms.toFixed(0)})`,
+                    );
+                    return;
+                  }
                   console.log(`[GEMINI] Turn interrupted — clearing playback (aiPlaying=${Date.now() < aiPlaybackEndsAt} vadSpeaking=${vadIsSpeaking} gateOpen=${gateOpen} floor=${noiseFloorRms.toFixed(0)})`);
                   capture?.onAiSpeakEnd();
                   clearPlayback();
@@ -884,22 +1196,73 @@ ${formatIdentityContext(customerIdentity)}
                   vadIsSpeaking = true;
                   vadSilenceStartedAt = null;
                   return;
+                  }
                 }
 
                 // Play audio first so speech starts without waiting on DB/tools.
                 if (response.serverContent?.modelTurn?.parts) {
-                  playGeminiAudioParts(response.serverContent.modelTurn.parts);
+                  const turnText = response.serverContent.modelTurn.parts
+                    .map((p: any) => p.text || '')
+                    .join('')
+                    .trim();
+                  const duplicateOpening =
+                    isOutboundCall &&
+                    openingGreetingTurnFinished &&
+                    customerUtteranceCount === 0 &&
+                    !outboundOpeningRepeatDone &&
+                    turnText.length > 12 &&
+                    looksLikeOpeningEcho(turnText);
+                  const duplicateRecent =
+                    turnText.length > 12 && isNearDuplicateAiTurn(turnText);
+                  if (duplicateOpening) {
+                    console.warn(
+                      `[GEMINI] Suppressing duplicate opening greeting — model tried to repeat: "${turnText.slice(0, 60)}..."`,
+                    );
+                  } else if (duplicateRecent) {
+                    console.warn(
+                      `[GEMINI] Suppressing duplicate AI line — same content just spoken: "${turnText.slice(0, 60)}..."`,
+                    );
+                  } else {
+                    playGeminiAudioParts(response.serverContent.modelTurn.parts);
+                  }
                 }
                 if (response.serverContent?.turnComplete) {
                   sendPcmToTwilio(Buffer.alloc(0), true);
                   capture?.onAiTurnComplete();
                   capture?.onAiSpeakEnd();
+                  resetSpeakNudge();
+                  const completedAiText = response.serverContent?.modelTurn?.parts
+                    ?.map((p: any) => p.text || '')
+                    .join('')
+                    .trim();
+                  if (completedAiText) markAiTurnPlayed(completedAiText);
+                  if (isOutboundCall && !openingGreetingTurnFinished) {
+                    if (greetingSent && !openingQuestionSent) {
+                      latLog('OPENING_INTRO_COMPLETE');
+                      sendSpokenGreetingQuestion();
+                    } else if (openingQuestionSent) {
+                      openingGreetingTurnFinished = true;
+                      latLog('OPENING_TURN_COMPLETE');
+                      injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
+                      injectDeferredContextAfterOpening();
+                    }
+                  } else if (!isOutboundCall && !openingGreetingTurnFinished) {
+                    openingGreetingTurnFinished = true;
+                    latLog('OPENING_TURN_COMPLETE');
+                    injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
+                    injectDeferredContextAfterOpening();
+                  } else if (!isOutboundCall && !deferredContextScheduled) {
+                    injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
+                    injectDeferredContextAfterOpening();
+                  } else if (!deferredContextScheduled) {
+                    injectDeferredContextAfterOpening();
+                  }
                   // If the aborted turn finished after barge-in and the customer
                   // is already quiet, re-arm output for the next reply.
                   if (suppressAiOutput && !vadIsSpeaking) {
                     allowAiOutput();
                   }
-                  if (isOutboundCall && !outboundOpeningRepeatDone) {
+                  if (isOutboundCall && !outboundOpeningRepeatDone && openingGreetingTurnFinished) {
                     if (!outboundGreetingSpoken) {
                       outboundGreetingSpoken = true;
                       console.log("[GEMINI] Opening question spoken — waiting ~4s for a reply");
@@ -909,6 +1272,7 @@ ${formatIdentityContext(customerIdentity)}
                   // Patient listening: do not re-prompt Gemini until unexplained silence
                   // or an availability-check deadline (see wait-policy).
                   armWaitingForCustomer();
+                  flushPendingLanguageSwitch();
                 }
 
                 // Customer clearly said goodbye but model closed verbally without
@@ -938,7 +1302,7 @@ ${formatIdentityContext(customerIdentity)}
                       if (siteVisitOfferDetected) {
                         console.warn("[GUARD] Site visit appears to have been offered more than once — sending corrective nudge.");
                         geminiSession?.sendRealtimeInput({
-                          text: "REMINDER: you already offered a site visit earlier in this call. Do not offer it again unless the customer brings it up themselves."
+                          text: "REMINDER: Do NOT offer site visit again. You already offered it. Ask if they want more details about the site instead, or wait for them to ask about visiting."
                         });
                       }
                       siteVisitOfferDetected = true;
@@ -951,6 +1315,17 @@ ${formatIdentityContext(customerIdentity)}
                         });
                       }
                       followUpOfferDetected = true;
+                    }
+                    const forbiddenLayout = detectForbiddenLayoutMention(aiText);
+                    if (forbiddenLayout && Date.now() - lastForbiddenLayoutNudgeAt > 15000) {
+                      lastForbiddenLayoutNudgeAt = Date.now();
+                      console.warn(`[GUARD] AI mentioned forbidden layout "${forbiddenLayout}" — nudging.`);
+                      geminiSession?.sendRealtimeInput({
+                        text:
+                          `REMINDER: "${forbiddenLayout}" is NOT an allowed project on this call. ` +
+                          `ONLY discuss: ${allowedLayoutsList()}. Do not mention any other layout. ` +
+                          `If the customer asked about it, say you don't have that project and offer Sales Manager callback.`,
+                      });
                     }
                   }
                 }
@@ -969,9 +1344,11 @@ ${formatIdentityContext(customerIdentity)}
                   const userText = response.serverContent.inputTranscription.text;
                   const userLang = detectScriptLanguage(userText);
                   console.log(`[LANG] Customer STT lang=${userLang} text="${String(userText).slice(0, 100)}"`);
+                  lastCustomerTranscript = userText;
                   customerAnsweredOpening(userText);
                   handleCustomerTranscriptForWait(userText);
                   applyCustomerLanguageFromTranscript(userText);
+                  armResponseWatchdog();
                   // FIX: previously this unconditionally sent a "clear"
                   // event (wiping Priya's outbound audio buffer) on EVERY
                   // transcribed fragment, not just genuine interruptions —
@@ -982,6 +1359,28 @@ ${formatIdentityContext(customerIdentity)}
 
                   fullTranscription += `User: ${userText}\n`;
                   capture?.onCustomerTranscript(userText);
+                  if (isMeaningfulCustomerUtterance(userText, looksLikeOpeningEcho)) {
+                    customerUtteranceCount++;
+                  }
+                  if (isShortAffirmativeReply(userText)) {
+                    // Gemini AAD already commits the customer turn — do NOT nudge again (caused double replies).
+                    customerAnsweredOpening(userText);
+                  }
+                  if (looksLikeCustomerQuestion(userText)) {
+                    console.log(`[GUARD] Customer question detected — ensuring project context + answer nudge`);
+                    if (greetingAudioHeard || deferredContextScheduled) {
+                      injectProjectReferenceIfReady();
+                      injectLiveDataIfReady();
+                    }
+                    const nudge = looksLikeSiteDetailRequest(userText)
+                      ? SITE_DETAIL_ANSWER_NUDGE
+                      : CUSTOMER_QUESTION_ANSWER_NUDGE;
+                    try {
+                      geminiSession?.sendRealtimeInput({ text: nudge });
+                    } catch (e: any) {
+                      console.error('[GEMINI] Question answer nudge failed:', e?.message || e);
+                    }
+                  }
                   if (CUSTOMER_GOODBYE_PATTERN.test(userText)) {
                     customerClearGoodbye = true;
                     console.log(`[GUARD] Clear customer goodbye detected: "${userText.trim()}"`);
@@ -991,7 +1390,7 @@ ${formatIdentityContext(customerIdentity)}
                       isFirstResponse = false;
                       const lowerText = userText.toLowerCase();
 
-                      const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'plot', 'mysore', 'looking', 'haan', 'han', 'beku', 'vadu', 'sari'];
+                      const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'site', 'plot', 'mysore', 'mysuru', 'looking', 'haan', 'han', 'beku', 'vadu', 'sari', 'ಹೌದು', 'ಬೇಕು'];
                       const notInterestedKeywords = ['no', 'not interested', 'stop', 'don\'t', 'busy', 'wrong number', 'nahi', 'beda', 'vaddu', 'alla'];
 
                       // During the live call stay on `answered`. Only set the
@@ -1019,14 +1418,45 @@ ${formatIdentityContext(customerIdentity)}
                 if (response.toolCall) {
                   console.log("[GEMINI] Tool call received:", response.toolCall);
                   const toolResponses: any[] = [];
+                  const batchHasNotInterested = response.toolCall.functionCalls.some(
+                    (c: any) => c.name === 'notInterested',
+                  );
                   for (const call of response.toolCall.functionCalls) {
                     if (call.name === "endCall") {
-                      console.log("[GEMINI] End call tool called. Terminating call...");
+                      const endGuard = shouldAllowEndCall({
+                        callDurationMs: Date.now() - startTime,
+                        customerClearGoodbye,
+                        customerUtteranceCount,
+                        batchHasNotInterested,
+                      });
+                      if (!endGuard.allow) {
+                        console.warn(
+                          `[GUARD] Blocked premature endCall (${endGuard.reason}) — ` +
+                            `duration=${Math.round((Date.now() - startTime) / 1000)}s utterances=${customerUtteranceCount}`,
+                        );
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: false,
+                            message:
+                              'Do NOT end the call yet. The customer has not clearly finished. ' +
+                              'Continue the conversation — ask one relevant question or wait silently. ' +
+                              'Never hang up on silence or after only the opening.',
+                          },
+                          id: call.id,
+                        });
+                        continue;
+                      }
+
+                      console.log(`[GEMINI] End call tool allowed (${endGuard.reason}). Terminating call...`);
                       endCallInvoked = true;
 
-                      const otherTools = response.toolCall.functionCalls.filter((c: any) => c.name !== "endCall");
+                      const otherTools = response.toolCall.functionCalls.filter(
+                        (c: any) => c.name !== "endCall" && c.name !== "notInterested",
+                      );
                       if (otherTools.length > 0) {
                         console.log("[GEMINI] endCall skipped because other tools are present:", otherTools.map((t: any) => t.name));
+                        endCallInvoked = false;
                         toolResponses.push({ name: call.name, response: { success: false, message: "Please complete other actions before ending the call." }, id: call.id });
                         continue;
                       }
@@ -1173,9 +1603,28 @@ ${formatIdentityContext(customerIdentity)}
                         maritalStatus?: string;
                         preferFirstNameOnly?: boolean;
                       };
-                      console.log(`[GEMINI] Setting name to ${name} title=${title || ''} marital=${maritalStatus || ''}`);
+                      const proposed = String(name || '').trim();
+                      const recent = `${lastCustomerTranscript}\n${fullTranscription}`.toLowerCase();
+                      const nameHeard =
+                        proposed.length >= 2 && recent.includes(proposed.toLowerCase());
+                      if (!nameHeard) {
+                        console.warn(
+                          `[GUARD] setName rejected — "${proposed}" not clearly heard from customer`,
+                        );
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: false,
+                            message:
+                              'Only call setName when the customer clearly stated their name in this call. Do not guess names.',
+                          },
+                          id: call.id,
+                        });
+                        continue;
+                      }
+                      console.log(`[GEMINI] Setting name to ${proposed} title=${title || ''} marital=${maritalStatus || ''}`);
                       customerIdentity = resolveCustomerIdentity({
-                        rawName: name,
+                        rawName: proposed,
                         source: 'user_spoken',
                         explicitTitle: title ?? null,
                         maritalStatus:
@@ -1257,6 +1706,12 @@ ${formatIdentityContext(customerIdentity)}
               },
               onclose: async (event: any) => {
                 console.log("[GEMINI] Session closed. Reason:", event?.reason || "No reason provided", "Code:", event?.code);
+                if (!endCallInvoked) {
+                  console.warn(
+                    '[GEMINI] Unexpected session close mid-call — phone line stays open. ' +
+                      'Customer may hear silence until they hang up.',
+                  );
+                }
                 const duration = Math.round((Date.now() - startTime) / 1000);
 
                 if (duration > 3 && customerPhone) {
@@ -1313,80 +1768,71 @@ ${formatIdentityContext(customerIdentity)}
                   }
                 }
               }
-            }
-          });
-        } catch (err) {
-          console.error("[GEMINI] Failed to establish live session:", err);
-          callLog('ERROR', `GEMINI CONNECT FAILED: ${err instanceof Error ? err.message : String(err)}`);
-          capture?.onSttError('Gemini live connect failed');
+            },
+        };
+
+        const MAX_GEMINI_CONNECT_ATTEMPTS = 3;
+        for (let attempt = 1; attempt <= MAX_GEMINI_CONNECT_ATTEMPTS; attempt++) {
           try {
-            hangupStream();
-          } catch (sendErr) {
-            console.error("[WS] Failed to send stop event after connect failure:", sendErr);
+            if (attempt > 1) {
+              console.warn(`[GEMINI] Retrying live connect (${attempt}/${MAX_GEMINI_CONNECT_ATTEMPTS})...`);
+              await new Promise((r) => setTimeout(r, 1200 * (attempt - 1)));
+            }
+            localSession = await ai.live.connect(geminiConnectOptions);
+            break;
+          } catch (err) {
+            console.error(`[GEMINI] Connect attempt ${attempt} failed:`, err);
+            if (attempt === MAX_GEMINI_CONNECT_ATTEMPTS) {
+              callLog('ERROR', `GEMINI CONNECT FAILED: ${err instanceof Error ? err.message : String(err)}`);
+              capture?.onSttError('Gemini live connect failed');
+              console.warn('[GEMINI] Keeping phone line open — will NOT hang up on connect failure.');
+              return;
+            }
           }
-          ws.close();
+        }
+
+        if (!localSession) {
+          console.warn('[GEMINI] No live session — keeping phone line open.');
           return;
         }
 
         geminiSession = localSession;
+        trySendOpening();
 
-        // Send greeting only after the session handle is assigned (see onopen note).
-        try {
-          const greetingName = customerIdentity.customer_name_normalized
-            ? customerIdentity
-            : null;
-          const greetingText: string = isOutboundCall
-            ? getOutboundGreeting(greetingName)
-            : getInboundGreeting(greetingName?.customer_name_normalized ?? null);
-          const instruction = isOutboundCall
-            ? getOutboundGreetingInstruction(greetingName)
-            : getInboundGreetingInstruction(greetingName);
-          console.log(`[GEMINI] Sending calm Kannada-first greeting for spoken audio`);
-          capture?.onAiText(greetingText);
-          if (typeof geminiSession.sendClientContent === 'function') {
-            geminiSession.sendClientContent({
-              turns: [{ role: 'user', parts: [{ text: instruction }] }],
-              turnComplete: true,
-            });
-          } else {
-            geminiSession.sendRealtimeInput({ text: instruction });
-          }
-        } catch (greetErr) {
-          console.error("[GEMINI] Failed to send greeting after connect:", greetErr);
+        capture = new CallCaptureSession({
+          streamSid,
+          phone: customerPhone,
+          outbound: isOutboundCall,
+        });
+
+        if (customerPhone) {
+          void markAnsweredByPhone(customerPhone)
+            .then((r) => console.log(`[DB] Stream start → answered updated=${r.count}`))
+            .catch((e) => console.error('[DB] mark answered failed:', e));
         }
 
-        // Push live inventory/pricing data into the session once it resolves,
-        // instead of gating session creation (and the greeting) on it. If it
-        // times out or fails, the call proceeds fine on the static layout
-        // list already baked into the system prompt.
         liveDataPromise.then((liveData) => {
           if (!liveData) {
             console.warn("[GEMINI] Live site data unavailable or timed out — continuing with static layout list only.");
             return;
           }
           pendingLiveData = liveData;
-          injectLiveDataIfReady();
+          if (greetingAudioHeard || deferredContextScheduled) {
+            injectLiveDataIfReady();
+          }
         });
-
-        if (isOutboundCall) {
-          setTimeout(() => {
-            if (outboundOpeningRepeatDone || outboundOpeningWaitTimer) return;
-            outboundGreetingSpoken = true;
-            console.log("[GEMINI] Fallback: arming 4s opening retry (no turnComplete yet)");
-            armOpeningWait();
-          }, 5500);
-        }
 
       } else if (msg.event === 'media') {
         try {
           const muLawData = Buffer.from(msg.media.payload, "base64");
           capture?.onCustomerMuLaw(muLawData);
           if (!geminiSession) return;
+          // Outbound: agent speaks first — do not send caller audio to Gemini until opening finishes.
+          if (isOutboundCall && !openingGreetingTurnFinished) return;
           // Do NOT reset wait/silence timers on raw media — fan/TV/keyboard must
           // not count as a customer response. Only meaningful STT does.
           const sampleCount = muLawData.length;
           const cleaned = sampleCount <= SCRATCH_SAMPLES ? scratchCleaned : new Int16Array(sampleCount);
-          let sumSquares = 0;
           for (let i = 0; i < sampleCount; i++) {
             const x = muLawToPcmTable[muLawData[i]];
             const y = HP_B0 * x + HP_B1 * hpX1 + HP_B2 * hpX2 - HP_A1 * hpY1 - HP_A2 * hpY2;
@@ -1394,30 +1840,40 @@ ${formatIdentityContext(customerIdentity)}
             hpY2 = hpY1; hpY1 = y;
             const s = y > 32767 ? 32767 : y < -32768 ? -32768 : Math.round(y);
             cleaned[i] = s;
-            sumSquares += s * s;
           }
-          const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
+          const frame = analyzePcmFrame(cleaned, sampleCount);
+          const rms = frame.rms;
           const now = Date.now();
+          const speechLike = isSpeechLike({
+            ...frame,
+            noiseFloorRms,
+            config: speechLikeConfig,
+          });
 
-          // 2) Adaptive noise-floor tracking: converge quickly while the packet
-          //    looks like background (below 2x current floor), drift up only
-          //    very slowly during speech so talking never inflates the floor.
+          // 2) Adaptive noise-floor: track background quickly; during AI playback
+          //    raise floor on steady non-speech (TV / fan) so it does not open the gate.
+          const aiPlaying = now < aiPlaybackEndsAt;
           if (rms < noiseFloorRms * 2) {
-            noiseFloorRms += (rms - noiseFloorRms) * 0.05;
+            noiseFloorRms += (rms - noiseFloorRms) * 0.07;
+          } else if (aiPlaying && !speechLike && rms < noiseFloorRms * 5) {
+            noiseFloorRms += (rms - noiseFloorRms) * 0.016;
+          } else if (aiPlaying && rms < noiseFloorRms * 4.5) {
+            noiseFloorRms += (rms - noiseFloorRms) * 0.0015;
           } else {
-            noiseFloorRms += (rms - noiseFloorRms) * 0.004;
+            noiseFloorRms += (rms - noiseFloorRms) * 0.003;
           }
           if (noiseFloorRms < NOISE_FLOOR_MIN) noiseFloorRms = NOISE_FLOOR_MIN;
           if (noiseFloorRms > NOISE_FLOOR_MAX) noiseFloorRms = NOISE_FLOOR_MAX;
 
-          // 3) Gate thresholds ride the measured floor instead of fixed values.
+          // 3) Gate: speech-like opens (quiet voice); steady loud noise alone does not.
           const gateOpenRms = Math.min(GATE_OPEN_MAX_RMS, Math.max(GATE_OPEN_MIN_RMS, noiseFloorRms * GATE_FLOOR_MULT));
           const gateCloseRms = gateOpenRms * GATE_CLOSE_RATIO;
+          const quietOpenRms = Math.max(GATE_OPEN_MIN_RMS * 0.72, noiseFloorRms * 1.28);
           const wasGateOpen = gateOpen;
-          if (rms >= gateOpenRms) {
+          if (shouldOpenGate({ rms, gateOpenRms, gateCloseRms, quietOpenRms, gateOpen, speechLike })) {
             gateOpen = true;
             gateBelowSince = null;
-          } else if (gateOpen && rms < gateCloseRms) {
+          } else if (gateOpen && rms < gateCloseRms && !speechLike) {
             if (gateBelowSince === null) {
               gateBelowSince = now;
             } else if (now - gateBelowSince >= GATE_RELEASE_MS) {
@@ -1427,13 +1883,21 @@ ${formatIdentityContext(customerIdentity)}
           }
           if (voiceDebug && wasGateOpen !== gateOpen && now - lastGateLogAt > 250) {
             lastGateLogAt = now;
-            vadLog(`gate ${gateOpen ? 'OPEN' : 'CLOSE'} rms=${rms.toFixed(0)} thrOpen=${gateOpenRms.toFixed(0)} floor=${noiseFloorRms.toFixed(0)}`);
+            vadLog(
+              `gate ${gateOpen ? 'OPEN' : 'CLOSE'} rms=${rms.toFixed(0)} thrOpen=${gateOpenRms.toFixed(0)} ` +
+                `speechLike=${speechLike} crest=${frame.crestFactor.toFixed(1)} floor=${noiseFloorRms.toFixed(0)}`,
+            );
           }
           if (voiceDebug && now - lastNoiseMetricLogAt > 5000) {
             lastNoiseMetricLogAt = now;
-            vadLog(`metrics floor=${noiseFloorRms.toFixed(0)} rms=${rms.toFixed(0)} gate=${gateOpen ? 'open' : 'closed'} aiPlaying=${now < aiPlaybackEndsAt}`);
+            vadLog(
+              `metrics floor=${noiseFloorRms.toFixed(0)} rms=${rms.toFixed(0)} gate=${gateOpen ? 'open' : 'closed'} ` +
+                `speechLike=${speechLike} zcr=${frame.zeroCrossRate.toFixed(3)} aiPlaying=${now < aiPlaybackEndsAt}`,
+            );
           }
-          const effectiveGain = (gateOpen ? 1 : GATE_FLOOR) * inputGain;
+          // Full gain to Gemini always — ducking quiet caller audio hurt STT.
+          // Gate / speech-like metrics are for local barge-in and VAD only.
+          const effectiveGain = inputGain;
 
           // 4) Gain + 8k→16k upsample via linear interpolation into
           //    preallocated scratch (duplication added imaging artifacts that
@@ -1457,19 +1921,20 @@ ${formatIdentityContext(customerIdentity)}
               }
             });
 
-            // Local barge-in: sustained speech well above floor, preferably with
-            // an open gate, so transient spikes / background TV don't clear AI.
+            // Local barge-in: sustained speech-like voice well above floor — not TV/fan.
             const bargeInRms = Math.max(BARGE_IN_MIN_RMS, noiseFloorRms * BARGE_IN_FLOOR_MULT);
-            const bargeDecision = evaluateBargeIn({
-              now,
-              aiPlaybackEndsAt,
-              rms,
-              bargeInRms,
-              gateOpen,
-              requireGateOpen: BARGE_IN_REQUIRE_GATE,
-              bargeInStartedAt,
-              minHoldMs: BARGE_IN_MIN_MS,
-            });
+            const bargeDecision = speechLike
+              ? evaluateBargeIn({
+                  now,
+                  aiPlaybackEndsAt,
+                  rms,
+                  bargeInRms,
+                  gateOpen,
+                  requireGateOpen: BARGE_IN_REQUIRE_GATE,
+                  bargeInStartedAt,
+                  minHoldMs: BARGE_IN_MIN_MS,
+                })
+              : { action: 'reset' as const, startedAt: null };
             if (bargeDecision.action === 'arm') {
               bargeInStartedAt = bargeDecision.startedAt;
             } else if (bargeDecision.action === 'fire') {
@@ -1477,6 +1942,7 @@ ${formatIdentityContext(customerIdentity)}
                 `[VAD] Local barge-in — clearing AI playback ` +
                   `(rms=${rms.toFixed(0)} thr=${bargeInRms.toFixed(0)} hold=${BARGE_IN_MIN_MS}ms gateOpen=${gateOpen} floor=${noiseFloorRms.toFixed(0)})`
               );
+              bargeInConfirmedAt = Date.now();
               capture?.onAiSpeakEnd();
               clearPlayback();
               bargeInStartedAt = null;
@@ -1490,9 +1956,8 @@ ${formatIdentityContext(customerIdentity)}
             }
 
             const vadEnergyThr = Math.max(VAD_ENERGY_MIN_RMS, noiseFloorRms * VAD_ENERGY_FLOOR_MULT);
-            // Prefer gated speech for local speech-start so background doesn't
-            // flip vadIsSpeaking; still allow energy only when the gate is open.
-            const speechEnergy = gateOpen && rms > vadEnergyThr;
+            const speechEnergy =
+              rms > vadEnergyThr && (speechLike || rms > vadEnergyThr * 1.45);
             const speechDecision = evaluateLocalSpeech({
               vadIsSpeaking,
               speechEnergy,
@@ -1503,6 +1968,7 @@ ${formatIdentityContext(customerIdentity)}
             if (speechDecision.event === 'start') {
               vadIsSpeaking = true;
               vadSilenceStartedAt = null;
+              resetSpeakNudge();
               capture?.onCustomerSpeakStart();
               console.log(
                 `[VAD] Customer speech START rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} floor=${noiseFloorRms.toFixed(0)}`
@@ -1525,6 +1991,8 @@ ${formatIdentityContext(customerIdentity)}
                 `[VAD] Customer speech END after ${speechDecision.pausedFor}ms silence (vadSilenceMs=${VAD_SILENCE_MS} aadSilenceMs=${audioCfg.aadSilenceDurationMs})`
               );
               latLog('GEMINI_AUDIO_SENT (local speech end; AAD owns turn commit)');
+              nudgeSpeakNowIfNeeded();
+              armResponseWatchdog();
               // If STT never arrived (noise spike), keep waiting from a fresh silence clock
               // unless the customer already requested an explicit wait window.
               if (

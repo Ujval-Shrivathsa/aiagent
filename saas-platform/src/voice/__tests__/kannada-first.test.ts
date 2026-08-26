@@ -16,7 +16,7 @@ describe('opening-config + Kannada-first opening', () => {
     const opening = buildOutboundKannadaOpening(null);
     assert.match(opening, /^ನಮಸ್ಕಾರ/);
     assert.match(opening, /ನಾನು ಭೂಮಿ Alliance Square ಇಂದ ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
-    assert.match(opening, /ನೀವು Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ\?/);
+    assert.match(opening, /ನೀವು Mysuru ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ\?/);
     assert.doesNotMatch(opening, /enquiry|site visit|budget/i);
     assert.ok(opening.length < 200, 'opening must stay short');
   });
@@ -51,8 +51,22 @@ describe('meaningful conversation language', () => {
     assert.equal(d.language, null);
   });
 
-  it('switches to English on a clear English sentence immediately', () => {
+  it('stays Kannada on first clear English sentence', () => {
     const r = resolveNextConversationLanguage('kn', "Yes, I'm looking for a plot in Mysore.");
+    assert.equal(r.language, 'kn');
+    assert.equal(r.switched, false);
+    assert.equal(r.state.englishStreak, 1);
+  });
+
+  it('switches to English after two clear English turns', () => {
+    const r1 = resolveNextConversationLanguage('kn', "Yes, I'm looking for a plot in Mysore.");
+    const r2 = resolveNextConversationLanguage('kn', 'What is the rate for UK Square?', r1.state);
+    assert.equal(r2.language, 'en');
+    assert.equal(r2.switched, true);
+  });
+
+  it('switches to English immediately on explicit request', () => {
+    const r = resolveNextConversationLanguage('kn', 'Can you speak in English please?');
     assert.equal(r.language, 'en');
     assert.equal(r.switched, true);
   });
@@ -70,8 +84,8 @@ describe('meaningful conversation language', () => {
   });
 });
 
-describe('TTS Kannada-first defaults', () => {
-  it('defaults languageCode to kn-IN', () => {
+describe('TTS Kanglish defaults', () => {
+  it('defaults languageCode to kn-IN for Kannada-first calls', () => {
     const prev = process.env.VOICE_TTS_LANGUAGE_CODE;
     delete process.env.VOICE_TTS_LANGUAGE_CODE;
     try {

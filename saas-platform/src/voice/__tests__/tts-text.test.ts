@@ -3,7 +3,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareTtsText, takeSpeakableChunks, softenTextbookKannada, stripAiBoilerplate } from '../sarvam/tts-text';
+import { prepareTtsText, takeSpeakableChunks, softenTextbookKannada, stripAiBoilerplate } from '../tts-text';
+import { normalizeSpokenNumbers } from '../spoken-pricing';
 
 describe('prepareTtsText', () => {
   it('keeps English commas for polished pacing', () => {
@@ -34,6 +35,12 @@ describe('prepareTtsText', () => {
     const out = stripAiBoilerplate('Certainly! I understand your concern. What budget range?', 'en-IN');
     assert.doesNotMatch(out, /Certainly/i);
     assert.match(out, /budget range/);
+  });
+
+  it('normalizes dimensions and prices for clear phone speech', () => {
+    assert.match(prepareTtsText('30×40 site at ₹3,300 per sq. ft.', 'kn-IN'), /30 by 40/);
+    assert.match(prepareTtsText('30×40 site at ₹3,300 per sq. ft.', 'kn-IN'), /3300 per square feet/);
+    assert.match(normalizeSpokenNumbers('₹5,450–₹5,500/sqft'), /5450 to .*5500 per square feet/);
   });
 });
 

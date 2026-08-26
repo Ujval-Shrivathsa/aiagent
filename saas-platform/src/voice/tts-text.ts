@@ -1,7 +1,9 @@
 /**
- * Shape text for Bulbul phone TTS.
- * English keeps polished punctuation; Kannada keeps everyday spoken forms + Kanglish spacing.
+ * Speech-ready text helpers (Kannada Kanglish spacing, number/dimension normalization).
+ * Used by tests and any post-processing of model text before playback.
  */
+
+import { normalizeSpokenNumbers } from './spoken-pricing';
 
 /** Strip generic AI / call-center boilerplate before TTS. */
 export function stripAiBoilerplate(raw: string, language: 'kn-IN' | 'en-IN'): string {
@@ -66,9 +68,9 @@ export function softenTextbookKannada(raw: string): string {
 export function prepareTtsText(raw: string, language: 'kn-IN' | 'en-IN'): string {
   let text = stripAiBoilerplate((raw || '').replace(/\s+/g, ' ').trim(), language);
   if (!text) return '';
+  text = normalizeSpokenNumbers(text, language);
 
   if (language === 'en-IN') {
-    // Polished Indian English — keep commas for natural clause pauses.
     text = text.replace(/[।]+/g, '.');
     text = text.replace(/!{2,}/g, '!').replace(/\?{2,}/g, '?');
     text = text.replace(/\.{2,}/g, '.');
@@ -77,15 +79,12 @@ export function prepareTtsText(raw: string, language: 'kn-IN' | 'en-IN'): string
     return text.replace(/\s+/g, ' ').trim();
   }
 
-  // Everyday Kannada / Kanglish
   text = softenTextbookKannada(text);
   text = text.replace(/[।]+/g, '.');
   text = text.replace(/[…]+/g, '.');
   text = text.replace(/!{2,}/g, '!').replace(/\?{2,}/g, '?');
   text = text.replace(/\.{2,}/g, '.');
-  // Keep light commas for natural spoken pauses; drop comma spam.
   text = text.replace(/,{2,}/g, ',');
-  // Clear boundary between Kannada letters and English loanwords (helps Bulbul).
   text = text.replace(/([\u0C80-\u0CFF])([A-Za-z0-9])/g, '$1 $2');
   text = text.replace(/([A-Za-z0-9])([\u0C80-\u0CFF])/g, '$1 $2');
   text = text.replace(/\s+([,.!?])/g, '$1');
@@ -94,8 +93,7 @@ export function prepareTtsText(raw: string, language: 'kn-IN' | 'en-IN'): string
 }
 
 /**
- * Split streaming LLM text into speakable phrases.
- * Default: sentence boundaries only — avoids micro-TTS clips that cause audio breaks.
+ * Split streaming LLM text into speakable phrases (sentence boundaries).
  */
 export function takeSpeakableChunks(
   buffer: string,

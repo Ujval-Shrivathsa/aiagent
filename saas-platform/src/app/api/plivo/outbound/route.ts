@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { callLog } from '@/voice/call-capture/logger';
+import { cacheOutboundOpeningInstruction } from '@/voice/opening-prewarm-cache';
 
 function wsHostFromRequest(req: Request): string {
   const fromEnv = (process.env.APP_URL || process.env.VOICE_SERVER_URL || '')
@@ -50,6 +51,13 @@ export async function POST(req: Request) {
     ...(phoneDigits ? { customerPhone: phoneDigits } : {}),
     ...(customerName.trim() ? { customerName: customerName.trim() } : {}),
   }).toString();
+  if (phoneDigits) {
+    try {
+      cacheOutboundOpeningInstruction(phoneDigits, headerName.replace(/_/g, ' ') || customerName.trim());
+    } catch (e) {
+      console.warn('[plivo/outbound] Opening instruction pre-cache failed:', e);
+    }
+  }
   const streamUrl = `wss://${wsHost}/media-stream?${streamQuery}`;
   callLog('CALL', `CALL ANSWERED  outbound to=+${phoneDigits || customerPhone}`);
 

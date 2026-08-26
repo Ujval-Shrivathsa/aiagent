@@ -16,6 +16,13 @@ function num(env: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Plivo/Twilio mu-law streams arrive in ~20ms frames — floor for silence windows. */
+const TELEPHONY_FRAME_MS = 20;
+
+function silenceMs(env: string | undefined, fallback: number): number {
+  return Math.max(TELEPHONY_FRAME_MS, num(env, fallback));
+}
+
 function str(env: string | undefined, fallback: string): string {
   const v = (env || '').trim();
   return v || fallback;
@@ -43,38 +50,48 @@ export type AudioPipelineConfig = {
   aadPrefixPaddingMs: number;
   aadEndSensitivity: string;
   aadStartSensitivity: string;
+  /** Nudge Gemini if no audio reply this long after customer speech ends. */
+  responseWatchdogMs: number;
+  /** Crest factor / ZCR — speech vs steady background (TV, fan). */
+  speechMinCrestFactor: number;
+  speechMinZeroCrossRate: number;
+  speechQuietFloorMult: number;
+  /** Closed-gate gain boost when frame is speech-like (quiet caller pickup). */
+  speechLikeGateFloor: number;
   voiceDebug: boolean;
 };
 
 export function loadAudioPipelineConfig(): AudioPipelineConfig {
   return {
-    // Slightly lower gain: less amplified fan/TV into Gemini AAD/STT.
-    inputGain: num(process.env.VOICE_INPUT_GAIN, 2.0),
-    noiseFloorMin: num(process.env.VOICE_NOISE_FLOOR_MIN, 40),
-    noiseFloorMax: num(process.env.VOICE_NOISE_FLOOR_MAX, 900),
-    // Higher floor + multiplier: background chatter opens the gate less often,
-    // but GATE_OPEN_MIN stays low enough for quiet Kannada syllables.
-    gateOpenMinRms: num(process.env.VOICE_GATE_OPEN_MIN_RMS, 300),
-    gateOpenMaxRms: num(process.env.VOICE_GATE_OPEN_MAX_RMS, 1200),
-    gateFloorMult: num(process.env.VOICE_GATE_FLOOR_MULT, 2.6),
-    gateCloseRatio: num(process.env.VOICE_GATE_CLOSE_RATIO, 0.72),
-    // Longer release so breaths / short hesitations don't close the gate mid-word.
-    gateReleaseMs: num(process.env.VOICE_GATE_RELEASE_MS, 450),
-    // Duck closed packets more (~18dB) so noise is quieter into Gemini without hard-mute.
-    gateFloor: num(process.env.VOICE_GATE_FLOOR, 0.12),
-    bargeInMinRms: num(process.env.VOICE_BARGE_IN_MIN_RMS, 1400),
-    bargeInFloorMult: num(process.env.VOICE_BARGE_IN_FLOOR_MULT, 6),
-    bargeInMinMs: num(process.env.VOICE_BARGE_IN_MIN_MS, 280),
+    // Turn-end: ~400ms AAD + ~480ms local VAD — tolerates breaths/pauses in Kannada.
+    // (25ms cut callers off mid-sentence; gate ducking hurt quiet-voice STT.)
+    // Quiet speech: low RMS open threshold; full gain always forwarded to Gemini.
+    inputGain: num(process.env.VOICE_INPUT_GAIN, 2.45),
+    noiseFloorMin: num(process.env.VOICE_NOISE_FLOOR_MIN, 35),
+    noiseFloorMax: num(process.env.VOICE_NOISE_FLOOR_MAX, 750),
+    gateOpenMinRms: num(process.env.VOICE_GATE_OPEN_MIN_RMS, 95),
+    gateOpenMaxRms: num(process.env.VOICE_GATE_OPEN_MAX_RMS, 1100),
+    gateFloorMult: num(process.env.VOICE_GATE_FLOOR_MULT, 1.95),
+    gateCloseRatio: num(process.env.VOICE_GATE_CLOSE_RATIO, 0.68),
+    gateReleaseMs: num(process.env.VOICE_GATE_RELEASE_MS, 220),
+    gateFloor: num(process.env.VOICE_GATE_FLOOR, 0.62),
+    // High barge-in bar + speech-like check — TV/room noise must not clear AI audio.
+    bargeInMinRms: num(process.env.VOICE_BARGE_IN_MIN_RMS, 2000),
+    bargeInFloorMult: num(process.env.VOICE_BARGE_IN_FLOOR_MULT, 7.5),
+    bargeInMinMs: num(process.env.VOICE_BARGE_IN_MIN_MS, 400),
     bargeInRequireGateOpen: str(process.env.VOICE_BARGE_IN_REQUIRE_GATE, '1') !== '0',
-    vadEnergyMinRms: num(process.env.VOICE_VAD_ENERGY_MIN_RMS, 550),
-    vadEnergyFloorMult: num(process.env.VOICE_VAD_ENERGY_FLOOR_MULT, 2.8),
-    // Local speech-end is for logging / re-arming AI after barge-in — tolerate pauses.
-    vadSilenceMs: num(process.env.VOICE_VAD_SILENCE_MS, 800),
-    // Gemini AAD: was 250ms + END_HIGH → premature turn cuts on hesitations.
-    aadSilenceDurationMs: num(process.env.VOICE_AAD_SILENCE_MS, 700),
-    aadPrefixPaddingMs: num(process.env.VOICE_AAD_PREFIX_PADDING_MS, 40),
+    vadEnergyMinRms: num(process.env.VOICE_VAD_ENERGY_MIN_RMS, 140),
+    vadEnergyFloorMult: num(process.env.VOICE_VAD_ENERGY_FLOOR_MULT, 1.65),
+    vadSilenceMs: silenceMs(process.env.VOICE_VAD_SILENCE_MS, 480),
+    aadSilenceDurationMs: silenceMs(process.env.VOICE_AAD_SILENCE_MS, 400),
+    aadPrefixPaddingMs: num(process.env.VOICE_AAD_PREFIX_PADDING_MS, 150),
     aadEndSensitivity: str(process.env.VOICE_AAD_END_SENSITIVITY, 'END_SENSITIVITY_LOW'),
-    aadStartSensitivity: str(process.env.VOICE_AAD_START_SENSITIVITY, 'START_SENSITIVITY_LOW'),
+    aadStartSensitivity: str(process.env.VOICE_AAD_START_SENSITIVITY, 'START_SENSITIVITY_HIGH'),
+    responseWatchdogMs: num(process.env.VOICE_RESPONSE_WATCHDOG_MS, 1400),
+    speechMinCrestFactor: num(process.env.VOICE_SPEECH_MIN_CREST, 1.95),
+    speechMinZeroCrossRate: num(process.env.VOICE_SPEECH_MIN_ZCR, 0.032),
+    speechQuietFloorMult: num(process.env.VOICE_SPEECH_QUIET_FLOOR_MULT, 1.12),
+    speechLikeGateFloor: num(process.env.VOICE_SPEECH_LIKE_GATE_FLOOR, 0.88),
     voiceDebug: str(process.env.VOICE_DEBUG, '') === '1' || str(process.env.LATENCY_DEBUG, '') === '1',
   };
 }

@@ -104,7 +104,7 @@ describe('Kannada opening with identity', () => {
     assert.match(male, /ನಮಸ್ಕಾರ Manjunath/);
     assert.match(male, /ನಾನು ಭೂಮಿ/);
     assert.match(male, /ಮಾತಾಡ್ತಿದ್ದೀನಿ/);
-    assert.match(male, /Mysore ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ/);
+    assert.match(male, /Mysuru ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ/);
 
     const neutral = buildOutboundKannadaOpening(null);
     assert.match(neutral, /^ನಮಸ್ಕಾರ/);

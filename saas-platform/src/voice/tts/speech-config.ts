@@ -11,7 +11,7 @@
  *
  * Env:
  *   VOICE_TTS_VOICE_NAME=Kore|Sulafat|Aoede|Achernar|...  (default: Kore — original Priya voice)
- *   VOICE_TTS_LANGUAGE_CODE=kn-IN|en-IN|auto
+ *   VOICE_TTS_LANGUAGE_CODE=auto|kn-IN|en-IN  (default: auto — best for Kannada+English mix)
  *   VOICE_TTS_VOICE_NAME_EN=...  (optional English voice; defaults to same)
  */
 
@@ -38,8 +38,8 @@ export function loadLiveSpeechSettings(): LiveSpeechConfig {
     languageCode,
     provider: 'gemini-live-native',
     deliveryNotes:
-      'Calm understated delivery via prompt (warmth~6.5 confidence~7.5 energy~5.5). ' +
-      'Default languageCode kn-IN for Kannada-first openings; follow customer language thereafter.',
+      'Warm, calm, unhurried phone delivery via prompt. Natural Kanglish mix. ' +
+      'Complete sentences — never rushed or clipped. Voice: Kore (override with VOICE_TTS_VOICE_NAME; Sulafat = warmer).',
   };
 }
 
