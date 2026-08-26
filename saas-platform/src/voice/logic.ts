@@ -192,7 +192,8 @@ const BOOK_APPOINTMENT_TOOL = {
 
 const SET_FOLLOW_UP_TOOL = {
   name: "setFollowUp",
-  description: "Mark the customer for a follow-up if they are interested but unsure of when they can visit or need more time to decide.",
+  description:
+    "Mark a Sales Manager / sales-team follow-up ONLY after the customer clearly asks for or agrees to a manager callback. Never call this just because you offered once and they stayed silent.",
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -756,8 +757,10 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     waitingState = onMeaningfulCustomerSpeech(waitingState, Date.now());
     clearWaitTick();
   };
-  const SITE_VISIT_OFFER_PATTERN = /site\s*visit|visit\s*the\s*(plot|layout|site)|come\s*(and\s*)?(see|visit)|ಸೈಟ್\s*ವಿಸಿಟ್|ವಿಸಿಟ್\s*ಮಾಡ|ಸೈಟ್\s*ನೋಡ/i;
-  const FOLLOW_UP_OFFER_PATTERN = /sales\s*team\s*(contact|call|reach)|someone\s*(from\s*our\s*team\s*)?(will\s*)?(call|contact)\s*you/i;
+  const SITE_VISIT_OFFER_PATTERN =
+    /site\s*visit|visit\s*the\s*(plot|layout|site)|come\s*(and\s*)?(see|visit)|shall\s*(we|i)\s*(book|schedule|arrange).*visit|ಸೈಟ್\s*ವಿಸಿಟ್|ವಿಸಿಟ್\s*ಮಾಡ|ಸೈಟ್\s*ನೋಡ|visit\s*ಮಾಡ್ಬೇಕಾ|visit\s*fix\s*ಮಾಡ/i;
+  const FOLLOW_UP_OFFER_PATTERN =
+    /sales\s*(manager|team)\s*(contact|call|reach|callback)?|someone\s*(from\s*our\s*team\s*)?(will\s*)?(call|contact)\s*you|can\s*i\s*(call|arrange|connect).*(manager|sales)|shall\s*i\s*(call|arrange).*(manager|sales)|manager\s*(call|callback)|callback\s*(from\s*)?(the\s*)?(sales\s*)?manager|Sales\s*Manager\s*callback|manager\s*ಕಾಲ್|ಕಾಲ್\s*ಮಾಡ್ಲಾ|ಕಾಲ್\s*ಮಾಡೋಣ|callback\s*arrange|ಸೇಲ್ಸ್\s*ಮ್ಯಾನೇಜರ್|ಮ್ಯಾನೇಜರ್.*ಕಾಲ್|ಕಾಲ್\s*ಬ್ಯಾಕ್/i;
   // Clear goodbye / finished signals — must match the END THE CALL prompt rules.
   // Keep this conservative: do NOT match bare "okay", "thanks", or "hmm".
   const CUSTOMER_GOODBYE_PATTERN = /\b(bye|goodbye|good\s*bye|i'?m\s+done|that'?s\s+all(\s+i\s+needed)?|thanks?,?\s+that'?s\s+all|thank\s+you\s+for\s+your\s+time|you\s+can\s+end\s+(the\s+)?call|end\s+the\s+call)\b|ಸಾಕು|ಬೈ|ವಿದಾಯ|ಧನ್ಯವಾದ.*ಸಾಕು/i;
@@ -1038,7 +1041,8 @@ LANGUAGE REMINDER: ${KANNADA_THROUGHOUT_RULES}
 ${PHRASE_FIXES_RUNTIME}
 KANNADA REMINDER: Calm Mysuru local sales professional. EVERY reply in Kanglish unless customer clearly switched to English (explicit request or two full English turns). Always say "site" not "plot". One question per turn ONLY. Natural budget/loan English loanwords inside Kannada sentences OK. No excitement or drama. After a question, STOP and listen. Only the five PDF projects. Office 10–7; site visits 10–5:30.
 NO INVENTION: Never invent that the customer asked for a site visit, booking, or any question they did not ask. Never say "sure / that's great / wonderful" about something they did not say. NEVER guess or invent the customer's name (no "Mohan", "Ramesh", etc.) unless CANONICAL CUSTOMER IDENTITY lists a verified name — if unknown, do not use any name. If unclear, ask one short clarification in Kannada and WAIT.
-PROJECT FACTS REMINDER: ONLY these layouts: ${allowedLayoutsList()}. Never Jeevan Vihar, Dhatri Square, Dr. Daya Nagar, or any other project. CNM Apex = South-facing only at ₹5,450/sqft (not North). Booking amount = ₹59,000. Agreement amount / maintenance cost-duration → Sales Manager callback.
+PROJECT FACTS REMINDER: ONLY these layouts: ${allowedLayoutsList()}. Never Jeevan Vihar, Dhatri Square, Dr. Daya Nagar, or any other project. CNM Apex = South-facing only at ₹5,450/sqft (not North). Booking amount = ₹59,000. Agreement amount / maintenance cost-duration → Sales Manager discusses if needed — do NOT keep asking to call the manager.
+MANAGER/SITE-VISIT REMINDER: Never repeatedly ask "can I call the manager?" or offer site visit. Manager/callback offer at most ONCE per call, then silence until the customer asks. Site visit ONLY when the customer asks.
 LISTENING REMINDER: Never speak over the customer. Short replies (houda, haudu, ha, sari, ok, ಹೌದು, ಸರಿ, ಹೇಳಿ) are REAL turns — always reply with warm Mysuru Kanglish; never stay silent. Allow natural pauses inside a sentence. If they interrupt, stop immediately. Opening: Speak → ONE question → Stop → Listen.
 VOICE REMINDER: Speak CLEARLY — unhurried, every word audible, natural pauses. Short messages: 1–2 sentences default. Never rush, clip, or monologue. Long answers ONLY for site detail requests.
 ANSWER REMINDER: Direct questions — short Kanglish answer (1–2 sentences). Site DETAIL requests ONLY — full facts in 4–8 clear sentences, NO question that turn. Never pad short answers with extra pitch.
@@ -1302,16 +1306,21 @@ ${formatIdentityContext(customerIdentity)}
                       if (siteVisitOfferDetected) {
                         console.warn("[GUARD] Site visit appears to have been offered more than once — sending corrective nudge.");
                         geminiSession?.sendRealtimeInput({
-                          text: "REMINDER: Do NOT offer site visit again. You already offered it. Ask if they want more details about the site instead, or wait for them to ask about visiting."
+                          text:
+                            "SYSTEM: STOP offering site visit. You already mentioned it. Do NOT ask again. " +
+                            "Stay quiet about visits until the customer asks to visit. Continue with facts or wait.",
                         });
                       }
                       siteVisitOfferDetected = true;
                     }
                     if (FOLLOW_UP_OFFER_PATTERN.test(aiText)) {
                       if (followUpOfferDetected) {
-                        console.warn("[GUARD] Sales-team follow-up appears to have been offered more than once — sending corrective nudge.");
+                        console.warn("[GUARD] Manager/callback offered more than once — sending corrective nudge.");
                         geminiSession?.sendRealtimeInput({
-                          text: "REMINDER: you already offered to have the sales team follow up earlier in this call. Do not offer it again."
+                          text:
+                            "SYSTEM: STOP asking to call the Sales Manager / arrange callback. You already offered ONCE. " +
+                            "Do NOT say 'can I call the manager' again. Stay quiet about manager/callback until the CUSTOMER asks. " +
+                            "Answer with known project facts or wait for their next question.",
                         });
                       }
                       followUpOfferDetected = true;
@@ -1324,7 +1333,7 @@ ${formatIdentityContext(customerIdentity)}
                         text:
                           `REMINDER: "${forbiddenLayout}" is NOT an allowed project on this call. ` +
                           `ONLY discuss: ${allowedLayoutsList()}. Do not mention any other layout. ` +
-                          `If the customer asked about it, say you don't have that project and offer Sales Manager callback.`,
+                          `If the customer asked about it, say you don't have that project. Do NOT keep asking to call the Sales Manager.`,
                       });
                     }
                   }
