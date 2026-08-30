@@ -128,7 +128,7 @@ export function DualStatusContainers({
       <div className="rounded-2xl border border-stone-200/80 dark:border-stone-700/60 bg-gradient-to-b from-stone-50 to-white dark:from-stone-800/50 dark:to-stone-900/80 p-4">
         <div className="flex items-center gap-2 text-stone-500 dark:text-stone-400">
           <Target size={14} className="text-gold" />
-          <span className="text-[11px] font-semibold tracking-wide">Customer outcome</span>
+          <span className="text-[11px] font-semibold tracking-wide">Lead interest</span>
         </div>
         {editable && onOutcomeStatusChange ? (
           <select
@@ -216,7 +216,7 @@ export function DualStatusFilters({
       />
       <FilterField
         icon={Target}
-        label="Customer outcome"
+        label="Lead interest"
         value={outcomeFilter}
         onChange={onOutcomeFilterChange}
         allLabel="Any"

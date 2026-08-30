@@ -47,6 +47,8 @@ model Lead {
   transcription String?
   recordingUrl String?
   lastResponse String?
+  calledFrom  String?
+  lastCalledAt DateTime?
   campaignId  String
   campaign    Campaign @relation(fields: [campaignId], references: [id])
   createdAt   DateTime @default(now())

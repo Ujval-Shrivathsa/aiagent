@@ -53,6 +53,30 @@ describe('end-call-guard', () => {
     assert.equal(r.reason, 'not_interested_confirmed');
   });
 
+  it('blocks outbound hangup after only the opening yes', () => {
+    const r = shouldAllowEndCall({
+      callDurationMs: 8_000,
+      customerClearGoodbye: false,
+      customerUtteranceCount: 1,
+      batchHasNotInterested: false,
+      isOutbound: true,
+    });
+    assert.equal(r.allow, false);
+    assert.equal(r.reason, 'call_too_short');
+  });
+
+  it('allows outbound scripted close after the purpose answer', () => {
+    const r = shouldAllowEndCall({
+      callDurationMs: 20_000,
+      customerClearGoodbye: false,
+      customerUtteranceCount: 2,
+      batchHasNotInterested: false,
+      isOutbound: true,
+    });
+    assert.equal(r.allow, true);
+    assert.equal(r.reason, 'outbound_scripted_flow');
+  });
+
   it('allows endCall after sustained conversation', () => {
     const r = shouldAllowEndCall({
       callDurationMs: 30_000,

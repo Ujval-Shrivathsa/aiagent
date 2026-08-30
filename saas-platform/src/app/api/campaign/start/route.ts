@@ -59,6 +59,15 @@ export async function POST(req: Request) {
           continue;
         }
 
+        const callerFrom =
+          provider === 'plivo' ? process.env.PLIVO_PHONE_NUMBER : process.env.TWILIO_PHONE_NUMBER;
+        if (callerFrom) {
+          await prisma.lead.update({
+            where: { id: lead.id },
+            data: { calledFrom: callerFrom, lastCalledAt: new Date() },
+          });
+        }
+
         if (provider === 'plivo') {
           const authId = process.env.PLIVO_AUTH_ID;
           const authToken = process.env.PLIVO_AUTH_TOKEN;

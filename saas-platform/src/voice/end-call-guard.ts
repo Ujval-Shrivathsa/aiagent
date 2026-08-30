@@ -12,6 +12,8 @@ export type EndCallGuardInput = {
   customerUtteranceCount: number;
   /** notInterested in the same tool batch as endCall. */
   batchHasNotInterested: boolean;
+  /** PDF outbound flow — short scripted closes are allowed after customer spoke. */
+  isOutbound?: boolean;
 };
 
 export type EndCallGuardResult = {
@@ -33,6 +35,11 @@ export function shouldAllowEndCall(input: EndCallGuardInput): EndCallGuardResult
 
   if (batchHasNotInterested && customerUtteranceCount >= 1) {
     return { allow: true, reason: 'not_interested_confirmed' };
+  }
+
+  // Opening "yes" is only the first turn — do not hang up yet.
+  if (input.isOutbound && customerUtteranceCount >= 2) {
+    return { allow: true, reason: 'outbound_scripted_flow' };
   }
 
   if (customerUtteranceCount < 1) {

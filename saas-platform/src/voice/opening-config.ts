@@ -32,7 +32,7 @@ export function loadOpeningConfig(): OpeningConfig {
     agentNameEn: str(process.env.VOICE_OPENING_AGENT_NAME_EN, 'Bhoomi'),
     companyName: str(process.env.VOICE_OPENING_COMPANY_NAME, 'Alliance Square'),
     questionKn: str(process.env.VOICE_OPENING_QUESTION_KN, 'ನೀವು Mysuru ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ?'),
-    questionEn: str(process.env.VOICE_OPENING_QUESTION_EN, 'Are you looking for a site in Mysuru?'),
+    questionEn: str(process.env.VOICE_OPENING_QUESTION_EN, 'Hi, are you looking for a residential site in Mysuru?'),
     includeNameWhenAvailable: str(process.env.VOICE_OPENING_INCLUDE_NAME, '1') !== '0',
   };
 }

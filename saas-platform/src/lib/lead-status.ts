@@ -185,10 +185,10 @@ export const CALL_STATUS_LABELS: Record<CallStatus, string> = {
 
 export const OUTCOME_STATUS_LABELS: Record<OutcomeStatus, string> = {
   [OUTCOME_UNKNOWN]: 'Unknown',
-  [LEAD_STATUS.INTERESTED]: 'Interested',
-  [LEAD_STATUS.FOLLOW_UP]: 'Follow Up',
-  [LEAD_STATUS.VISIT_SCHEDULED]: 'Visit Scheduled',
-  [LEAD_STATUS.NOT_INTERESTED]: 'Not Interested',
+  [LEAD_STATUS.INTERESTED]: 'Looking for Lead',
+  [LEAD_STATUS.FOLLOW_UP]: 'Looking for Lead',
+  [LEAD_STATUS.VISIT_SCHEDULED]: 'Looking for Lead',
+  [LEAD_STATUS.NOT_INTERESTED]: 'Not Looking for Lead',
 };
 
 export function labelForCallStatus(value: string | null | undefined): string {

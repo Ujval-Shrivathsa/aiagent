@@ -29,6 +29,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { DashboardShell, DashboardCard, StatCard } from "@/components/dashboard/Shell";
 import { DualStatusBadges, DualStatusContainers, DualStatusFilters, CallStatusBadge, OutcomeStatusBadge } from "@/components/dashboard/DualStatus";
 import { LEAD_STATUS, normalizeLeadStatus, OUTCOME_STATUSES, OUTCOME_UNKNOWN } from "@/lib/lead-status";
+import { lookingStatusLabel } from "@/lib/call-summary";
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<'overview' | 'interested'>('overview');
@@ -38,6 +39,7 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState<any>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
   const [newLead, setNewLead] = useState({ name: "", phone: "" });
@@ -87,6 +89,40 @@ export default function Dashboard() {
   }, [leads, selectedLead]);
 
   const isFetchingRef = useRef(false);
+
+  const openLeadDetails = async (lead: any) => {
+    setSelectedLead(lead);
+    setSummaryLoading(true);
+    try {
+      const res = await fetch(`/api/leads?id=${encodeURIComponent(lead.id)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.lead) {
+          setSelectedLead(data.lead);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to refresh lead", e);
+    } finally {
+      setSummaryLoading(false);
+    }
+  };
+
+  const leadLookingLabel = (lead: any) => lookingStatusLabel(lead);
+
+  const summaryEmptyMessage = (lead: any) => {
+    const call = String(lead.call_status || lead.callStatus || lead.status || "").toLowerCase();
+    if (["pending", "calling"].includes(call)) {
+      return "Call not completed yet — summary will appear after the conversation.";
+    }
+    if (call === "not answered") {
+      return "Call was not answered — no conversation summary available.";
+    }
+    if (summaryLoading) {
+      return "Refreshing call report…";
+    }
+    return "No summary yet — it will appear shortly after a completed call.";
+  };
 
   const fetchAllData = async () => {
     if (isFetchingRef.current) return;
@@ -451,7 +487,7 @@ export default function Dashboard() {
                       filteredLeads.map((lead) => (
                         <div
                           key={lead.id}
-                          onClick={() => setSelectedLead(lead)}
+                          onClick={() => openLeadDetails(lead)}
                           className="p-4 flex items-start gap-3 active:bg-stone-50 dark:active:bg-stone-800/40 cursor-pointer"
                         >
                           <input
@@ -502,7 +538,7 @@ export default function Dashboard() {
                           <th className="px-4 lg:px-6 py-3.5 w-10"></th>
                           <th className="px-4 lg:px-6 py-3.5 font-medium">Name</th>
                           <th className="px-4 lg:px-6 py-3.5 font-medium">Call status</th>
-                          <th className="px-4 lg:px-6 py-3.5 font-medium">Customer outcome</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-medium">Lead interest</th>
                           <th className="px-4 lg:px-6 py-3.5 font-medium">Summary</th>
                           <th className="px-4 lg:px-6 py-3.5 text-right font-medium">Action</th>
                         </tr>
@@ -526,7 +562,7 @@ export default function Dashboard() {
                           </tr>
                         ) : (
                           filteredLeads.map((lead) => (
-                            <tr key={lead.id} onClick={() => setSelectedLead(lead)} className="hover:bg-stone-50/80 dark:hover:bg-stone-800/30 transition-colors group cursor-pointer">
+                            <tr key={lead.id} onClick={() => openLeadDetails(lead)} className="hover:bg-stone-50/80 dark:hover:bg-stone-800/30 transition-colors group cursor-pointer">
                               <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
                                 <input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 rounded border-stone-300 text-gold cursor-pointer" />
                               </td>
@@ -709,7 +745,7 @@ export default function Dashboard() {
                   interestedLeads.map((lead, i) => (
                     <div
                       key={lead.id}
-                      onClick={() => setSelectedLead(lead)}
+                      onClick={() => openLeadDetails(lead)}
                       className="p-4 flex items-start gap-3 cursor-pointer active:bg-emerald-50/40 dark:active:bg-emerald-900/10"
                     >
                       <input
@@ -770,7 +806,7 @@ export default function Dashboard() {
                           initial={{ opacity: 0, x: -10 }} 
                           animate={{ opacity: 1, x: 0 }} 
                           transition={{ delay: i * 0.05 }} 
-                          onClick={() => setSelectedLead(lead)}
+                          onClick={() => openLeadDetails(lead)}
                           className="hover:bg-emerald-50/30 dark:hover:bg-emerald-900/10 transition-all cursor-pointer"
                         >
                           <td className="px-4 lg:px-8 py-6" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 rounded border-stone-300 cursor-pointer" /></td>
@@ -828,15 +864,42 @@ export default function Dashboard() {
                 <div className="min-w-0">
                   <h2 className="text-2xl sm:text-3xl font-serif font-bold dark:text-white truncate">{selectedLead.name}</h2>
                   <p className="text-stone-500 font-mono text-sm mt-1 break-all">{selectedLead.phone}</p>
+                  {selectedLead.calledFrom && (
+                    <p className="text-stone-400 text-xs mt-1">Called from {selectedLead.calledFrom}</p>
+                  )}
+                  {selectedLead.lastCalledAt && (
+                    <p className="text-stone-400 text-xs mt-0.5">
+                      Last called {new Date(selectedLead.lastCalledAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
+                    </p>
+                  )}
                 </div>
                 <button type="button" onClick={() => setSelectedLead(null)} className="p-2.5 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-xl transition-all shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"><X size={24} className="text-stone-400" /></button>
               </div>
 
               <div className="space-y-6 sm:space-y-8">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-semibold ${
+                      leadLookingLabel(selectedLead) === 'Looking for Lead'
+                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                        : leadLookingLabel(selectedLead) === 'Not Looking for Lead'
+                          ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                          : 'bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400'
+                    }`}
+                  >
+                    {leadLookingLabel(selectedLead)}
+                  </span>
+                </div>
+
                 <div>
                   <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-3 sm:mb-4">AI Intelligence Report</h4>
                   <div className="bg-stone-50 dark:bg-stone-800/50 p-5 sm:p-8 rounded-2xl sm:rounded-3xl border border-stone-100 dark:border-stone-700/50 shadow-inner">
-                    {selectedLead.summary ? (
+                    {summaryLoading ? (
+                      <div className="py-4 text-center opacity-50">
+                        <Loader2 size={24} className="animate-spin mx-auto mb-2" />
+                        <p className="text-[10px] font-black uppercase tracking-widest">Loading report…</p>
+                      </div>
+                    ) : selectedLead.summary ? (
                       selectedLead.summary.includes('\n\n') ? (
                         <>
                           <div className="flex items-center gap-2 mb-4 pb-4 border-b border-stone-200/50 dark:border-stone-700/50">
@@ -863,9 +926,10 @@ export default function Dashboard() {
                         </div>
                       )
                     ) : (
-                      <div className="py-4 text-center opacity-30">
-                        <Loader2 size={24} className="animate-spin mx-auto mb-2" />
-                        <p className="text-[10px] font-black uppercase tracking-widest">Generating report...</p>
+                      <div className="py-4 text-center">
+                        <p className="text-sm text-stone-500 dark:text-stone-400 leading-relaxed">
+                          {summaryEmptyMessage(selectedLead)}
+                        </p>
                       </div>
                     )}
                   </div>
@@ -972,7 +1036,7 @@ export default function Dashboard() {
                       </div>
                       <button 
                         type="button"
-                        onClick={() => { setSelectedDay(null); setSelectedLead(lead); }}
+                        onClick={() => { setSelectedDay(null); openLeadDetails(lead); }}
                         className="p-2.5 bg-white dark:bg-stone-900 rounded-xl shadow-sm text-gold shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"
                       >
                         <ArrowRight size={16} />

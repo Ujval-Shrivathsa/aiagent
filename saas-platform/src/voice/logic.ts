@@ -3,9 +3,13 @@ import { WebSocket } from 'ws';
 import { prisma } from '../lib/prisma';
 import { fetchLiveSiteData, formatLiveDataForPrompt } from '../lib/live-site-data';
 import { buildInboundSystemInstruction, getGreeting as getInboundGreeting, getInboundGreetingInstruction } from '../voice/Inbound/index';
-import { buildOutboundSystemInstruction, buildOutboundFastConnectInstruction, buildOutboundProjectReferenceContext, getOutboundGreetingIntroInstruction, getOutboundGreetingQuestionInstruction } from '../voice/Outbound/index';
-import { buildOutboundKannadaOpeningBeats } from '../voice/kannada-style';
-import { OUTBOUND_OPENING_QUESTION_KN, getOutboundOpeningQuestionKn } from '../voice/kannada-style';
+import { buildOutboundSystemInstruction, buildOutboundFastConnectInstruction, buildOutboundProjectReferenceContext, getOutboundGreetingInstruction, PDF_OPENING, PDF_PURPOSE_QUESTION, looksLikeRepeatRequest, looksLikeInvestmentPitchYes, INVESTMENT_PITCH_PENDING_QUESTION, looksLikeManagerCallbackQuestion, OUTBOUND_REPEAT_NUDGE, OUTBOUND_INVESTMENT_YES_CLOSE_NUDGE, OUTBOUND_MANAGER_CALLBACK_NUDGE, OUTBOUND_MANAGER_CALLBACK_END_ONLY_NUDGE, OUTBOUND_NO_REPEAT_NUDGE, looksLikeSalesManagerCallbackLine, looksLikeThanksOnlyLine, looksLikeClosingGoodbye, isRedundantOutboundThanksTurn, OUTBOUND_THANKS_BEFORE_END_NUDGE, hasThanksClosing, looksLikeIdentityQuestion, looksLikeContextInterrupt, deriveOutboundConversationMemory, buildOutboundIdentityAnswerNudge, buildOutboundOffTopicAnswerNudge, buildOutboundResumeNudge, type OutboundConversationMemory } from '../voice/Outbound/index';
+import { loadOpeningConfig } from '../voice/opening-config';
+import {
+  allowsRepeatReplay,
+  isDuplicateOutboundSpeech,
+  registerOutboundSpeech,
+} from '../voice/outbound-dedup';
 import { CallCaptureSession } from '../voice/call-capture/session';
 import { callLog } from '../voice/call-capture/logger';
 import { loadAudioPipelineConfig } from '../voice/audio-pipeline-config';
@@ -26,6 +30,8 @@ import { KANNADA_THROUGHOUT_RULES } from '../voice/kannada-style';
 import { evaluateBargeIn, evaluateLocalSpeech } from '../voice/turn-policy';
 import { analyzePcmFrame, isSpeechLike, shouldOpenGate } from '../voice/speech-likelihood';
 import { LEAD_STATUS, outcomeFromFlags } from '../lib/lead-status';
+import { generateCallSummary } from '../lib/call-summary';
+import { ensureLeadForCall, outboundCallerId, phoneTail } from '../lib/lead-upsert';
 import {
   markAnsweredByPhone,
   markCallCompletedByPhone,
@@ -175,6 +181,19 @@ const END_CALL_TOOL = {
   },
 };
 
+const OUTBOUND_END_CALL_TOOL = {
+  name: "endCall",
+  description:
+    "End the outbound call after delivering a scripted closing that includes 'Thank you.' exactly ONCE for the whole call. " +
+    "If the closing script already includes Thank you, do NOT say Thank you again — call endCall in the SAME turn. " +
+    "Do NOT end because of silence alone.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {},
+    required: [],
+  },
+};
+
 const BOOK_APPOINTMENT_TOOL = {
   name: "bookAppointment",
   description: "Book a site-visit appointment. Only use this if they agree on a specific date and time within the preferred site-visit window of 10:00 AM to 5:30 PM.",
@@ -300,14 +319,16 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let waitTickTimer: NodeJS.Timeout | null = null;
   let fullTranscription: string = "";
   let isFirstResponse = true;
+  let callInterested: boolean | null = null;
   let isOutboundCall = false;
   /** Single canonical name/gender/salutation object for this call. */
   let customerIdentity: CustomerIdentity = emptyIdentity();
   let outboundOpeningRepeatDone = false;
   let outboundGreetingSpoken = false;
+  let outboundStayActiveNudgeSent = false;
   let outboundOpeningWaitTimer: NodeJS.Timeout | null = null;
   const OPENING_WAIT_MS = 7000;
-  const OPENING_QUESTION = getOutboundOpeningQuestionKn() || OUTBOUND_OPENING_QUESTION_KN;
+  const OPENING_QUESTION = PDF_OPENING;
   const audioCfg = loadAudioPipelineConfig();
   const ttsSettings = loadLiveSpeechSettings();
   /** Track reply language — every new call starts Kannada / Kanglish. */
@@ -414,6 +435,21 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   // offer it already made.
   let siteVisitOfferDetected = false;
   let followUpOfferDetected = false;
+  let outboundManagerCallbackDelivered = false;
+  let outboundManagerCallbackNudgeSent = false;
+  let outboundManagerCallbackEndNudgeSent = false;
+  let outboundInvestmentYesNudgeSent = false;
+  let outboundThanksSpoken = false;
+  let outboundThanksNudgeSent = false;
+  let outboundSilentEndNudgeSent = false;
+  let outboundNoRepeatNudgeSent = false;
+  let outboundThanksHangupTimer: NodeJS.Timeout | null = null;
+  let outboundHardMuteAfterClose = false;
+  let outboundRepeatReplayPending = false;
+  let lastOutboundTurnSuppressed = false;
+  let outboundConversationMemory: OutboundConversationMemory | null = null;
+  const outboundSpokenChunks = new Set<string>();
+  const openingCfg = loadOpeningConfig();
   let lastForbiddenLayoutNudgeAt = 0;
   let customerClearGoodbye = false;
   let customerUtteranceCount = 0;
@@ -437,8 +473,9 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   /** Suppress back-to-back duplicate AI lines (e.g. nudge + natural reply saying the same thing). */
   let lastPlayedAiNorm = '';
+  let lastPlayedAiRaw = '';
   let lastPlayedAiAt = 0;
-  const AI_DEDUP_WINDOW_MS = 14_000;
+  const AI_DEDUP_WINDOW_MS = 120_000;
 
   const normalizeAiDedup = (text: string) =>
     text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -456,6 +493,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const markAiTurnPlayed = (text: string) => {
+    const raw = String(text || '').trim();
+    if (raw) lastPlayedAiRaw = raw;
     const norm = normalizeAiDedup(text);
     if (norm.length >= 14) {
       lastPlayedAiNorm = norm;
@@ -525,9 +564,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     deferredContextScheduled = true;
     setTimeout(() => {
       if (!geminiSession) return;
-      console.log('[GEMINI] Injecting deferred project/live context (after opening turn complete)');
+      console.log('[GEMINI] Injecting deferred context (after opening turn complete)');
       injectProjectReferenceIfReady();
-      injectLiveDataIfReady();
+      if (!isOutboundCall) {
+        injectLiveDataIfReady();
+      }
     }, 600);
   };
 
@@ -578,6 +619,63 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let openingGraceTimer: NodeJS.Timeout | null = null;
   const OPENING_SPEECH_GRACE_MS = 7000;
 
+  const noteOutboundCustomerAnswer = (userText: string) => {
+    if (!isOutboundCall || !outboundConversationMemory) return;
+    const t = String(userText || '').trim().toLowerCase();
+    if (
+      isShortAffirmativeReply(userText) &&
+      outboundConversationMemory.pendingQuestion === PDF_OPENING
+    ) {
+      outboundConversationMemory = {
+        ...outboundConversationMemory,
+        topic: 'investment vs build a house (customer confirmed they are looking)',
+        pendingQuestion: PDF_PURPOSE_QUESTION,
+      };
+      return;
+    }
+    if (/\binvestment\b/i.test(t)) {
+      outboundConversationMemory = {
+        topic: 'investment projects on Hunsur Road and T. Narasipura Road',
+        pendingQuestion: INVESTMENT_PITCH_PENDING_QUESTION,
+        lastAiUtterance: outboundConversationMemory.lastAiUtterance,
+      };
+      return;
+    }
+    if (/\b(build|house|construction)\b/i.test(t)) {
+      outboundConversationMemory = {
+        topic: 'building a house immediately — Srirampura project',
+        pendingQuestion: 'whether they want details about the Srirampura project',
+        lastAiUtterance: outboundConversationMemory.lastAiUtterance,
+      };
+    }
+  };
+
+  const handleOutboundContextInterrupt = (userText: string) => {
+    if (
+      !looksLikeContextInterrupt(userText, {
+        skipRepeat: looksLikeRepeatRequest,
+        skipManager: looksLikeManagerCallbackQuestion,
+      })
+    ) {
+      return;
+    }
+    if (!outboundConversationMemory?.pendingQuestion && customerUtteranceCount < 2) return;
+    console.log('[GUARD] Outbound context interrupt — answer then resume prior topic');
+    try {
+      const answerNudge = looksLikeIdentityQuestion(userText)
+        ? buildOutboundIdentityAnswerNudge(openingCfg.companyName)
+        : buildOutboundOffTopicAnswerNudge();
+      geminiSession?.sendRealtimeInput({ text: answerNudge });
+      if (outboundConversationMemory) {
+        geminiSession?.sendRealtimeInput({
+          text: buildOutboundResumeNudge(outboundConversationMemory),
+        });
+      }
+    } catch (e: any) {
+      console.error('[GEMINI] Context resume nudge failed:', e?.message || e);
+    }
+  };
+
   const customerStartedAnsweringOpening = () => {
     if (!isOutboundCall || outboundOpeningRepeatDone) return;
     if (!outboundOpeningWaitTimer && !openingSpeechInProgress) return;
@@ -611,6 +709,27 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     injectLiveDataIfReady();
   };
 
+  const looksLikeOpeningDecline = (raw: string) =>
+    /^(?:no+|nope|nah|not interested|not looking|ಇಲ್ಲ|ಬೇಡ)[.!?\s]*$/iu.test(String(raw || '').trim());
+
+  /** After opening "yes", keep the session live and ask the purpose question once. */
+  const keepOutboundActiveAfterOpeningYes = (raw: string) => {
+    if (!isOutboundCall || outboundStayActiveNudgeSent) return;
+    if (!isShortAffirmativeReply(raw) || looksLikeOpeningDecline(raw)) return;
+    outboundStayActiveNudgeSent = true;
+    console.log('[GEMINI] Opening yes — staying on the call and asking purpose question');
+    try {
+      sendClientTextTurn(
+        `SYSTEM (internal): The customer said YES they are looking for a site. Stay on this call. ` +
+          `Do NOT hang up. Do NOT stay silent. Do NOT say thank you yet. ` +
+          `Ask EXACTLY once now: "${PDF_PURPOSE_QUESTION}" then WAIT for their answer.`,
+      );
+    } catch (e: any) {
+      outboundStayActiveNudgeSent = false;
+      console.error('[GEMINI] Stay-active after opening yes failed:', e?.message || e);
+    }
+  };
+
   const armOpeningWait = () => {
     // Opening question retry disabled — it caused the agent to repeat lines aloud.
     outboundOpeningRepeatDone = true;
@@ -631,6 +750,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   const sendWaitSystemPrompt = (text: string) => {
     if (!geminiSession) return;
+    if (isOutboundCall && outboundHardMuteAfterClose) return;
     try {
       if (typeof geminiSession.sendClientContent === 'function') {
         geminiSession.sendClientContent({
@@ -646,6 +766,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const applyCustomerLanguageFromTranscript = (userText: string) => {
+    if (isOutboundCall) return; // Outbound: English-only — never switch TTS or prompts
     const resolved = resolveNextConversationLanguage(
       conversationLanguage,
       userText,
@@ -716,8 +837,125 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }, delay);
   };
 
+  const sendOutboundNoRepeatNudgeOnce = () => {
+    if (!isOutboundCall || outboundNoRepeatNudgeSent || outboundHardMuteAfterClose) return;
+    outboundNoRepeatNudgeSent = true;
+    try {
+      geminiSession?.sendRealtimeInput({ text: OUTBOUND_NO_REPEAT_NUDGE });
+    } catch (e: any) {
+      console.error('[GEMINI] No-repeat nudge failed:', e?.message || e);
+    }
+    setTimeout(() => {
+      outboundNoRepeatNudgeSent = false;
+    }, 4000);
+  };
+
+  const activateOutboundPostThanksMute = () => {
+    if (!isOutboundCall || outboundThanksSpoken) return;
+    outboundThanksSpoken = true;
+    outboundHardMuteAfterClose = true;
+    suppressAiOutput = true;
+    if (suppressRecoveryTimer) {
+      clearTimeout(suppressRecoveryTimer);
+      suppressRecoveryTimer = null;
+    }
+    clearWaitTick();
+    clearResponseWatchdog();
+    scheduleOutboundHangupAfterThanks();
+  };
+
+  const shouldSuppressOutboundTurn = (turnText: string): { suppress: boolean; reason?: string } => {
+    const trimmed = String(turnText || '').trim();
+    if (!isOutboundCall) {
+      return { suppress: false };
+    }
+    if (outboundHardMuteAfterClose) {
+      return { suppress: true, reason: 'hard_mute_after_close' };
+    }
+    if (!trimmed) {
+      return { suppress: false };
+    }
+    if (outboundThanksSpoken && isRedundantOutboundThanksTurn(trimmed, true)) {
+      return { suppress: true, reason: 'redundant_thanks' };
+    }
+    if (trimmed.length < 8) {
+      if (outboundThanksSpoken && looksLikeThanksOnlyLine(trimmed)) {
+        return { suppress: true, reason: 'redundant_thanks' };
+      }
+      return { suppress: false };
+    }
+    if (
+      outboundRepeatReplayPending &&
+      allowsRepeatReplay(trimmed, lastPlayedAiRaw, true)
+    ) {
+      outboundRepeatReplayPending = false;
+      return { suppress: false };
+    }
+    if (
+      outboundManagerCallbackDelivered &&
+      turnText.length > 16 &&
+      (looksLikeSalesManagerCallbackLine(turnText) || isDuplicateOutboundSpeech(turnText, outboundSpokenChunks))
+    ) {
+      return { suppress: true, reason: 'duplicate_manager_callback' };
+    }
+    if (
+      openingGreetingTurnFinished &&
+      turnText.length > 12 &&
+      looksLikeOpeningEcho(turnText)
+    ) {
+      return { suppress: true, reason: 'duplicate_opening' };
+    }
+    if (isDuplicateOutboundSpeech(turnText, outboundSpokenChunks)) {
+      return { suppress: true, reason: 'duplicate_spoken_line' };
+    }
+    if (turnText.length > 12 && isNearDuplicateAiTurn(turnText)) {
+      return { suppress: true, reason: 'duplicate_recent_turn' };
+    }
+    return { suppress: false };
+  };
+
+  const playOutboundTurnIfNew = (parts: any[], turnText: string) => {
+    const { suppress, reason } = shouldSuppressOutboundTurn(turnText);
+    lastOutboundTurnSuppressed = suppress;
+    if (suppress) {
+      console.warn(
+        `[GEMINI] Suppressing outbound repeat (${reason}): "${turnText.slice(0, 72)}..."`,
+      );
+      forceOutboundHangupIfClosing(`suppressed repeat (${reason})`);
+      return;
+    }
+    playGeminiAudioParts(parts);
+    registerOutboundSpeech(turnText, outboundSpokenChunks);
+    if (looksLikeSalesManagerCallbackLine(turnText)) {
+      outboundManagerCallbackDelivered = true;
+    }
+    if (
+      isOutboundCall &&
+      (hasThanksClosing(turnText) || looksLikeClosingGoodbye(turnText))
+    ) {
+      activateOutboundPostThanksMute();
+    }
+  };
+
+  const sendOutboundManagerCallbackEndOnlyNudgeOnce = () => {
+    if (!isOutboundCall || outboundManagerCallbackEndNudgeSent || outboundHardMuteAfterClose) return;
+    if (outboundThanksSpoken) {
+      forceOutboundHangupIfClosing('manager callback already closed');
+      return;
+    }
+    outboundManagerCallbackEndNudgeSent = true;
+    try {
+      geminiSession?.sendRealtimeInput({
+        text: OUTBOUND_MANAGER_CALLBACK_END_ONLY_NUDGE,
+      });
+    } catch (e: any) {
+      console.error('[GEMINI] Manager callback end-only nudge failed:', e?.message || e);
+    }
+  };
+
   /** Agent finished speaking → WAITING_FOR_CUSTOMER (after TTS drains). */
   const armWaitingForCustomer = () => {
+    if (isOutboundCall && outboundHardMuteAfterClose) return;
     // Outbound: never treat pre-opening silence as "customer unavailable".
     if (isOutboundCall && !openingGreetingTurnFinished) return;
     if (isOutboundCall && !outboundOpeningRepeatDone && !outboundGreetingSpoken) {
@@ -833,6 +1071,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     bargeInStartedAt = null;
     if (suppressRecoveryTimer) clearTimeout(suppressRecoveryTimer);
     suppressRecoveryTimer = setTimeout(() => {
+      if (outboundHardMuteAfterClose) return;
       if (suppressAiOutput && !vadIsSpeaking) {
         console.warn('[GEMINI] suppressAiOutput recovery — re-arming AI output');
         allowAiOutput();
@@ -857,6 +1096,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     responseWatchdog = setTimeout(() => {
       if (!geminiSession) return;
       if (suppressAiOutput) return;
+      if (isOutboundCall && outboundHardMuteAfterClose) return;
       if (Date.now() < aiPlaybackEndsAt - 100) return;
       console.warn('[GUARD] No AI response after customer speech — nudging model');
       geminiSession.sendRealtimeInput({
@@ -890,6 +1130,67 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
   };
 
+  const completeAndHangupOutboundCall = async (reason: string) => {
+    if (endCallInvoked) return;
+    endCallInvoked = true;
+    if (outboundThanksHangupTimer) {
+      clearTimeout(outboundThanksHangupTimer);
+      outboundThanksHangupTimer = null;
+    }
+    console.log(`[GEMINI] Ending outbound call (${reason})`);
+
+    if (customerPhone) {
+      try {
+        const completed = await markCallCompletedByPhone(customerPhone);
+        console.log(`[DB] Marked call completed for ${customerPhone} rows=${completed.count}`);
+        const tail = customerPhone.replace(/\D/g, '').slice(-10);
+        const leads = await prisma.lead.findMany({
+          where: {
+            phone: { contains: tail },
+            status: STATUS.CALL_COMPLETED,
+          },
+        });
+        for (const lead of leads) {
+          const outcome = outcomeFromFlags({ interested: lead.interested });
+          if (!outcome) continue;
+          const r = await markOutcomeByPhone(customerPhone, outcome, {
+            interested: lead.interested,
+          });
+          console.log(`[DB] Promoted ${customerPhone} call completed → ${outcome} rows=${r.count}`);
+        }
+      } catch (e) {
+        console.error('[DB Error] Failed to mark call completed:', e);
+      }
+    }
+
+    hangupStream();
+    geminiSession?.close();
+    ws.close();
+  };
+
+  const scheduleOutboundHangupAfterThanks = () => {
+    if (!isOutboundCall || endCallInvoked) return;
+    if (outboundThanksHangupTimer) clearTimeout(outboundThanksHangupTimer);
+    const run = () => {
+      outboundThanksHangupTimer = null;
+      if (endCallInvoked || !outboundThanksSpoken) return;
+      const playLeft = Math.max(0, aiPlaybackEndsAt - Date.now());
+      if (playLeft > 60) {
+        outboundThanksHangupTimer = setTimeout(run, playLeft + 80);
+        return;
+      }
+      void completeAndHangupOutboundCall('thanks closing');
+    };
+    outboundThanksHangupTimer = setTimeout(run, 40);
+  };
+
+  const forceOutboundHangupIfClosing = (reason: string) => {
+    if (!isOutboundCall || endCallInvoked) return;
+    if (outboundThanksSpoken || outboundHardMuteAfterClose) {
+      void completeAndHangupOutboundCall(reason);
+    }
+  };
+
   const playGeminiAudioParts = (parts: any[] | undefined) => {
     if (!parts) return;
     for (const part of parts) {
@@ -897,7 +1198,6 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       if (!data) continue;
       if (!greetingAudioHeard) {
         greetingAudioHeard = true;
-        if (isOutboundCall) injectFullCallGuideIfReady();
         if (streamConnectAt > 0) {
           console.log(`[GEMINI] First greeting audio (+${Date.now() - streamConnectAt}ms from stream connect)`);
         }
@@ -975,6 +1275,15 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
             })
           : emptyIdentity();
         if (phoneDigits) {
+          void ensureLeadForCall({
+            phone: customerPhone!,
+            name: customerName || undefined,
+            calledFrom: outboundCallerId(),
+            callStatus: LEAD_STATUS.ANSWERED,
+          })
+            .then((lead) => console.log(`[DB] Lead ensured for ${customerPhone} id=${lead?.id}`))
+            .catch((e) => console.warn('[DB] ensureLeadForCall failed:', e));
+
           void prisma.lead
             .findFirst({
               where: { phone: { contains: phoneDigits.slice(-10) } },
@@ -1018,7 +1327,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
           : buildInboundSystemInstruction(currentDateStr, greetingIdentity);
         pendingFullSystemInstruction = activeSystemInstruction;
         const geminiSystemInstruction = isOutboundCall
-          ? buildOutboundFastConnectInstruction(currentDateStr, greetingIdentity)
+          ? buildOutboundFastConnectInstruction(currentDateStr)
           : activeSystemInstruction;
         if (cachedOutboundInstruction) {
           console.log('[GEMINI] Using pre-cached outbound system instruction (answer URL warm)');
@@ -1029,7 +1338,20 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
         const liveDataPromise = withTimeout(fetchLiveSiteData(), 1200);
 
-        const runtimeInstructionBase = `
+        const runtimeInstructionBase = isOutboundCall
+          ? `
+OUTBOUND PDF FLOW REMINDER:
+- Opening: "${PDF_OPENING}" — one sentence, then wait.
+- Follow the PDF scripts exactly. Indian English only.
+- NEVER repeat any line, question, or closing twice on this call. Say each script line in FULL once.
+- If the customer asks who you are or another unrelated question mid-call, answer briefly then return to the previous topic naturally.
+- Pronounce Hunsur per /ˌhʊnəˈsuːru/, T. Narasipura per /tiː ˌnʌrəsiˈpʊrə/, Srirampura as "shree-raam-poo-ra".
+- Never say you are an AI or language model. You are a sales officer on a live call.
+- End with "Thank you." EXACTLY ONCE in the closing line, then call endCall. Never say Thank you a second time.
+
+CURRENT DATE: ${currentDateStr}
+`
+          : `
 TOOL USAGE NOTES:
 - If the customer clearly and explicitly says they are not interested, call the notInterested tool.
 - If they agree on a specific date/time between 10:00 AM and 5:30 PM (preferred site-visit window), call bookAppointment.
@@ -1048,28 +1370,22 @@ VOICE REMINDER: Speak CLEARLY — unhurried, every word audible, natural pauses.
 ANSWER REMINDER: Direct questions — short Kanglish answer (1–2 sentences). Site DETAIL requests ONLY — full facts in 4–8 clear sentences, NO question that turn. Never pad short answers with extra pitch.
 ${SPOKEN_PRICING_RUNTIME_REMINDER}
 SILENCE REMINDER: After a question, wait. Do not fill silence. If the customer says wait / hold on / ಒಂದು ನಿಮಿಷ / ಸ್ವಲ್ಪ wait ಮಾಡಿ, respect that and do NOT ask if they are still there during their wait. Only brief availability checks come from system "AVAILABILITY CHECK:" messages after unexplained silence — never treat silence as not interested or hang-up.
-${isOutboundCall ? `PRONUNCIATION: Hunsur is hun-sur / hun-soor ([hˈʌn.sɜː] or [hʊn.suːr]) — never hoo-na-soo-ru, never "Hoo-n-sur".
-QUALIFY: Opening once → wait silently for reply → purpose: Kannada "ನೀವು construction site ನೋಡ್ತಿದ್ದೀರಾ ಅಥವಾ investment site ನೋಡ್ತಿದ್ದೀರಾ?" (NOT ಹೂಡಿಕೆಗಾಗಿ/ಮನೆಗಾಗಿ labels) → budget → only matching projects. NEVER repeat the opening or the same question twice. Budget stretch up to ₹5L below price before switching projects. Do not dump unrelated layouts. Sridevi landmarks include Near Upcoming Electronic City. UK Square ~1 year / under construction ONLY if they specifically ask whether the project is ready. UK Square site sizes are not in the spec — never 50×80 / 50*80; do not invent a size.
-` : ''}
 
 CURRENT DATE: ${currentDateStr}
 
 ${formatIdentityContext(customerIdentity)}
 `;
 
-        const fastOpeningBlock = isOutboundCall
-          ? `\nFAST OPENING (CRITICAL — highest priority on connect):\n` +
-            `- Beat 1: intro line ONLY within 0.3 seconds — do NOT wait for the customer.\n` +
-            `- Beat 2: opening question once after intro finishes — then STOP and LISTEN.\n` +
-            `- NEVER repeat the intro, greeting, or question.\n`
-          : `\nFAST OPENING: Speak the greeting once within 0.5 seconds. No preamble. Do not repeat.\n`;
+        const fastOpeningBlock = isOutboundCall ? '' : `\nFAST OPENING: Speak the greeting once within 0.5 seconds. No preamble. Do not repeat.\n`;
 
         console.log(`[VOICE] Audio pipeline: gain=${inputGain} gateMin=${GATE_OPEN_MIN_RMS} gateRel=${GATE_RELEASE_MS}ms bargeMinRms=${BARGE_IN_MIN_RMS} bargeHold=${BARGE_IN_MIN_MS}ms vadSilence=${VAD_SILENCE_MS}ms aadSilence=${audioCfg.aadSilenceDurationMs}ms aadEnd=${audioCfg.aadEndSensitivity} aadStart=${audioCfg.aadStartSensitivity}`);
-        conversationLanguage = 'kn';
+        conversationLanguage = isOutboundCall ? 'en' : 'kn';
         languageSwitchState = { englishStreak: 0 };
-        activeTtsLanguageCode = (ttsSettings.languageCode as 'kn-IN' | 'en-IN' | null) ?? 'kn-IN';
+        activeTtsLanguageCode = isOutboundCall
+          ? 'en-IN'
+          : ((ttsSettings.languageCode as 'kn-IN' | 'en-IN' | null) ?? 'kn-IN');
         console.log(
-          `[VOICE] TTS: ${describeSpeechConfig(ttsSettings, activeTtsLanguageCode)} (Kanglish-first)`,
+          `[VOICE] TTS: ${describeSpeechConfig(ttsSettings, activeTtsLanguageCode)} (${isOutboundCall ? 'Indian English outbound' : 'Kanglish-first'})`,
         );
 
         let localSession: any = null;
@@ -1080,60 +1396,20 @@ ${formatIdentityContext(customerIdentity)}
           sendSpokenGreeting();
         };
 
-        const sendSpokenGreetingIntro = () => {
-          if (!geminiSession || greetingSent) return;
-          greetingSent = true;
-          try {
-            const greetingName = customerIdentity.customer_name_normalized ? customerIdentity : null;
-            const { intro } = buildOutboundKannadaOpeningBeats(greetingName);
-            const instruction = isOutboundCall
-              ? getOutboundGreetingIntroInstruction(greetingName)
-              : getInboundGreetingInstruction(greetingName);
-            console.log(`[GEMINI] Sending intro line (+${Date.now() - streamConnectAt}ms from stream)`);
-            capture?.onAiText(intro);
-            sendClientTextTurn(
-              `${instruction}\n\nCRITICAL: Speak intro NOW within 0.3 seconds. Do NOT repeat. Do NOT ask the question yet.`,
-            );
-          } catch (greetErr) {
-            greetingSent = false;
-            console.error('[GEMINI] Failed to send intro:', greetErr);
-          }
-        };
-
-        const sendSpokenGreetingQuestion = () => {
-          if (!geminiSession || openingQuestionSent || !isOutboundCall) return;
-          openingQuestionSent = true;
-          try {
-            const greetingName = customerIdentity.customer_name_normalized ? customerIdentity : null;
-            const { ask } = buildOutboundKannadaOpeningBeats(greetingName);
-            const instruction = getOutboundGreetingQuestionInstruction(greetingName);
-            console.log(`[GEMINI] Sending opening question (+${Date.now() - streamConnectAt}ms from stream)`);
-            capture?.onAiText(ask);
-            sendClientTextTurn(
-              `${instruction}\n\nCRITICAL: Say the question ONCE only. Then STOP and listen.`,
-            );
-          } catch (e: any) {
-            openingQuestionSent = false;
-            console.error('[GEMINI] Failed to send opening question:', e?.message || e);
-          }
-        };
-
         const sendSpokenGreeting = () => {
-          if (isOutboundCall) {
-            sendSpokenGreetingIntro();
-            return;
-          }
           if (!geminiSession || greetingSent) return;
           greetingSent = true;
           try {
             const greetingName = customerIdentity.customer_name_normalized ? customerIdentity : null;
-            const greetingText: string = getInboundGreeting(greetingName?.customer_name_normalized ?? null);
-            const instruction = getInboundGreetingInstruction(greetingName);
+            const greetingText: string = isOutboundCall
+              ? PDF_OPENING
+              : getInboundGreeting(greetingName?.customer_name_normalized ?? null);
+            const instruction = isOutboundCall
+              ? getOutboundGreetingInstruction()
+              : getInboundGreetingInstruction(greetingName);
             console.log(`[GEMINI] Sending opening greeting once (+${Date.now() - streamConnectAt}ms from stream)`);
             capture?.onAiText(greetingText);
-            sendClientTextTurn(
-              `${instruction}\n\nCRITICAL: Say the full opening ONCE only. Do NOT repeat any sentence. Then STOP and listen for the customer.`,
-            );
+            sendClientTextTurn(getOutboundGreetingInstruction());
           } catch (greetErr) {
             greetingSent = false;
             console.error('[GEMINI] Failed to send greeting:', greetErr);
@@ -1160,7 +1436,11 @@ ${formatIdentityContext(customerIdentity)}
               speechConfig: buildLiveSpeechConfig(ttsSettings, activeTtsLanguageCode) as any,
               systemInstruction: `${geminiSystemInstruction}${fastOpeningBlock}`,
               tools: [
-                { functionDeclarations: [END_CALL_TOOL, BOOK_APPOINTMENT_TOOL, SET_NAME_TOOL, SET_FOLLOW_UP_TOOL, NOT_INTERESTED_TOOL] },
+                {
+                  functionDeclarations: isOutboundCall
+                    ? [OUTBOUND_END_CALL_TOOL, SET_NAME_TOOL, NOT_INTERESTED_TOOL]
+                    : [END_CALL_TOOL, BOOK_APPOINTMENT_TOOL, SET_NAME_TOOL, SET_FOLLOW_UP_TOOL, NOT_INTERESTED_TOOL],
+                },
               ],
               inputAudioTranscription: {},
               outputAudioTranscription: {},
@@ -1209,25 +1489,22 @@ ${formatIdentityContext(customerIdentity)}
                     .map((p: any) => p.text || '')
                     .join('')
                     .trim();
-                  const duplicateOpening =
-                    isOutboundCall &&
-                    openingGreetingTurnFinished &&
-                    customerUtteranceCount === 0 &&
-                    !outboundOpeningRepeatDone &&
-                    turnText.length > 12 &&
-                    looksLikeOpeningEcho(turnText);
-                  const duplicateRecent =
-                    turnText.length > 12 && isNearDuplicateAiTurn(turnText);
-                  if (duplicateOpening) {
-                    console.warn(
-                      `[GEMINI] Suppressing duplicate opening greeting — model tried to repeat: "${turnText.slice(0, 60)}..."`,
-                    );
-                  } else if (duplicateRecent) {
-                    console.warn(
-                      `[GEMINI] Suppressing duplicate AI line — same content just spoken: "${turnText.slice(0, 60)}..."`,
-                    );
+                  if (isOutboundCall && outboundHardMuteAfterClose) {
+                    lastOutboundTurnSuppressed = true;
+                    console.warn('[GEMINI] Dropping outbound audio after first Thank you');
+                    forceOutboundHangupIfClosing('audio after first thanks');
+                  } else if (isOutboundCall) {
+                    playOutboundTurnIfNew(response.serverContent.modelTurn.parts, turnText);
                   } else {
-                    playGeminiAudioParts(response.serverContent.modelTurn.parts);
+                    const duplicateRecent =
+                      turnText.length > 12 && isNearDuplicateAiTurn(turnText);
+                    if (duplicateRecent) {
+                      console.warn(
+                        `[GEMINI] Suppressing duplicate AI line — same content just spoken: "${turnText.slice(0, 60)}..."`,
+                      );
+                    } else {
+                      playGeminiAudioParts(response.serverContent.modelTurn.parts);
+                    }
                   }
                 }
                 if (response.serverContent?.turnComplete) {
@@ -1239,22 +1516,34 @@ ${formatIdentityContext(customerIdentity)}
                     ?.map((p: any) => p.text || '')
                     .join('')
                     .trim();
-                  if (completedAiText) markAiTurnPlayed(completedAiText);
-                  if (isOutboundCall && !openingGreetingTurnFinished) {
-                    if (greetingSent && !openingQuestionSent) {
-                      latLog('OPENING_INTRO_COMPLETE');
-                      sendSpokenGreetingQuestion();
-                    } else if (openingQuestionSent) {
-                      openingGreetingTurnFinished = true;
-                      latLog('OPENING_TURN_COMPLETE');
+                  if (completedAiText && !(isOutboundCall && lastOutboundTurnSuppressed)) {
+                    markAiTurnPlayed(completedAiText);
+                    if (isOutboundCall) {
+                      outboundConversationMemory = deriveOutboundConversationMemory(
+                        completedAiText,
+                        outboundConversationMemory,
+                      );
+                    }
+                    if (isOutboundCall && hasThanksClosing(completedAiText)) {
+                      activateOutboundPostThanksMute();
+                      if (looksLikeSalesManagerCallbackLine(completedAiText)) {
+                        outboundManagerCallbackDelivered = true;
+                      }
+                    } else if (isOutboundCall && looksLikeSalesManagerCallbackLine(completedAiText)) {
+                      outboundManagerCallbackDelivered = true;
+                    }
+                  }
+                  lastOutboundTurnSuppressed = false;
+                  if (!openingGreetingTurnFinished) {
+                    openingGreetingTurnFinished = true;
+                    openingQuestionSent = true;
+                    latLog('OPENING_TURN_COMPLETE');
+                    // Outbound: do not inject "stay quiet" context here — that
+                    // made the agent go silent after the customer said yes.
+                    if (!isOutboundCall) {
                       injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
                       injectDeferredContextAfterOpening();
                     }
-                  } else if (!isOutboundCall && !openingGreetingTurnFinished) {
-                    openingGreetingTurnFinished = true;
-                    latLog('OPENING_TURN_COMPLETE');
-                    injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
-                    injectDeferredContextAfterOpening();
                   } else if (!isOutboundCall && !deferredContextScheduled) {
                     injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
                     injectDeferredContextAfterOpening();
@@ -1263,7 +1552,7 @@ ${formatIdentityContext(customerIdentity)}
                   }
                   // If the aborted turn finished after barge-in and the customer
                   // is already quiet, re-arm output for the next reply.
-                  if (suppressAiOutput && !vadIsSpeaking) {
+                  if (suppressAiOutput && !vadIsSpeaking && !outboundHardMuteAfterClose) {
                     allowAiOutput();
                   }
                   if (isOutboundCall && !outboundOpeningRepeatDone && openingGreetingTurnFinished) {
@@ -1277,16 +1566,29 @@ ${formatIdentityContext(customerIdentity)}
                   // or an availability-check deadline (see wait-policy).
                   armWaitingForCustomer();
                   flushPendingLanguageSwitch();
+                  if (isOutboundCall && outboundThanksSpoken && !endCallInvoked) {
+                    scheduleOutboundHangupAfterThanks();
+                  }
                 }
 
-                // Customer clearly said goodbye but model closed verbally without
-                // endCall — nudge once so the line actually hangs up.
-                if (response.serverContent?.turnComplete && customerClearGoodbye && !endCallInvoked && !goodbyeEndCallNudgeSent) {
+                if (
+                  response.serverContent?.turnComplete &&
+                  customerClearGoodbye &&
+                  !endCallInvoked &&
+                  !goodbyeEndCallNudgeSent &&
+                  !(isOutboundCall && outboundHardMuteAfterClose)
+                ) {
                   goodbyeEndCallNudgeSent = true;
-                  console.warn("[GUARD] Customer goodbye detected but endCall not called — nudging model to endCall.");
-                  geminiSession?.sendRealtimeInput({
-                    text: "SYSTEM: The customer clearly indicated they want to end the call. Say ONE short closing thank-you if you have not already, then IMMEDIATELY call the endCall tool. Do not ask another question."
-                  });
+                  console.warn("[GUARD] Customer goodbye detected but endCall not called — hanging up or nudging.");
+                  if (isOutboundCall && outboundThanksSpoken) {
+                    forceOutboundHangupIfClosing('customer goodbye after thanks');
+                  } else {
+                    geminiSession?.sendRealtimeInput({
+                      text: isOutboundCall
+                        ? 'SYSTEM: The customer wants to end the call. Say "Thank you." ONCE only, then IMMEDIATELY call endCall. Do not say Thank you again.'
+                        : "SYSTEM: The customer clearly indicated they want to end the call. Say ONE short closing thank-you if you have not already, then IMMEDIATELY call the endCall tool. Do not ask another question."
+                    });
+                  }
                 }
 
                 if (response.serverContent?.modelTurn) {
@@ -1297,6 +1599,20 @@ ${formatIdentityContext(customerIdentity)}
                   if (aiText) {
                     fullTranscription += `AI: ${aiText}\n`;
                     capture?.onAiTranscriptChunk(aiText);
+
+                    if (
+                      isOutboundCall &&
+                      /\b(language model|large language model|as an ai|i am an ai|i'm an ai|cannot help with that)\b/i.test(
+                        aiText,
+                      )
+                    ) {
+                      console.warn('[GUARD] Outbound AI broke character — nudging back to sales script');
+                      geminiSession?.sendRealtimeInput({
+                        text:
+                          'SYSTEM (internal): You are a live Alliance Square sales officer. Never mention AI, chatbots, or language models. ' +
+                          'Continue from the current step in the PDF script — do NOT repeat anything already said.',
+                      });
+                    }
 
                     // Best-effort "ask once" backstop — see comment at the
                     // top of the file. Only fires a corrective nudge on an
@@ -1314,14 +1630,18 @@ ${formatIdentityContext(customerIdentity)}
                       siteVisitOfferDetected = true;
                     }
                     if (FOLLOW_UP_OFFER_PATTERN.test(aiText)) {
-                      if (followUpOfferDetected) {
+                      if (followUpOfferDetected && !outboundHardMuteAfterClose) {
                         console.warn("[GUARD] Manager/callback offered more than once — sending corrective nudge.");
-                        geminiSession?.sendRealtimeInput({
-                          text:
-                            "SYSTEM: STOP asking to call the Sales Manager / arrange callback. You already offered ONCE. " +
-                            "Do NOT say 'can I call the manager' again. Stay quiet about manager/callback until the CUSTOMER asks. " +
-                            "Answer with known project facts or wait for their next question.",
-                        });
+                        if (isOutboundCall) {
+                          sendOutboundManagerCallbackEndOnlyNudgeOnce();
+                        } else {
+                          geminiSession?.sendRealtimeInput({
+                            text:
+                              "SYSTEM: STOP asking to call the Sales Manager / arrange callback. You already offered ONCE. " +
+                              "Do NOT say 'can I call the manager' again. Stay quiet about manager/callback until the CUSTOMER asks. " +
+                              "Answer with known project facts or wait for their next question.",
+                          });
+                        }
                       }
                       followUpOfferDetected = true;
                     }
@@ -1372,10 +1692,60 @@ ${formatIdentityContext(customerIdentity)}
                     customerUtteranceCount++;
                   }
                   if (isShortAffirmativeReply(userText)) {
-                    // Gemini AAD already commits the customer turn — do NOT nudge again (caused double replies).
                     customerAnsweredOpening(userText);
+                    keepOutboundActiveAfterOpeningYes(userText);
                   }
-                  if (looksLikeCustomerQuestion(userText)) {
+                  if (isOutboundCall) {
+                    if (outboundHardMuteAfterClose) {
+                      forceOutboundHangupIfClosing('customer speech after close');
+                    } else {
+                    noteOutboundCustomerAnswer(userText);
+                    if (looksLikeRepeatRequest(userText)) {
+                      console.log('[GUARD] Outbound repeat request — nudging to repeat previous message');
+                      outboundRepeatReplayPending = true;
+                      try {
+                        if (outboundManagerCallbackDelivered) {
+                          sendOutboundManagerCallbackEndOnlyNudgeOnce();
+                        } else {
+                          geminiSession?.sendRealtimeInput({ text: OUTBOUND_REPEAT_NUDGE });
+                        }
+                      } catch (e: any) {
+                        console.error('[GEMINI] Repeat nudge failed:', e?.message || e);
+                      }
+                    } else if (
+                      looksLikeInvestmentPitchYes(userText) &&
+                      outboundConversationMemory?.pendingQuestion === INVESTMENT_PITCH_PENDING_QUESTION
+                    ) {
+                      console.log('[GUARD] Outbound investment pitch yes — closing with PDF investment yes script');
+                      try {
+                        if (outboundThanksSpoken) {
+                          forceOutboundHangupIfClosing('investment yes after close');
+                        } else if (!outboundInvestmentYesNudgeSent) {
+                          outboundInvestmentYesNudgeSent = true;
+                          geminiSession?.sendRealtimeInput({ text: OUTBOUND_INVESTMENT_YES_CLOSE_NUDGE });
+                        }
+                      } catch (e: any) {
+                        console.error('[GEMINI] Investment yes close nudge failed:', e?.message || e);
+                      }
+                    } else if (looksLikeManagerCallbackQuestion(userText)) {
+                      console.log('[GUARD] Outbound more-details / manager-callback — closing with Sales Manager script');
+                      try {
+                        if (outboundManagerCallbackDelivered && outboundThanksSpoken) {
+                          forceOutboundHangupIfClosing('more details after close');
+                        } else if (outboundManagerCallbackDelivered) {
+                          scheduleOutboundHangupAfterThanks();
+                        } else if (!outboundManagerCallbackNudgeSent) {
+                          outboundManagerCallbackNudgeSent = true;
+                          geminiSession?.sendRealtimeInput({ text: OUTBOUND_MANAGER_CALLBACK_NUDGE });
+                        }
+                      } catch (e: any) {
+                        console.error('[GEMINI] Manager callback nudge failed:', e?.message || e);
+                      }
+                    } else {
+                      handleOutboundContextInterrupt(userText);
+                    }
+                    }
+                  } else if (looksLikeCustomerQuestion(userText)) {
                     console.log(`[GUARD] Customer question detected — ensuring project context + answer nudge`);
                     if (greetingAudioHeard || deferredContextScheduled) {
                       injectProjectReferenceIfReady();
@@ -1399,8 +1769,8 @@ ${formatIdentityContext(customerIdentity)}
                       isFirstResponse = false;
                       const lowerText = userText.toLowerCase();
 
-                      const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'site', 'plot', 'mysore', 'mysuru', 'looking', 'haan', 'han', 'beku', 'vadu', 'sari', 'ಹೌದು', 'ಬೇಕು'];
-                      const notInterestedKeywords = ['no', 'not interested', 'stop', 'don\'t', 'busy', 'wrong number', 'nahi', 'beda', 'vaddu', 'alla'];
+                      const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'site', 'plot', 'mysore', 'mysuru', 'looking', 'investment', 'build', 'house', 'residential', 'haan', 'han', 'beku', 'vadu', 'sari', 'ಹೌದು', 'ಬೇಕು'];
+                      const notInterestedKeywords = ['no', 'not interested', 'not looking', 'stop', 'don\'t', 'busy', 'wrong number', 'nahi', 'beda', 'vaddu', 'alla'];
 
                       // During the live call stay on `answered`. Only set the
                       // interested flag / lastResponse; outcomes are applied by
@@ -1411,12 +1781,28 @@ ${formatIdentityContext(customerIdentity)}
                       } else if (notInterestedKeywords.some(kw => lowerText.includes(kw))) {
                         interested = false;
                       }
+                      callInterested = interested;
 
                       try {
                         void transitionLeadsByPhone(customerPhone, STATUS.ANSWERED, {
                           interested,
                           lastResponse: userText,
-                        }).then((r) => console.log(`[DB] First response tracked for ${customerPhone}: answered (interested=${interested}) rows=${r.count}`))
+                        }).then(async (r) => {
+                          console.log(`[DB] First response tracked for ${customerPhone}: answered (interested=${interested}) rows=${r.count}`);
+                          if (interested === true) {
+                            const outcome = await markOutcomeByPhone(customerPhone, STATUS.INTERESTED, {
+                              interested: true,
+                              lastResponse: userText,
+                            });
+                            console.log(`[DB] Marked looking for lead rows=${outcome.count}`);
+                          } else if (interested === false) {
+                            const outcome = await markOutcomeByPhone(customerPhone, STATUS.NOT_INTERESTED, {
+                              interested: false,
+                              lastResponse: userText,
+                            });
+                            console.log(`[DB] Marked not looking for lead rows=${outcome.count}`);
+                          }
+                        })
                           .catch((e) => console.error("[DB Error] Failed to track first response:", e));
                       } catch (e) {
                         console.error("[DB Error] Failed to track first response:", e);
@@ -1432,11 +1818,21 @@ ${formatIdentityContext(customerIdentity)}
                   );
                   for (const call of response.toolCall.functionCalls) {
                     if (call.name === "endCall") {
+                      const currentTurnAiText = response.serverContent?.modelTurn?.parts
+                        ?.map((p: any) => p.text || '')
+                        .join(' ')
+                        .trim() || '';
+                      const closingSpoken =
+                        hasThanksClosing(currentTurnAiText) ||
+                        hasThanksClosing(lastPlayedAiRaw) ||
+                        outboundThanksSpoken;
+
                       const endGuard = shouldAllowEndCall({
                         callDurationMs: Date.now() - startTime,
                         customerClearGoodbye,
                         customerUtteranceCount,
                         batchHasNotInterested,
+                        isOutbound: isOutboundCall,
                       });
                       if (!endGuard.allow) {
                         console.warn(
@@ -1457,7 +1853,38 @@ ${formatIdentityContext(customerIdentity)}
                         continue;
                       }
 
+                      if (isOutboundCall && !closingSpoken) {
+                        console.warn('[GUARD] Blocked outbound endCall — no Thanks in closing line yet');
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: false,
+                            message:
+                              'Say "Thank you." to the customer ONCE only — do not repeat it. ' +
+                              'Then call endCall in the same turn.',
+                          },
+                          id: call.id,
+                        });
+                        if (!outboundThanksNudgeSent && !outboundThanksSpoken && !outboundHardMuteAfterClose) {
+                          outboundThanksNudgeSent = true;
+                          try {
+                            geminiSession?.sendRealtimeInput({ text: OUTBOUND_THANKS_BEFORE_END_NUDGE });
+                          } catch (e: any) {
+                            console.error('[GEMINI] Thanks-before-end nudge failed:', e?.message || e);
+                          }
+                        } else if (outboundThanksSpoken) {
+                          void completeAndHangupOutboundCall('endCall after thanks already spoken');
+                        }
+                        continue;
+                      }
+
                       console.log(`[GEMINI] End call tool allowed (${endGuard.reason}). Terminating call...`);
+                      if (isOutboundCall) {
+                        await new Promise((r) => setTimeout(r, 200));
+                        await completeAndHangupOutboundCall(`endCall tool (${endGuard.reason})`);
+                        continue;
+                      }
+
                       endCallInvoked = true;
 
                       const otherTools = response.toolCall.functionCalls.filter(
@@ -1468,10 +1895,6 @@ ${formatIdentityContext(customerIdentity)}
                         endCallInvoked = false;
                         toolResponses.push({ name: call.name, response: { success: false, message: "Please complete other actions before ending the call." }, id: call.id });
                         continue;
-                      }
-
-                      if (isOutboundCall) {
-                        await new Promise(r => setTimeout(r, 600));
                       }
 
                       if (customerPhone) {
@@ -1725,55 +2148,39 @@ ${formatIdentityContext(customerIdentity)}
 
                 if (duration > 3 && customerPhone) {
                   const cleanPhone = customerPhone.replace(/\D/g, '');
-                  const durationInfo = `Call: ${duration}s. AI Turns: ${transcriptCount}.`;
+                  const tail = phoneTail(customerPhone);
 
                   try {
-                    const groqApiKey = process.env.GROQ_API_KEY!;
-                    const summaryPrompt = `
-                      Summarize the following conversation between an AI Agent (Priya) and a Customer.
-
-                      REQUIREMENTS:
-                      - The summary should be professional and concise (2-3 sentences).
-                      - Highlight the key outcome.
-                      - INCLUDE the specific property name if the customer showed interest or booked a visit.
-                      - If the customer DID NOT confirm interest in a specific property, DO NOT mention any property names in the summary.
-
-                      CONVERSATION:
-                      ${fullTranscription}
-
-                      SUMMARY:
-                    `;
-
-                    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-                      method: "POST",
-                      headers: {
-                        "Authorization": `Bearer ${groqApiKey}`,
-                        "Content-Type": "application/json"
-                      },
-                      body: JSON.stringify({
-                        model: "llama-3.3-70b-versatile",
-                        messages: [
-                          { role: "system", content: "You are a professional real estate assistant specializing in summarizing calls." },
-                          { role: "user", content: summaryPrompt }
-                        ],
-                        temperature: 0.5,
-                        max_tokens: 500
-                      })
+                    await ensureLeadForCall({
+                      phone: customerPhone,
+                      calledFrom: outboundCallerId(),
+                      callStatus: LEAD_STATUS.CALL_COMPLETED,
                     });
 
-                    const groqData: any = await groqResponse.json();
-                    const aiSummary = groqData.choices?.[0]?.message?.content?.trim() || "Summary unavailable.";
-                    const finalSummary = `${durationInfo}\n\n${aiSummary}`;
+                    const leadRow = await prisma.lead.findFirst({
+                      where: { phone: { contains: tail } },
+                      orderBy: { createdAt: 'desc' },
+                      select: { interested: true },
+                    });
+                    const interestedFlag = callInterested ?? leadRow?.interested ?? null;
+
+                    const finalSummary = await generateCallSummary({
+                      durationSec: duration,
+                      transcriptCount,
+                      transcription: fullTranscription,
+                      interested: interestedFlag,
+                    });
 
                     await prisma.lead.updateMany({
-                      where: { phone: { contains: cleanPhone.slice(-10) } },
+                      where: { phone: { contains: tail } },
                       data: {
-                        summary: finalSummary
-                      }
+                        summary: finalSummary,
+                        duration: String(duration),
+                      },
                     });
-                    console.log(`[DB] Professional Groq Summary saved for ${customerPhone}`);
+                    console.log(`[DB] Call summary saved for ${customerPhone}`);
                   } catch (e) {
-                    console.error("[DB Error] Failed to save summary with Groq:", e);
+                    console.error("[DB Error] Failed to save summary:", e);
                   }
                 }
               }
@@ -2044,6 +2451,7 @@ ${formatIdentityContext(customerIdentity)}
     console.log('[WS] Connection closed');
     clearWaitTick();
     if (outboundOpeningWaitTimer) clearTimeout(outboundOpeningWaitTimer);
+    if (outboundThanksHangupTimer) clearTimeout(outboundThanksHangupTimer);
     if (openingGraceTimer) clearTimeout(openingGraceTimer);
     void capture?.finalize();
     capture = null;

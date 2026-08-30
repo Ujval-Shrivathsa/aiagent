@@ -42,6 +42,23 @@ const answerUrl =
 console.log(`Calling ${to} from ${from}`);
 console.log(`answer_url ${answerUrl}`);
 
+const ensureRes = await fetch(`${appUrl}/api/leads/ensure`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    phone: to,
+    name,
+    calledFrom: from,
+    callStatus: 'calling',
+  }),
+});
+const ensureBody = await ensureRes.json().catch(() => ({}));
+if (!ensureRes.ok) {
+  console.warn('lead ensure failed', ensureBody);
+} else {
+  console.log('lead ensured', ensureBody.lead?.id || 'ok');
+}
+
 const res = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/`, {
   method: 'POST',
   headers: {
