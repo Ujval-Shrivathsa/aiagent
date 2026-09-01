@@ -123,14 +123,19 @@ export async function GET(req: Request) {
         }
         break;
       } catch (e: any) {
-        if (e.code === 'P1008' || e.code === 'P2010' || e.message?.includes('busy') || e.message?.includes('locked')) {
+        const retryable =
+          e.code === 'P1008' ||
+          e.code === 'P2010' ||
+          String(e.message || '').includes('busy') ||
+          String(e.message || '').includes('locked');
+        if (retryable) {
           retries--;
           if (retries === 0) {
-            console.error("[API/LEADS] GET: SQLite timed out after 5 retries.");
+            console.error("[API/LEADS] GET: timed out after 5 retries.");
             throw e;
           }
           console.log(`[API/LEADS] GET busy, retrying... (${retries} left)`);
-          await new Promise(r => setTimeout(r, 1000));
+          await new Promise(r => setTimeout(r, 400));
           continue;
         }
         throw e;

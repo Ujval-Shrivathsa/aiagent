@@ -52,11 +52,6 @@ export default function Dashboard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    fetchAllData();
-    setIsLoading(false);
-  }, []);
-
-  useEffect(() => {
     if (!selectedLead?.phone) {
       setLeadRecording(null);
       return;
@@ -74,9 +69,20 @@ export default function Dashboard() {
   }, [selectedLead?.phone, selectedLead?.id]);
 
   useEffect(() => {
-    fetchAllData(); // Initial fetch
-    const interval = setInterval(fetchAllData, 15000); // Poll every 15s
-    return () => clearInterval(interval);
+    let cancelled = false;
+    const load = async () => {
+      await fetchAllData();
+      if (!cancelled) setIsLoading(false);
+    };
+    void load();
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void fetchAllData();
+    }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -102,7 +108,9 @@ export default function Dashboard() {
         }
       }
     } catch (e) {
-      console.error("Failed to refresh lead", e);
+      if (!(e instanceof Error && (e.name === "AbortError" || e.message === "Failed to fetch"))) {
+        console.warn("Failed to refresh lead", e);
+      }
     } finally {
       setSummaryLoading(false);
     }
@@ -124,25 +132,45 @@ export default function Dashboard() {
     return "No summary yet — it will appear shortly after a completed call.";
   };
 
+  const isTransientFetchError = (err: unknown) => {
+    if (!err || typeof err !== "object") return false;
+    const name = "name" in err ? String((err as { name?: string }).name) : "";
+    const message = "message" in err ? String((err as { message?: string }).message) : "";
+    return (
+      name === "AbortError" ||
+      message === "Failed to fetch" ||
+      message.toLowerCase().includes("network") ||
+      message.toLowerCase().includes("aborted")
+    );
+  };
+
   const fetchAllData = async () => {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
     try {
-      const res = await fetch(`/api/leads?campaignId=${activeCampaignId}&includeInterested=true`);
+      const res = await fetch(
+        `/api/leads?campaignId=${encodeURIComponent(activeCampaignId)}&includeInterested=true`,
+        { cache: "no-store", signal: controller.signal },
+      );
       if (!res.ok) {
-        console.error(`Fetch leads failed with status ${res.status}`);
+        console.warn(`Fetch leads failed with status ${res.status}`);
         return;
       }
       const data = await res.json();
       if (data.success) {
-        setLeads(data.leads);
+        setLeads(Array.isArray(data.leads) ? data.leads : []);
         if (data.interestedLeads) {
-          setInterestedLeads(data.interestedLeads);
+          setInterestedLeads(Array.isArray(data.interestedLeads) ? data.interestedLeads : []);
         }
       }
     } catch (e) {
-      console.error("Fetch error", e);
+      if (!isTransientFetchError(e)) {
+        console.warn("Fetch error", e);
+      }
     } finally {
+      clearTimeout(timeout);
       isFetchingRef.current = false;
     }
   };
