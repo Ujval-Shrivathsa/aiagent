@@ -1767,6 +1767,7 @@ ${formatIdentityContext(customerIdentity)}
 
                   if (isFirstResponse && customerPhone) {
                       isFirstResponse = false;
+                      const phone = customerPhone;
                       const lowerText = userText.toLowerCase();
 
                       const interestedKeywords = ['yes', 'yeah', 'sure', 'interested', 'okay', 'site', 'plot', 'mysore', 'mysuru', 'looking', 'investment', 'build', 'house', 'residential', 'haan', 'han', 'beku', 'vadu', 'sari', 'ಹೌದು', 'ಬೇಕು'];
@@ -1784,19 +1785,19 @@ ${formatIdentityContext(customerIdentity)}
                       callInterested = interested;
 
                       try {
-                        void transitionLeadsByPhone(customerPhone, STATUS.ANSWERED, {
+                        void transitionLeadsByPhone(phone, STATUS.ANSWERED, {
                           interested,
                           lastResponse: userText,
                         }).then(async (r) => {
-                          console.log(`[DB] First response tracked for ${customerPhone}: answered (interested=${interested}) rows=${r.count}`);
+                          console.log(`[DB] First response tracked for ${phone}: answered (interested=${interested}) rows=${r.count}`);
                           if (interested === true) {
-                            const outcome = await markOutcomeByPhone(customerPhone, STATUS.INTERESTED, {
+                            const outcome = await markOutcomeByPhone(phone, STATUS.INTERESTED, {
                               interested: true,
                               lastResponse: userText,
                             });
                             console.log(`[DB] Marked looking for lead rows=${outcome.count}`);
                           } else if (interested === false) {
-                            const outcome = await markOutcomeByPhone(customerPhone, STATUS.NOT_INTERESTED, {
+                            const outcome = await markOutcomeByPhone(phone, STATUS.NOT_INTERESTED, {
                               interested: false,
                               lastResponse: userText,
                             });
