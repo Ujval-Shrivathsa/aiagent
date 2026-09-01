@@ -15,6 +15,7 @@
     "test:voice": "tsx --test src/voice/__tests__/audio-pipeline.test.ts src/voice/__tests__/kannada-style.test.ts src/voice/__tests__/customer-identity.test.ts src/voice/__tests__/wait-policy.test.ts src/voice/__tests__/kannada-first.test.ts",
     "test:status": "tsx --test src/lib/__tests__/lead-status.test.ts",
     "test": "tsx --test src/voice/__tests__/audio-pipeline.test.ts src/voice/__tests__/kannada-style.test.ts src/voice/__tests__/customer-identity.test.ts src/voice/__tests__/wait-policy.test.ts src/voice/__tests__/kannada-first.test.ts src/voice/__tests__/outbound-pdf.test.ts src/voice/__tests__/outbound-phonetics.test.ts src/voice/__tests__/outbound-thanks.test.ts src/voice/__tests__/outbound-thanks-flow.test.ts src/lib/__tests__/lead-status.test.ts",
+    "setup:production": "powershell -ExecutionPolicy Bypass -File scripts/setup-production.ps1",
     "lint": "eslint"
   },
   "dependencies": {
