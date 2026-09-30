@@ -415,6 +415,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let openingQuestionSent = false;
   let fullCallGuideInjected = false;
   let geminiSessionOpened = false;
+  /** True once ANY Gemini session has opened on this call (initial or reconnect). */
+  let geminiEverConnected = false;
   let lastCustomerTranscript = '';
 
   let lastPlayedAiNorm = '';
@@ -1438,6 +1440,7 @@ CURRENT DATE: ${currentDateStr}
                 diagLog(`session open ${sessionIsReconnect ? 'reconnect' : 'initial'}`);
                 callLog('SUCCESS', 'GEMINI LIVE SESSION OPEN');
                 geminiSessionOpened = true;
+                geminiEverConnected = true;
                 trySendOpening();
               },
               onerror: (err: any) => {
@@ -2082,16 +2085,23 @@ CURRENT DATE: ${currentDateStr}
             );
           }
           if (!geminiSession) {
-            // NEVER drop caller audio permanently: if the session died mid-call,
-            // queue reconnect — forwarding resumes automatically once it reopens.
+            // NEVER drop caller audio permanently. Two distinct windows:
+            // (a) INITIAL CONNECT — the first ~4s while the Gemini session is
+            //     still opening; these frames are EXPECTED — do NOT reconnect.
+            // (b) SESSION DIED mid-call — schedule reconnect; forwarding
+            //     resumes automatically once the fresh session opens.
             droppedFramesNoSession++;
+            const inInitialConnect = !geminiEverConnected && Date.now() - startTime < 4_000;
             if (droppedFramesNoSession === 1 || droppedFramesNoSession % 250 === 0) {
               console.warn(
-                `[GEMINI] Customer audio received but NO live session (dropped=${droppedFramesNoSession}) — scheduling reconnect`,
+                `[GEMINI] Customer audio with NO live session (dropped=${droppedFramesNoSession}` +
+                  `${inInitialConnect ? ', initial connect window — reconnect NOT needed' : ', session lost — reconnecting'})`,
               );
-              diagLog(`audio-in WITHOUT session dropped=${droppedFramesNoSession} → reconnect scheduled`);
+              diagLog(`audio-in WITHOUT session dropped=${droppedFramesNoSession} initialConnect=${inInitialConnect}`);
             }
-            if (!endCallInvoked) scheduleGeminiReconnect('audio arrived with no session');
+            if (!endCallInvoked && !inInitialConnect) {
+              scheduleGeminiReconnect('audio arrived with no session');
+            }
             return;
           }
           const sampleCount = muLawData.length;
