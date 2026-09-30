@@ -10,8 +10,9 @@
  *      moves to answer-grace and nudges the model to reply immediately.
  *   4. AI audio at any point resolves the pending turn.
  *   5. A new speech start disarms the ladder — the new turn owns the state.
- *   6. Escalation is bounded; afterwards the ordinary silence protocol owns
- *      the call (never an infinite nudge loop, never a hangup from here).
+ *   6. Escalation is bounded; exhaustion ends in RESUME-AND-LISTEN (one short
+ *      spoken line, then the quiet-caller reprompt cycle). The ladder NEVER
+ *      hangs up and NEVER hands off to any terminating path.
  *
  * This replaces the old separate response-watchdog so exactly one recovery
  * system exists — no double nudges, no silent gaps.
@@ -104,7 +105,8 @@ export type RecoveryDecision =
       attempt: number;
       kind: 'ask_repeat' | 'reply_now';
     }
-  | { action: 'give_up_to_silence_protocol'; state: SpeechRecoveryState };
+  /** Ladder exhausted → resume mid-conversation and keep listening (never hang up). */
+  | { action: 'resume_after_exhausted'; state: SpeechRecoveryState };
 
 /**
  * Tick the ladder. Call only when the caller is NOT mid-speech and the
@@ -126,8 +128,10 @@ export function tickSpeechRecovery(
     return { action: 'none', state };
   }
   if (state.attempts >= cfg.maxAttempts) {
+    // Exhausted → resume-and-listen. The call NEVER ends from here; the
+    // quiet-caller reprompt cycle owns the line until the caller speaks.
     return {
-      action: 'give_up_to_silence_protocol',
+      action: 'resume_after_exhausted',
       state: { stage: 'idle', armedAt: null, attempts: 0 },
     };
   }

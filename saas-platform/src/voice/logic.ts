@@ -26,8 +26,9 @@ import {
   OUTBOUND_NOT_INTERESTED_CLOSE_KN,
   PDF_HANDOFF_LINE_KN,
   OUTBOUND_SILENCE_CHECK_NUDGE,
-  OUTBOUND_SILENCE_CLOSE_NUDGE,
-  SILENCE_TIMEOUT_CLOSE_KN,
+  OUTBOUND_SILENCE_RESUME_NUDGE,
+  SILENCE_CHECK_AFTER_MS,
+  SILENCE_CLOSE_AFTER_CHECK_MS,
   createOutboundSilenceState,
   armOutboundSilenceCheck,
   resetOutboundSilence,
@@ -163,11 +164,12 @@ function normalizeVoiceEvent(raw: any): any {
 const OUTBOUND_END_CALL_TOOL = {
   name: "endCall",
   description:
-    "End the outbound call when one of the allowed triggers happens: (1) the caller clearly said goodbye / asked to end, " +
-    "(2) the caller confirmed they are not interested (after the notInterested tool), or (3) the 10-second silence timeout " +
-    "closing line was delivered (system nudge). After delivering a scripted closing that includes 'Thank you.' exactly ONCE " +
-    "for the whole call, call endCall in the SAME turn — if the closing already includes Thank you, do NOT say it again. " +
-    "Do NOT end because of short pauses, short replies, or a topic change — only the 10-second silence timeout counts as a silence trigger.",
+    "End the outbound call ONLY when: (1) the caller clearly said goodbye / asked to end, or " +
+    "(2) the caller confirmed they are not interested (after the notInterested close line). " +
+    "After delivering a scripted closing that includes 'Thank you.' exactly ONCE for the whole call, " +
+    "call endCall in the SAME turn — if the closing already includes Thank you, do NOT say it again. " +
+    "NEVER end the call because of silence, a quiet caller, short pauses, short replies, or a topic change — " +
+    "silence ALWAYS means keep listening. The system will never ask you to end a call due to silence.",
   parameters: {
     type: Type.OBJECT,
     properties: {},
@@ -251,7 +253,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   // Cold-call silence protocol (5s check / 10s close) — see kannada-script.ts.
   let outboundSilence: OutboundSilenceState = createOutboundSilenceState();
   let outboundSilenceTimer: NodeJS.Timeout | null = null;
-  let outboundSilenceCloseSent = false;
+  /** Timestamp of the caller's last transcript — diagnostics + quiet-window math. */
+  let lastCustomerTranscriptAt = Date.now();
   // Set once ANY flowchart close line (not-interested / silence timeout) is delivered —
   // the agent is then hard-muted and the call hangs up.
   let outboundBusyCloseSent = false;
@@ -335,6 +338,49 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     const delta = speechEndAt > 0 ? ` +${Date.now() - speechEndAt}ms` : '';
     console.log(`[LAT] ${label}${sinceStream}${delta}`);
   };
+
+  // ---------- TEMP DEV DIAGNOSTICS (VOICE_DIAG=1 — remove after stabilizing) ----------
+  const DIAG = process.env.VOICE_DIAG === '1';
+  const diagLog = (msg: string) => {
+    if (DIAG) console.log(`[DIAG] ${msg}`);
+  };
+
+  // ---------- EXPLICIT CALL STATE MACHINE ----------
+  // CONNECTING → GREETING → LISTENING → USER_SPEAKING → PROCESSING → AGENT_SPEAKING → LISTENING …
+  // The cycle ALWAYS returns to LISTENING. Silence NEVER moves the call toward ENDED —
+  // the only exits are a real close (user no/goodbye), a completed transfer, or telephony end.
+  type CallState =
+    | 'CONNECTING'
+    | 'GREETING'
+    | 'LISTENING'
+    | 'USER_SPEAKING'
+    | 'PROCESSING'
+    | 'AGENT_SPEAKING'
+    | 'RECONNECTING'
+    | 'ENDED';
+  let callState: CallState = 'CONNECTING';
+  const setCallState = (next: CallState, why = '') => {
+    if (callState === next) return;
+    console.log(`[STATE] ${callState} → ${next}${why ? ` (${why})` : ''}`);
+    callState = next;
+  };
+
+  // Pipeline health counters (watchdog + diagnostics).
+  let mediaFrameCount = 0;
+  let droppedFramesNoSession = 0;
+  let audioSentChunkCount = 0;
+  let lastMediaFrameAt = Date.now();
+  let lastAudioSentAt = 0;
+  let consecutiveAudioSendFailures = 0;
+  let vadSpeakingSince: number | null = null;
+  let suppressSince: number | null = null;
+  let geminiReconnectAttempts = 0;
+  let reconnectScheduled = false;
+  let reconnectTimer: NodeJS.Timeout | null = null;
+  let reconnectFn: (() => Promise<boolean>) | null = null;
+  let sessionIsReconnect = false;
+  let watchdogTimer: NodeJS.Timeout | null = null;
+  let lastWatchdogNote = '';
 
   // New strict-script step tracking: areas delivered → interested handoff transfer.
   let outboundAreasLineDelivered = false;
@@ -875,9 +921,25 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       if (decision.action === 'send_recovery_nudge') {
         sendRecoveryNudge(decision.kind, decision.attempt);
         scheduleRecoveryTick();
-      } else if (decision.action === 'give_up_to_silence_protocol') {
-        console.log('[RECOVERY] Ladder exhausted — handing over to the silence protocol');
+      } else if (decision.action === 'resume_after_exhausted') {
+        // STABILITY RULE: the ladder NEVER hands off to a hangup. It ends in a
+        // resume-and-listen: one short spoken line, then the quiet-caller
+        // reprompt cycle takes over — the call stays open indefinitely.
+        console.log('[RECOVERY] Ladder exhausted — resume-and-listen (call stays open)');
         if (isOutboundCall && !outboundThanksSpoken) {
+          setTimeout(() => {
+            if (!geminiSession || endCallInvoked || outboundTransferStarted || outboundHardMuteAfterClose) return;
+            if (vadIsSpeaking || Date.now() < aiPlaybackEndsAt - 100) return;
+            try {
+              geminiSession.sendRealtimeInput({ text: OUTBOUND_SILENCE_RESUME_NUDGE });
+              diagLog('recovery exhausted → resume nudge sent, back to LISTENING');
+              console.log('[RECOVERY] Resume line sent — back to LISTENING');
+            } catch (e: any) {
+              console.error('[RECOVERY] Resume nudge failed:', e?.message || e);
+              scheduleGeminiReconnect('recovery resume send failed');
+            }
+          }, 600);
+          resetOutboundSilenceCycle();
           armOutboundSilenceAfterTurn();
         }
       }
@@ -946,6 +1008,11 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       outboundThanksHangupTimer = null;
     }
     console.log(`[GEMINI] Ending outbound call (${reason})`);
+    diagLog(`call TERMINATE reason="${reason}"`);
+    setCallState('ENDED', reason);
+    stopListeningWatchdog();
+    clearGeminiReconnect();
+    clearOutboundSilenceTimer();
 
     if (customerPhone) {
       try {
@@ -999,6 +1066,123 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
   };
 
+  // ---------------------------------------------------------------------
+  // GEMINI AUTO-RECONNECT — a live session dying must NEVER kill the call.
+  // Preserves: streamSid, customerPhone, callUuid, transcript, language
+  // state, script progress, capture session. After re-open: resends the
+  // deferred context, speaks one short resume line, returns to LISTENING.
+  // ---------------------------------------------------------------------
+  const GEMINI_RECONNECT_BASE_MS = 800;
+  const GEMINI_RECONNECT_MAX_MS = 5_000;
+  const GEMINI_RECONNECT_MAX_ATTEMPTS = 8;
+
+  const clearGeminiReconnect = () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    reconnectScheduled = false;
+  };
+
+  const setReconnectFn = (fn: (() => Promise<boolean>) | null) => {
+    reconnectFn = fn;
+  };
+
+  const scheduleGeminiReconnect = (reason: string) => {
+    if (endCallInvoked || callState === 'ENDED') return;
+    if (reconnectScheduled) {
+      diagLog(`reconnect already scheduled (${reason}) — ignoring`);
+      return;
+    }
+    reconnectScheduled = true;
+    const attempt = geminiReconnectAttempts + 1;
+    const delay = Math.min(GEMINI_RECONNECT_MAX_MS, GEMINI_RECONNECT_BASE_MS * attempt);
+    console.warn(
+      `[GEMINI] Reconnect #${attempt} scheduled in ${delay}ms — reason: ${reason} (phone line stays open)`,
+    );
+    diagLog(`reconnect scheduled attempt=${attempt} delay=${delay}ms reason=${reason}`);
+    setCallState('RECONNECTING', reason);
+    // Close the dead session so its handlers stop firing.
+    try { geminiSession?.close(); } catch { /* already dead */ }
+    geminiSession = null;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!reconnectFn) {
+        console.error('[GEMINI] No reconnect fn wired — cannot restore session');
+        reconnectScheduled = false;
+        return;
+      }
+      reconnectFn()
+        .then((ok) => {
+          if (ok) {
+            reconnectScheduled = false;
+          } else if (geminiReconnectAttempts < GEMINI_RECONNECT_MAX_ATTEMPTS) {
+            reconnectScheduled = false;
+            scheduleGeminiReconnect('reconnect attempt failed');
+          } else {
+            console.error(
+              '[GEMINI] Reconnect attempts exhausted — phone line stays open, audio queued; will keep retrying if caller speaks',
+            );
+            diagLog('reconnect EXHAUSTED — line stays open (never hang up)');
+            reconnectScheduled = false;
+            geminiReconnectAttempts = GEMINI_RECONNECT_MAX_ATTEMPTS - 1;
+          }
+        })
+        .catch(() => {
+          reconnectScheduled = false;
+          if (geminiReconnectAttempts < GEMINI_RECONNECT_MAX_ATTEMPTS) {
+            scheduleGeminiReconnect('reconnect attempt threw');
+          }
+        });
+    }, delay);
+  };
+
+  // LISTENING WATCHDOG — detects a stalled pipeline (telephony frames flowing
+  // but nothing reaching Gemini, or the system stuck outside LISTENING/USER_
+  // SPEAKING too long) and RESTORES listening. Never ends the call.
+  const LISTENING_WATCHDOG_MS = 12_000;
+  const startListeningWatchdog = () => {
+    stopListeningWatchdog();
+    watchdogTimer = setInterval(() => {
+      if (endCallInvoked || callState === 'ENDED') {
+        stopListeningWatchdog();
+        return;
+      }
+      const now = Date.now();
+      const framesFlowing = now - lastMediaFrameAt < 5_000;
+      if (!framesFlowing) return; // call likely over; telephony 'stop' will clean up.
+      const note = `frames=${mediaFrameCount} sent=${audioSentChunkCount} state=${callState} ` +
+        `reconnecting=${reconnectScheduled} lastSent=${lastAudioSentAt ? now - lastAudioSentAt : 'never'}ms ago`;
+      const audioStalled = lastAudioSentAt === 0 || now - lastAudioSentAt > 8_000;
+      const stateStuck =
+        callState !== 'LISTENING' &&
+        callState !== 'USER_SPEAKING' &&
+        callState !== 'CONNECTING' &&
+        callState !== 'GREETING' &&
+        callState !== 'AGENT_SPEAKING' &&
+        !reconnectScheduled;
+      if (audioStalled && !reconnectScheduled) {
+        console.warn(`[WATCHDOG] Audio→Gemini stalled (${note}) — reconnecting (line stays open)`);
+        diagLog(`watchdog AUDIO_STALL ${note}`);
+        scheduleGeminiReconnect('watchdog: audio pipeline stalled');
+      } else if (stateStuck && note !== lastWatchdogNote) {
+        lastWatchdogNote = note;
+        console.warn(`[WATCHDOG] State outside LISTENING (${note}) — restoring LISTENING`);
+        diagLog(`watchdog STATE_STUCK ${note} → LISTENING`);
+        setCallState('LISTENING', 'watchdog restore');
+      } else if (DIAG) {
+        diagLog(`watchdog ok ${note}`);
+      }
+    }, 4_000);
+  };
+
+  const stopListeningWatchdog = () => {
+    if (watchdogTimer) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
+  };
+
   const clearOutboundSilenceTimer = () => {
     if (outboundSilenceTimer) {
       clearTimeout(outboundSilenceTimer);
@@ -1022,6 +1206,9 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
   };
 
+  // SILENCE = KEEP LISTENING (permanent stability rule). The tick only ever
+  // produces a soft availability-check line; the cycle re-arms forever. There
+  // is NO close step and NO hangup on any amount of silence.
   const runOutboundSilenceTick = () => {
     outboundSilenceTimer = null;
     if (!geminiSession || endCallInvoked || outboundTransferStarted) return;
@@ -1033,34 +1220,12 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     const tick = tickOutboundSilence(outboundSilence, now);
     outboundSilence = tick.state;
     if (tick.action === 'speak_check') {
-      console.log('[SILENCE] 5s cold-call silence — one availability-check line');
+      const quietSecs = Math.round((now - lastCustomerTranscriptAt) / 1000);
+      console.log(`[SILENCE] ${quietSecs}s quiet — soft availability-check reprompt (call stays open)`);
+      diagLog(`silence reprompt quiet=${quietSecs}s → LISTENING (no hangup ever)`);
       sendOutboundSilenceNudge(OUTBOUND_SILENCE_CHECK_NUDGE);
+      // Re-arm the next quiet window — the loop NEVER terminates the call.
       scheduleOutboundSilenceTick();
-    } else if (tick.action === 'speak_close') {
-      if (outboundSilenceCloseSent) {
-        // Close line already delivered — do not speak again; ensure hangup.
-        void completeAndHangupOutboundCall('silence timeout close (repeat tick)');
-        return;
-      }
-      outboundSilenceCloseSent = true;
-      console.log('[SILENCE] 10s continued silence — closing line + endCall');
-      sendOutboundSilenceNudge(OUTBOUND_SILENCE_CLOSE_NUDGE);
-      // If the model fails to call endCall after the close line, hang up after it plays.
-      const playLeft = Math.max(0, aiPlaybackEndsAt - Date.now());
-      if (outboundThanksHangupTimer) clearTimeout(outboundThanksHangupTimer);
-      outboundThanksHangupTimer = setTimeout(() => {
-        outboundThanksHangupTimer = null;
-        if (endCallInvoked) return;
-        const stillPlaying = Math.max(0, aiPlaybackEndsAt - Date.now());
-        if (stillPlaying > 60) {
-          outboundThanksHangupTimer = setTimeout(() => {
-            outboundThanksHangupTimer = null;
-            if (!endCallInvoked) void completeAndHangupOutboundCall('silence timeout close');
-          }, stillPlaying + 80);
-        } else {
-          void completeAndHangupOutboundCall('silence timeout close');
-        }
-      }, Math.max(2500, playLeft + 2500));
     } else {
       scheduleOutboundSilenceTick();
     }
@@ -1075,10 +1240,9 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     outboundSilenceTimer = setTimeout(runOutboundSilenceTick, delay);
   };
 
-  /** Agent finished a spoken turn → arm/re-arm the 5s silence check. */
+  /** Agent finished a spoken turn → arm the soft quiet-caller reprompt cycle. */
   const armOutboundSilenceAfterTurn = () => {
     if (!isOutboundCall || outboundHardMuteAfterClose || endCallInvoked || outboundTransferStarted) return;
-    if (outboundSilenceCloseSent) return;
     outboundSilence = armOutboundSilenceCheck(Date.now());
     scheduleOutboundSilenceTick();
   };
@@ -1203,7 +1367,7 @@ OUTBOUND SCRIPT STATE (STRICT) — KANNADA ONLY, NEVER English:
 - NEVER ask permission to continue — after any reply, move to the next step naturally.
 - Never say you are an AI or language model. You are a sales officer on a live call.
 - "ಧನ್ಯವಾದ" is spoken EXACTLY ONCE per call — ONLY inside the transfer handoff line. The not-interested close NEVER contains it. The transfer line NEVER calls endCall.
-- SILENCE PROTOCOL: after 5s of silence the system sends a check-line nudge (say it once); after 10s more the system sends the close nudge — say the closing line once and call endCall in the SAME turn.
+- SILENCE = KEEP LISTENING (ABSOLUTE): silence NEVER ends this call. The system may send a private availability-check nudge after a quiet stretch — say the given short line ONCE, then keep listening. NEVER call endCall because the caller was silent, quiet, or slow to reply.
 - SPEECH PACING: reply within ~100 MILLISECONDS (0.1s) after the caller stops — STRICT. Each turn is ONE smooth utterance at a calm pace — pause at commas, never mid-sentence, the full line in one breath, then a real pause while you listen. No long gaps, no word-by-word delivery.
 - HEARING GUARANTEE (PERMANENT): every soft, short, or accented caller utterance is a REAL turn — respond immediately, never claim you cannot hear them, never ask them to speak louder. If a private nudge says words were not recognized, briefly acknowledge and ask them kindly to repeat ONCE ("ಒಂದು ಸಲ ಮತ್ತೆ ಹೇಳಿ"); if a nudge says they are waiting for your reply, speak now. The caller must never need to shout or repeat themselves twice.
 
@@ -1230,6 +1394,8 @@ CURRENT DATE: ${currentDateStr}
             const greetingText: string = PDF_OPENING_KN;
             const instruction = getOutboundGreetingInstruction('kn');
             console.log(`[GEMINI] Sending opening greeting once (+${Date.now() - streamConnectAt}ms from stream)`);
+            diagLog('greeting instruction sent → GREETING (audio already streaming to model)');
+            setCallState('GREETING', 'opening sent');
             capture?.onAiText(greetingText);
             geminiSession.sendRealtimeInput({ text: instruction });
           } catch (greetErr) {
@@ -1238,6 +1404,10 @@ CURRENT DATE: ${currentDateStr}
           }
         };
 
+        // GEMINI SESSION LIFECYCLE — connectable + auto-reconnectable.
+        // A dead session NEVER ends the phone call: scheduleGeminiReconnect()
+        // re-opens a fresh session, restores context, speaks one resume line,
+        // and returns to LISTENING.
         const geminiConnectOptions = {
             model: "gemini-3.1-flash-live-preview",
             config: {
@@ -1264,16 +1434,18 @@ CURRENT DATE: ${currentDateStr}
             },
             callbacks: {
               onopen: () => {
-                console.log(`[GEMINI] Session opened! (+${Date.now() - streamConnectAt}ms from stream)`);
+                console.log(`[GEMINI] Session opened${sessionIsReconnect ? ' (RECONNECT)' : ''}! (+${Date.now() - streamConnectAt}ms from stream)`);
+                diagLog(`session open ${sessionIsReconnect ? 'reconnect' : 'initial'}`);
                 callLog('SUCCESS', 'GEMINI LIVE SESSION OPEN');
                 geminiSessionOpened = true;
                 trySendOpening();
               },
               onerror: (err: any) => {
-                const msg = err?.message || String(err);
+                const errMsg = err?.message || String(err);
                 console.error("[GEMINI Error]:", err);
-                callLog('ERROR', `GEMINI/STT ERROR: ${msg}`);
-                capture?.onSttError(msg);
+                diagLog(`session error: ${errMsg}`);
+                callLog('ERROR', `GEMINI/STT ERROR: ${errMsg}`);
+                capture?.onSttError(errMsg);
               },
               onmessage: async (response: any) => {
                 if (response.serverContent?.interrupted) {
@@ -1305,6 +1477,7 @@ CURRENT DATE: ${currentDateStr}
                     .map((p: any) => p.text || '')
                     .join('')
                     .trim();
+                  setCallState('AGENT_SPEAKING', 'model turn audio');
                   if (isOutboundCall && outboundHardMuteAfterClose) {
                     lastOutboundTurnSuppressed = true;
                     console.warn('[GEMINI] Dropping outbound audio after first Thank you');
@@ -1328,6 +1501,7 @@ CURRENT DATE: ${currentDateStr}
                   capture?.onAiTurnComplete();
                   capture?.onAiSpeakEnd();
                   resetSpeakNudge();
+                  diagLog('tts turn_complete (AI turn fully delivered)');
                   const completedAiText = response.serverContent?.modelTurn?.parts
                     ?.map((p: any) => p.text || '')
                     .join('')
@@ -1337,10 +1511,10 @@ CURRENT DATE: ${currentDateStr}
                     if (
                       isOutboundCall &&
                       !outboundThanksSpoken &&
-                      (completedAiText.includes(SILENCE_TIMEOUT_CLOSE_KN) ||
-                        looksLikeNotInterestedCloseLine(completedAiText))
+                      looksLikeNotInterestedCloseLine(completedAiText)
                     ) {
-                      // A flowchart close line was delivered — mute + hang up after it plays.
+                      // The ONE flowchart close line (explicit NO) — mute + hang up
+                      // after it plays. There is NO silence close anymore.
                       outboundBusyCloseSent = true;
                       clearOutboundSilenceTimer();
                       activateOutboundPostThanksMute();
@@ -1364,6 +1538,11 @@ CURRENT DATE: ${currentDateStr}
                     openingGreetingTurnFinished = true;
                     openingQuestionSent = true;
                     latLog('OPENING_TURN_COMPLETE');
+                    // OPENING → LISTENING with zero dead time: the media handler
+                    // was already forwarding customer audio throughout the intro;
+                    // the very next caller syllable starts the reply turn.
+                    console.log('[GEMINI] Opening question spoken — actively LISTENING (no dead period)');
+                    diagLog('opening complete → LISTENING (audio was forwarded during intro)');
                   } else if (!deferredContextScheduled && customerUtteranceCount > 0) {
                     injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
                     injectDeferredContextAfterOpening();
@@ -1449,6 +1628,9 @@ CURRENT DATE: ${currentDateStr}
                   const userLang = detectScriptLanguage(userText);
                   console.log(`[LANG] Customer STT lang=${userLang} text="${String(userText).slice(0, 100)}"`);
                   lastCustomerTranscript = userText;
+                  lastCustomerTranscriptAt = Date.now();
+                  setCallState('PROCESSING', 'customer transcript arrived');
+                  diagLog(`stt final lang=${userLang} chars=${userText.length} utteranceCount→${customerUtteranceCount + 1}`);
                   // Ladder guarantee #2: transcript arrived — switch to waiting
                   // for the AI's reply audio (a quiet "yes" that DID get through
                   // must still produce a reply; missing reply audio is recovered).
@@ -1634,8 +1816,9 @@ CURRENT DATE: ${currentDateStr}
                         ?.map((p: any) => p.text || '')
                         .join(' ')
                         .trim() || '';
-                      // FLOWCHART: a close line (the ONE close, the silence close, or a
-                      // thank-you transfer line) must have been delivered before hangup.
+                      // FLOWCHART: a close line (the ONE close or a thank-you transfer
+                      // line) must have been delivered before hangup. NOTE: there is NO
+                      // silence close any more — silence can never satisfy this guard.
                       const closingSpoken =
                         outboundBusyCloseSent ||
                         looksLikeNotInterestedCloseLine(currentTurnAiText) ||
@@ -1666,7 +1849,7 @@ CURRENT DATE: ${currentDateStr}
                         customerUtteranceCount,
                         batchHasNotInterested,
                         isOutbound: isOutboundCall,
-                        silenceTimeoutClose: isOutboundCall && outboundSilenceCloseSent,
+                        // (silenceTimeoutClose removed — silence NEVER authorizes endCall.)
                         busyCallbackClose:
                           isOutboundCall &&
                           (outboundBusyCloseSent ||
@@ -1692,13 +1875,9 @@ CURRENT DATE: ${currentDateStr}
                         continue;
                       }
 
-                      if (
-                        isOutboundCall &&
-                        !closingSpoken &&
-                        !outboundSilenceCloseSent &&
-                        !currentTurnAiText.includes(SILENCE_TIMEOUT_CLOSE_KN)
-                      ) {
+                      if (isOutboundCall && !closingSpoken) {
                         console.warn('[GUARD] Blocked outbound endCall — no close line delivered yet');
+                        diagLog(`endCall BLOCKED no_close_line utterances=${customerUtteranceCount}`);
                         toolResponses.push({
                           name: call.name,
                           response: {
@@ -1713,6 +1892,7 @@ CURRENT DATE: ${currentDateStr}
                       }
 
                       console.log(`[GEMINI] End call tool allowed (${endGuard.reason}). Terminating call...`);
+                      diagLog(`endCall ALLOWED reason=${endGuard.reason} → terminating`);
                       await new Promise((r) => setTimeout(r, 200));
                       await completeAndHangupOutboundCall(`endCall tool (${endGuard.reason})`);
                       continue;
@@ -1747,16 +1927,20 @@ CURRENT DATE: ${currentDateStr}
               },
               onclose: async (event: any) => {
                 console.log("[GEMINI] Session closed. Reason:", event?.reason || "No reason provided", "Code:", event?.code);
-                if (!endCallInvoked) {
-                  console.warn(
-                    '[GEMINI] Unexpected session close mid-call — phone line stays open. ' +
-                      'Customer may hear silence until they hang up.',
-                  );
-                }
                 const duration = Math.round((Date.now() - startTime) / 1000);
-
-                if (duration > 3 && customerPhone) {
-                  const cleanPhone = customerPhone.replace(/\D/g, '');
+                if (!endCallInvoked && callState !== 'ENDED' && !outboundTransferStarted) {
+                  console.warn(
+                    '[GEMINI] Session closed mid-call — AUTO-RECONNECTING (phone line stays open)',
+                  );
+                  diagLog(`session closed mid-call code=${event?.code} reason=${event?.reason || 'none'} → reconnect`);
+                  scheduleGeminiReconnect(`session closed: ${event?.reason || event?.code || 'unknown'}`);
+                } else if (outboundTransferStarted) {
+                  diagLog('session closed during transfer — expected, no reconnect');
+                }
+                // Save the summary ONLY when the call itself is over. A mid-call
+                // reconnect keeps the conversation alive — the final close path
+                // (telephony stop / allowed endCall) owns the final summary.
+                if (endCallInvoked && duration > 3 && customerPhone) {
                   const tail = phoneTail(customerPhone);
 
                   try {
@@ -1794,9 +1978,55 @@ CURRENT DATE: ${currentDateStr}
                 }
               }
             },
-        };
+        }; // end geminiConnectOptions
 
         const MAX_GEMINI_CONNECT_ATTEMPTS = 3;
+
+        // RECONNECT IMPLEMENTATION — fresh session + restored state + resume line.
+        setReconnectFn(async (): Promise<boolean> => {
+          geminiReconnectAttempts++;
+          for (let attempt = 1; attempt <= MAX_GEMINI_CONNECT_ATTEMPTS; attempt++) {
+            try {
+              if (attempt > 1) {
+                await new Promise((r) => setTimeout(r, 1200 * (attempt - 1)));
+              }
+              console.log(`[GEMINI] Reconnect attempt ${geminiReconnectAttempts}.${attempt}...`);
+              sessionIsReconnect = true;
+              const freshSession = await ai.live.connect(geminiConnectOptions);
+              geminiSession = freshSession;
+              droppedFramesNoSession = 0;
+              consecutiveAudioSendFailures = 0;
+              // Restore ALL deferred context into the fresh session.
+              try {
+                injectSilentContext(pendingFullSystemInstruction, 'FULL CALL GUIDE');
+                fullCallGuideInjected = true;
+              } catch { fullCallGuideInjected = false; }
+              try {
+                injectSilentContext(buildOutboundProjectReferenceContext(), 'PROJECT REFERENCE');
+                projectReferenceInjected = true;
+              } catch { projectReferenceInjected = false; }
+              runtimeInstructionsInjected = false;
+              injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
+              // One short resume line so the caller is never left in dead silence,
+              // then straight back to LISTENING.
+              try {
+                geminiSession.sendRealtimeInput({ text: OUTBOUND_SILENCE_RESUME_NUDGE });
+              } catch { /* next recovery tick retries */ }
+              setCallState('LISTENING', 'reconnected — listening again');
+              startListeningWatchdog();
+              console.log(`[GEMINI] Reconnect OK (attempt ${geminiReconnectAttempts}) — context restored, resume line sent, LISTENING`);
+              diagLog(`reconnect OK attempt=${geminiReconnectAttempts} → LISTENING`);
+              return true;
+            } catch (err) {
+              console.error(`[GEMINI] Reconnect ${geminiReconnectAttempts}.${attempt} failed:`, err);
+            }
+          }
+          return false;
+        });
+
+        // INITIAL CONNECT — on total failure, keep the line open and keep
+        // retrying in the background. NEVER return the media stream to Plivo.
+        let connected = false;
         for (let attempt = 1; attempt <= MAX_GEMINI_CONNECT_ATTEMPTS; attempt++) {
           try {
             if (attempt > 1) {
@@ -1804,24 +2034,27 @@ CURRENT DATE: ${currentDateStr}
               await new Promise((r) => setTimeout(r, 1200 * (attempt - 1)));
             }
             localSession = await ai.live.connect(geminiConnectOptions);
+            connected = true;
             break;
-        } catch (err) {
+          } catch (err) {
             console.error(`[GEMINI] Connect attempt ${attempt} failed:`, err);
             if (attempt === MAX_GEMINI_CONNECT_ATTEMPTS) {
               callLog('ERROR', `GEMINI CONNECT FAILED: ${err instanceof Error ? err.message : String(err)}`);
               capture?.onSttError('Gemini live connect failed');
-              console.warn('[GEMINI] Keeping phone line open — will NOT hang up on connect failure.');
-              return;
+              console.warn('[GEMINI] Keeping phone line open — background reconnect scheduled (will NOT hang up).');
+              diagLog('initial connect failed → background reconnect loop (line stays open)');
+              scheduleGeminiReconnect('initial connect failed');
             }
           }
         }
 
-        if (!localSession) {
-          console.warn('[GEMINI] No live session — keeping phone line open.');
+        if (!connected || !localSession) {
+          console.warn('[GEMINI] No live session yet — phone line open, background reconnect running.');
           return;
         }
 
         geminiSession = localSession;
+        startListeningWatchdog();
         trySendOpening();
 
         capture = new CallCaptureSession({
@@ -1837,16 +2070,38 @@ CURRENT DATE: ${currentDateStr}
         }
 
       } else if (msg.event === 'media') {
-        try {          const muLawData = Buffer.from(msg.media.payload, "base64");
+        try {
+          const muLawData = Buffer.from(msg.media.payload, "base64");
           capture?.onCustomerMuLaw(muLawData);
-          if (!geminiSession) return;
+          mediaFrameCount++;
+          lastMediaFrameAt = Date.now();
+          if (DIAG && mediaFrameCount % 500 === 0) {
+            diagLog(
+              `audio-in frames=${mediaFrameCount} sent=${audioSentChunkCount} ` +
+                `droppedNoSession=${droppedFramesNoSession} state=${callState} floor=${noiseFloorRms.toFixed(0)}`,
+            );
+          }
+          if (!geminiSession) {
+            // NEVER drop caller audio permanently: if the session died mid-call,
+            // queue reconnect — forwarding resumes automatically once it reopens.
+            droppedFramesNoSession++;
+            if (droppedFramesNoSession === 1 || droppedFramesNoSession % 250 === 0) {
+              console.warn(
+                `[GEMINI] Customer audio received but NO live session (dropped=${droppedFramesNoSession}) — scheduling reconnect`,
+              );
+              diagLog(`audio-in WITHOUT session dropped=${droppedFramesNoSession} → reconnect scheduled`);
+            }
+            if (!endCallInvoked) scheduleGeminiReconnect('audio arrived with no session');
+            return;
+          }
           const sampleCount = muLawData.length;
           // FORWARD ALL CUSTOMER AUDIO (including the opening question tail):
           // previously the opening phase dropped audio entirely — an early "yes"
           // over the question's last second was lost forever and the model never
-          // heard it. Audio is always forwarded now; only barge-in and playback
-          // clearing stay gated during the opening (openingPhase is computed in
-          // the gate/VAD block below), so the intro cannot be cleared.
+          // heard it. Audio is ALWAYS forwarded now — the inbound stream is fully
+          // independent of playback and NEVER pauses after the opening, after an
+          // AI turn, or while the agent is speaking. Only barge-in/playback
+          // clearing stay gated during the intro.
           const cleaned = sampleCount <= SCRATCH_SAMPLES ? scratchCleaned : new Int16Array(sampleCount);
           for (let i = 0; i < sampleCount; i++) {
             const x = muLawToPcmTable[muLawData[i]];
@@ -1923,12 +2178,25 @@ CURRENT DATE: ${currentDateStr}
             lastUpsampleSample = cur;
         }
         try {
+            const payloadB64 = pcmBuffer.subarray(0, sampleCount * 4).toString("base64");
             geminiSession.sendRealtimeInput({
               audio: {
-                data: pcmBuffer.subarray(0, sampleCount * 4).toString("base64"),
+                data: payloadB64,
                 mimeType: 'audio/pcm;rate=16000',
               }
             });
+            // Continuous streaming telemetry: this MUST keep incrementing for the
+            // whole call. If it stalls while Plivo frames keep arriving, the
+            // pipeline is broken and the reconnect/watchdog restores it.
+            audioSentChunkCount++;
+            lastAudioSentAt = Date.now();
+            consecutiveAudioSendFailures = 0;
+            if (DIAG && audioSentChunkCount % 500 === 1) {
+              diagLog(
+                `audio→gemini chunk #${audioSentChunkCount} ${sampleCount * 4}B pcm16k ` +
+                  `state=${callState} vad=${vadIsSpeaking ? 'speaking' : 'quiet'}`,
+              );
+            }
 
             const bargeInRms = Math.max(BARGE_IN_MIN_RMS, noiseFloorRms * BARGE_IN_FLOOR_MULT);
             const bargeDecision = speechLike && !openingPhase
@@ -1976,6 +2244,7 @@ CURRENT DATE: ${currentDateStr}
             if (speechDecision.event === 'start') {
               vadIsSpeaking = true;
               vadSilenceStartedAt = null;
+              vadSpeakingSince = now;
               resetSpeakNudge();
               // Caller is speaking — any pending recovery is obsolete; the new turn owns the state.
               speechRecovery = disarmSpeechRecovery(speechRecovery);
@@ -1984,6 +2253,10 @@ CURRENT DATE: ${currentDateStr}
               console.log(
                 `[VAD] Customer speech START rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} floor=${noiseFloorRms.toFixed(0)}`
               );
+              diagLog(
+                `vad START rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} gate=${gateOpen ? 'open' : 'closed'} state→USER_SPEAKING`,
+              );
+              setCallState('USER_SPEAKING', 'local VAD start');
               customerStartedAnsweringOpening();
               latLog('AUDIO_IN (customer speech start)');
               clearWaitTick();
@@ -1996,9 +2269,12 @@ CURRENT DATE: ${currentDateStr}
               allowAiOutput();
               speechEndAt = now;
               awaitingFirstAiAudio = true;
+              const spokeMs = vadSpeakingSince != null ? now - vadSpeakingSince : 0;
               console.log(
-                `[VAD] Customer speech END after ${speechDecision.pausedFor}ms silence (vadSilenceMs=${VAD_SILENCE_MS} aadSilenceMs=${audioCfg.aadSilenceDurationMs})`
+                `[VAD] Customer speech END after ${speechDecision.pausedFor}ms silence (spoke≈${spokeMs}ms vadSilenceMs=${VAD_SILENCE_MS} aadSilenceMs=${audioCfg.aadSilenceDurationMs})`
               );
+              diagLog(`vad END spoke≈${spokeMs}ms → PROCESSING (awaiting transcript/AAD commit)`);
+              setCallState('PROCESSING', 'customer speech end');
               latLog('GEMINI_AUDIO_SENT (local speech end; AAD owns turn commit)');
               nudgeSpeakNowIfNeeded();
               aiAudioSinceLastCustomerSpeech = false;
@@ -2014,15 +2290,27 @@ CURRENT DATE: ${currentDateStr}
               vadSilenceStartedAt = speechDecision.silenceStartedAt;
             }
         } catch (e: any) {
-          console.error("[GEMINI] Failed to send audio:", e.message);
-            capture?.onSttError(e.message || 'audio send failed');
+          consecutiveAudioSendFailures++;
+          console.error(
+            `[GEMINI] Failed to send audio (#${consecutiveAudioSendFailures}): ${e.message} — scheduling reconnect, line stays open`,
+          );
+          diagLog(`audio send FAILED #${consecutiveAudioSendFailures} err=${e.message}`);
+          capture?.onSttError(e.message || 'audio send failed');
+          if (consecutiveAudioSendFailures >= 2) {
+            scheduleGeminiReconnect(`audio send failed x${consecutiveAudioSendFailures}: ${e.message}`);
           }
+        }
         } catch (decodeErr: any) {
           callLog('ERROR', `INVALID AUDIO PACKET: ${decodeErr?.message || decodeErr}`);
         }
       } else if (msg.event === 'stop') {
-        process.stdout.write('\n[WS] Call stopped by Twilio/Plivo\n');
+        process.stdout.write(`\n[WS] Call stopped by Plivo/telephony — reason=telephony_stop\n`);
+        diagLog('telephony stop event → finalizing');
+        setCallState('ENDED', 'telephony stop');
         cancelRecovery();
+        stopListeningWatchdog();
+        clearOutboundSilenceTimer();
+        clearGeminiReconnect();
         void capture?.finalize();
         capture = null;
         geminiSession?.close();
@@ -2039,6 +2327,10 @@ CURRENT DATE: ${currentDateStr}
 
   ws.on('close', () => {
     console.log('[WS] Connection closed');
+    setCallState('ENDED', 'telephony websocket closed');
+    stopListeningWatchdog();
+    clearGeminiReconnect();
+    clearOutboundSilenceTimer();
     clearWaitTick();
     clearRecoveryTick();
     clearOutboundSilenceTimer();

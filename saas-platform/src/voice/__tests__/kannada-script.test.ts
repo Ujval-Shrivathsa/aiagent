@@ -21,7 +21,7 @@ import {
   buildOutboundHandoffTransferNudge,
   OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE,
   OUTBOUND_SILENCE_CHECK_NUDGE,
-  OUTBOUND_SILENCE_CLOSE_NUDGE,
+  OUTBOUND_SILENCE_RESUME_NUDGE,
   buildOutboundIdentityAnswerNudge,
   buildOutboundOffTopicAnswerNudge,
   buildOutboundResumeNudge,
@@ -112,7 +112,10 @@ describe('v5 script — system instructions', () => {
     assert.match(handoff, /Do NOT call endCall/);
     assert.match(OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE, /reserved for the transfer line/);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /ಇನ್ನೂ ಲೈನ್‌ನಲ್ಲಿ ಇದೀರಾ/);
-    assert.match(OUTBOUND_SILENCE_CLOSE_NUDGE, /endCall in the SAME turn/);
+    assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /keep listening/);
+    assert.doesNotMatch(OUTBOUND_SILENCE_CHECK_NUDGE, /endCall in the SAME turn/);
+    assert.match(OUTBOUND_SILENCE_RESUME_NUDGE, /Do NOT hang up/);
+    assert.doesNotMatch(OUTBOUND_SILENCE_RESUME_NUDGE, /endCall/);
     assert.match(buildOutboundIdentityAnswerNudge(), /CURRENT conversation language/);
     assert.match(buildOutboundOffTopicAnswerNudge(), /CURRENT conversation language/);
     const resume = buildOutboundResumeNudge({
@@ -187,18 +190,30 @@ describe('v5 script — detectors', () => {
   });
 });
 
-describe('v5 script — silence state machine', () => {
-  it('5s check then 10s close', () => {
+describe('silence state machine — NEVER terminates', () => {
+  it('9s quiet → check line, then repeats forever — NO close, NO hangup', () => {
     let s = armOutboundSilenceCheck(1000);
-    let t = tickOutboundSilence(s, 4000);
-    assert.equal(t.action, 'none');
-    t = tickOutboundSilence(s, 6000);
-    assert.equal(t.action, 'speak_check');
+    let t = tickOutboundSilence(s, 9000);
+    assert.equal(t.action, 'none', 'quiet inside the window does nothing');
+    t = tickOutboundSilence(s, 11000);
+    assert.equal(t.action, 'speak_check', 'past 9s quiet → soft reprompt');
     s = t.state;
-    t = tickOutboundSilence(s, 12000);
-    assert.equal(t.action, 'none');
-    t = tickOutboundSilence(s, 17000);
-    assert.equal(t.action, 'speak_close');
+    assert.equal(s.reason, 'checked');
+    assert.ok(s.deadline != null, 'a next window is ALWAYS armed');
+    t = tickOutboundSilence(s, 20000);
+    assert.equal(t.action, 'none', 'second window still quiet');
+    t = tickOutboundSilence(s, 21001);
+    assert.equal(t.action, 'speak_check', 'reprompt repeats — never a close');
+    assert.equal(t.state.reason, 'checked', 'state NEVER reaches a terminal closed state');
+    assert.ok(t.state.deadline != null, 'deadline always re-armed — infinite listening loop');
     assert.equal(createOutboundSilenceState().reason, 'idle');
+  });
+
+  it('system prompt forbids any silence-based endCall', () => {
+    const full = buildOutboundSystemInstruction('30 Sep 2026');
+    assert.match(full, /SILENCE NEVER ENDS THE CALL/);
+    assert.doesNotMatch(full, /SILENCE TIMEOUT CLOSE/);
+    const fast = buildOutboundFastConnectInstruction('30 Sep 2026');
+    assert.doesNotMatch(fast, /silence timeout/i);
   });
 });

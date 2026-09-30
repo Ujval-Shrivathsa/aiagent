@@ -12,14 +12,15 @@
  *   - Sharpest possible hearing: low energy floors, high start-of-speech
  *     sensitivity, full gain to the model. The caller must never need to
  *     raise their voice or repeat a turn.
- *   - Fast turn-end: ~100ms local VAD + ~100ms AAD commit. Short "yes/no"
- *     answers are processed almost immediately after the caller stops.
+ *   - RELIABLE turn-end over 8kHz telephony: ~250ms local VAD + ~250ms AAD
+ *     commit. 100ms committed turns on intra-word pauses (the old bug:
+ *     "agent never hears my answer"), so the turn boundary now absorbs
+ *     normal Kannada word gaps while still replying in well under a second.
  *   - Fast interruption: barge-in arms in ~150ms and only for speech-like
  *     frames, so room noise still cannot clear the agent's audio.
- *   - Robust recovery: see speech-recovery.ts — a heard-but-unrecognized
- *     turn is recovered by nudge within ~2s instead of falling into the
- *     10s silence-close path. The caller must never experience
- *     "spoke twice, agent stayed silent".
+ *   - STABILITY: silence NEVER ends a call. The quiet-caller reprompt cycle
+ *     loops forever (see kannada-script.ts); recovery ends in resume-and-
+ *     listen, never in a hangup.
  *
  * All values are overridable via env so we can tune without code changes.
  */
@@ -89,19 +90,24 @@ export function loadAudioPipelineConfig(): AudioPipelineConfig {
     gateReleaseMs: num(process.env.VOICE_GATE_RELEASE_MS, 220),
     gateFloor: num(process.env.VOICE_GATE_FLOOR, 0.72),
     // Fast interruption: arms in ~150ms but only for speech-like frames —
-    // TV/room noise still cannot clear AI audio.
-    bargeInMinRms: num(process.env.VOICE_BARGE_IN_MIN_RMS, 1800),
+    // TV/room noise still cannot clear AI audio. Absolute floor lowered to
+    // 1700 so a NORMAL-volume interruption is never ignored.
+    bargeInMinRms: num(process.env.VOICE_BARGE_IN_MIN_RMS, 1700),
     bargeInFloorMult: num(process.env.VOICE_BARGE_IN_FLOOR_MULT, 6.5),
     bargeInMinMs: num(process.env.VOICE_BARGE_IN_MIN_MS, 150),
     bargeInRequireGateOpen: str(process.env.VOICE_BARGE_IN_REQUIRE_GATE, '1') !== '0',
     // VAD start threshold ≈ half a quiet "yes" — soft speech still counts.
     vadEnergyMinRms: num(process.env.VOICE_VAD_ENERGY_MIN_RMS, 85),
     vadEnergyFloorMult: num(process.env.VOICE_VAD_ENERGY_FLOOR_MULT, 1.45),
-    // Turn-end: ~100ms local VAD + ~100ms AAD — near-instant commit for
-    // short answers while still absorbing intra-word gaps.
-    vadSilenceMs: silenceMs(process.env.VOICE_VAD_SILENCE_MS, 100),
-    aadSilenceDurationMs: silenceMs(process.env.VOICE_AAD_SILENCE_MS, 100),
-    aadPrefixPaddingMs: num(process.env.VOICE_AAD_PREFIX_PADDING_MS, 50),
+    // Turn-end: ~250ms local VAD + ~250ms AAD. 100ms was TOO aggressive on
+    // 8kHz telephony: intra-word pauses committed half-spoken turns, and the
+    // fragmented audio never produced a transcript ("agent ignores speech").
+    // 250ms absorbs Kannada word gaps and still commits a short "ಹೌದು" fast.
+    vadSilenceMs: silenceMs(process.env.VOICE_VAD_SILENCE_MS, 250),
+    aadSilenceDurationMs: silenceMs(process.env.VOICE_AAD_SILENCE_MS, 250),
+    // Padding PRECEDES detected speech: 120ms keeps opening syllables of soft
+    // Kannada replies inside the turn instead of clipped as pre-turn noise.
+    aadPrefixPaddingMs: num(process.env.VOICE_AAD_PREFIX_PADDING_MS, 120),
     // HIGH end sensitivity = Gemini commits the turn promptly; start stays
     // HIGH so the very first syllable of a soft reply is picked up.
     aadEndSensitivity: str(process.env.VOICE_AAD_END_SENSITIVITY, 'END_SENSITIVITY_HIGH'),

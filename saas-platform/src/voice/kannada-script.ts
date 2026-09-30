@@ -55,7 +55,11 @@ export const OUTBOUND_NOT_INTERESTED_CLOSE_KN =
 /** Silence protocol — 5s check line. */
 export const SILENCE_CHECK_LINE_KN = 'ಹಲೋ ಸರ್, ಇನ್ನೂ ಲೈನ್‌ನಲ್ಲಿ ಇದೀರಾ?';
 
-/** Silence protocol — 10s close line (then disconnect). */
+/**
+ * DEPRECATED — silence no longer closes or hangs up the call (stability rule:
+ * silence = keep listening). Kept only as a historical constant; NOT spoken and
+ * NEVER wired to endCall.
+ */
 export const SILENCE_TIMEOUT_CLOSE_KN =
   'ಸರಿ ಸರ್, ನೀವು ಲೈನ್‌ನಲ್ಲಿ ಇಲ್ಲದ ಕಾರಣ ಈಗ ಕರೆ ಕಡಿತಗೊಳಿಸುತ್ತಿದ್ದೀನಿ.';
 
@@ -109,7 +113,16 @@ export function detectForbiddenLayoutMention(text: string): string | null {
 // SILENCE PROTOCOL STATE MACHINE — 5s check, 10s close. (Pure helpers.)
 // ---------------------------------------------------------------------------
 
-export const SILENCE_CHECK_AFTER_MS = 5_000;
+/**
+ * STABILITY RULE (permanent): silence NEVER terminates the call. The silence
+ * protocol is an infinite soft-reprompt loop: every SILENCE_CHECK_AFTER_MS of
+ * quiet the agent says the availability-check line ONCE, then returns to
+ * LISTENING. There is no close step, no endCall, no timeout — the loop only
+ * resets when the caller speaks. The call ends ONLY on: caller no/goodbye
+ * (explicit decline), a completed sales transfer, or a real telephony hangup.
+ */
+export const SILENCE_CHECK_AFTER_MS = 9_000;
+/** Re-reprompt interval — the SAME soft check line repeats at this cadence forever. */
 export const SILENCE_CLOSE_AFTER_CHECK_MS = 10_000;
 
 export type OutboundSilenceReason = 'idle' | 'listening' | 'checked' | 'closed';
@@ -132,21 +145,24 @@ export function resetOutboundSilence(): OutboundSilenceState {
   return createOutboundSilenceState();
 }
 
+/**
+ * Silence reprompt (soft, non-terminating). Every quiet window produces the
+ * SAME gentle availability check — never a close line, never an endCall.
+ */
 export function tickOutboundSilence(
   state: OutboundSilenceState,
   now: number,
-): { action: 'none' | 'speak_check' | 'speak_close'; state: OutboundSilenceState } {
+): { action: 'none' | 'speak_check'; state: OutboundSilenceState } {
   if ((state.reason !== 'listening' && state.reason !== 'checked') || state.deadline == null) {
     return { action: 'none', state };
   }
   if (now < state.deadline) return { action: 'none', state };
-  if (!state.checkSpoken) {
-    return {
-      action: 'speak_check',
-      state: { reason: 'checked', deadline: now + SILENCE_CLOSE_AFTER_CHECK_MS, checkSpoken: true },
-    };
-  }
-  return { action: 'speak_close', state: { reason: 'closed', deadline: null, checkSpoken: true } };
+  // Forever loop: after the deadline, speak the check line and arm the next
+  // window. The state machine has NO terminal 'closed' state.
+  return {
+    action: 'speak_check',
+    state: { reason: 'checked', deadline: now + SILENCE_CLOSE_AFTER_CHECK_MS, checkSpoken: true },
+  };
 }
 
 export function nextOutboundSilenceDeadline(state: OutboundSilenceState): number | null {
@@ -154,14 +170,19 @@ export function nextOutboundSilenceDeadline(state: OutboundSilenceState): number
 }
 
 export const OUTBOUND_SILENCE_CHECK_NUDGE =
-  `SYSTEM (internal): The caller has been silent for ~5 seconds since you finished speaking. ` +
-  `Say ONLY this one short line, then stop and listen: "${SILENCE_CHECK_LINE_KN}" ` +
-  `Do NOT repeat anything you said earlier. Do NOT restart the opening. Do NOT call endCall.`;
+  `SYSTEM (internal): The caller has been quiet for a while. This is NOT a reason to end the call — keep listening. ` +
+  `Say ONLY this one short line, then stop and listen again: "${SILENCE_CHECK_LINE_KN}" ` +
+  `Do NOT repeat anything you said earlier. Do NOT restart the opening. NEVER call endCall — silence never ends a call.`;
 
-export const OUTBOUND_SILENCE_CLOSE_NUDGE =
-  `SYSTEM (internal): The caller has stayed silent for ~10 seconds after the availability check. ` +
-  `Say ONLY this one closing line, then IMMEDIATELY call endCall in the SAME turn: "${SILENCE_TIMEOUT_CLOSE_KN}" ` +
-  `Do NOT repeat earlier lines. Do NOT ask another question.`;
+/**
+ * RECOVERY-RESUME nudge (replaces the old silence close): after missed STT or
+ * a reconnect, tell the model to resume mid-conversation with a short line and
+ * keep listening. Never terminates the call.
+ */
+export const OUTBOUND_SILENCE_RESUME_NUDGE =
+  `SYSTEM (internal, private): A technical hiccup interrupted the audio — the call is STILL LIVE and the caller is waiting. ` +
+  `Do NOT hang up. Do NOT restart from the opening. Say ONE short line in the CURRENT conversation language — ` +
+  `e.g. "ಸರಿ ಸರ್, ಮತ್ತೆ ಕೇಳಿಸಿತಾ?" — then LISTEN for their reply.`;
 
 // ---------------------------------------------------------------------------
 // CONVERSATION MEMORY (internal — drives "answer then resume" behavior).
@@ -495,9 +516,9 @@ const TONE_RULES = `TONE — REAL HUMAN SPEECH (STRICT):
 
 const SILENCE_PROTOCOL_RULES = `SILENCE / TURN-TAKING PROTOCOL (STRICT — the code sends private nudges):
 - Internal nudge messages are private directives — act on them silently; never quote them.
-- Nudge "check": say ONCE, naturally — "${SILENCE_CHECK_LINE_KN}" — then listen.
-- Nudge "close": say the closing line ONCE and call endCall in the SAME turn — "${SILENCE_TIMEOUT_CLOSE_KN}"
-- Never repeat a prior line while waiting — each threshold gets exactly one new line.
+- If a nudge says the caller has been quiet: say ONCE, naturally — "${SILENCE_CHECK_LINE_KN}" — then listen again.
+- SILENCE NEVER ENDS THE CALL. There is no silence close and no silence endCall — keep listening forever.
+- Never repeat a prior line while waiting — each quiet window gets at most one new short line.
 - Meaningful caller speech resets the cycle.`;
 
 const HEARING_GUARANTEE_RULES = `HEARING GUARANTEE (PERMANENT — HIGHEST PRIORITY):
@@ -564,16 +585,15 @@ const CALL_CLOSING_RULES = `CALL CLOSING (STRICT):
 EXCEPTION — TRANSFER CLOSE (NO endCall):
 - The transfer handoff line is a TRANSFER: stay silent on the line while the sales team connects.
 
-EXCEPTION — SILENCE TIMEOUT CLOSE:
-- After continued silence (system nudge), say ONCE: "${SILENCE_TIMEOUT_CLOSE_KN}" — then endCall in the SAME turn.`;
+SILENCE IS NEVER A CLOSING REASON (ABSOLUTE):
+- There is NO silence timeout close. Quiet or silence NEVER produces endCall — keep listening.`;
 
 const END_CALL_RULES = `END THE CALL (STRICT — the ONLY allowed triggers):
 1. The caller says NO / not interested → not-interested close line, call notInterested, then endCall — all in the SAME turn.
 2. The caller explicitly says goodbye / asks to end → one short closing line, then endCall.
 3. The caller is busy / can't talk now / asks for a later call → the SAME not-interested close line, then endCall in the SAME turn.
-4. The continued-silence timeout (system nudge) → closing line, then endCall in the SAME turn.
 NEVER call endCall after the transfer handoff line — that call is a TRANSFER; stay silent on the line.
-NEVER call endCall because of short pauses, short replies, or a topic change.`;
+NEVER call endCall because of silence, quiet, short pauses, or short replies — silence ALWAYS means keep listening.`;
 
 const COMMUNICATION_GUIDELINES = `COMMUNICATION & RESPONSE GUIDELINES (STRICT):
 - If the caller says they could not hear / asks you to repeat: calmly repeat your PREVIOUS
@@ -621,7 +641,7 @@ Locations line: "${PDF_AREAS_LINE_KN}"
 Not-interested close: "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}"
 Transfer (handoff) line: "${PDF_HANDOFF_LINE_KN}"
 Busy close: same as the not-interested close.
-Silence check: "${SILENCE_CHECK_LINE_KN}" / Silence close: "${SILENCE_TIMEOUT_CLOSE_KN}"`;
+Quiet-caller check line: "${SILENCE_CHECK_LINE_KN}". Silence NEVER ends the call — keep listening.`;
 }
 
 export function buildOutboundSystemInstruction(

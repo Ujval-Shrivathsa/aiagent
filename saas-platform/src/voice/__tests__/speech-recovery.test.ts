@@ -78,7 +78,7 @@ describe('speech-recovery ladder', () => {
     }
   });
 
-  it('escalates with a more explicit nudge, then hands over to the silence protocol', () => {
+  it('escalates with a more explicit nudge, then RESUMES the call (never gives up to hangup)', () => {
     let s = armSpeechRecovery(createSpeechRecoveryState(), 10_000);
     const first = tickSpeechRecovery(s, CFG, 11_100);
     assert.equal(first.action, 'send_recovery_nudge');
@@ -92,7 +92,7 @@ describe('speech-recovery ladder', () => {
     }
 
     const third = tickSpeechRecovery(s, CFG, 11_100 + 1600 + 1600);
-    assert.equal(third.action, 'give_up_to_silence_protocol');
+    assert.equal(third.action, 'resume_after_exhausted', 'exhaustion must resume-and-listen, never terminate');
     assert.equal(third.state.stage, 'idle');
   });
 

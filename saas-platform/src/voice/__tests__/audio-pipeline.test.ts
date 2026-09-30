@@ -11,12 +11,14 @@ import { evaluateBargeIn, evaluateLocalSpeech } from '../turn-policy';
 import { isSpeechLike, shouldOpenGate } from '../speech-likelihood';
 
 describe('audio-pipeline-config', () => {
-  it('loads the sharp-hearing / fast-turn contract (final requirement)', () => {
+  it('loads the sharp-hearing / reliable-turn / stability contract', () => {
     const cfg = loadAudioPipelineConfig();
-    // Turn-end: near-instant commit for short answers (~100ms target).
-    assert.equal(cfg.aadSilenceDurationMs, 100);
-    assert.equal(cfg.vadSilenceMs, 100);
+    // Turn-end: 250ms absorbs intra-word Kannada pauses over 8kHz telephony
+    // (100ms committed half-spoken turns — the "agent never hears me" bug).
+    assert.equal(cfg.aadSilenceDurationMs, 250);
+    assert.equal(cfg.vadSilenceMs, 250);
     assert.ok(cfg.vadSilenceMs >= cfg.aadSilenceDurationMs, 'local VAD should outlast AAD');
+    assert.ok(cfg.aadPrefixPaddingMs >= 100, 'prefix padding keeps soft opening syllables');
     // Sharp hearing: quiet speech must clear all start thresholds.
     assert.ok(cfg.gateOpenMinRms <= 100, 'quiet speech gate threshold');
     assert.ok(cfg.vadEnergyMinRms <= 100, 'quiet speech VAD threshold');
