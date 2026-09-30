@@ -255,6 +255,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let outboundSilenceTimer: NodeJS.Timeout | null = null;
   /** Timestamp of the caller's last transcript — diagnostics + quiet-window math. */
   let lastCustomerTranscriptAt = Date.now();
+  /** When the CURRENT model turn's audio began — echo-safe interrupt proof window. */
+  let currentModelTurnStartedAt = 0;
   // Set once ANY flowchart close line (not-interested / silence timeout) is delivered —
   // the agent is then hard-muted and the call hangs up.
   let outboundBusyCloseSent = false;
@@ -303,6 +305,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const scratchPcm16k = Buffer.allocUnsafe(SCRATCH_SAMPLES * 4);
 
   let aiPlaybackEndsAt = 0;
+  /** Last frame with speech-like energy — stuck-VAD self-heal uses this. */
+  let lastSpeechEnergyAt = 0;
   let bargeInStartedAt: number | null = null;
   let bargeInConfirmedAt = 0;
   const BARGE_IN_CONFIRM_TTL_MS = 2000;
@@ -692,7 +696,15 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     ) {
       return { suppress: true, reason: 'duplicate_handoff' };
     }
+    // REPLY PRIORITY (anti-silence rule): a turn that directly answers FRESH
+    // caller speech is NEVER muted by the dedup guards. They historically
+    // silenced real replies — Kannada answers open with the same "ಹಾ ಸರ್ /
+    // ಸರಿ ಸರ್" prefix (isNearDuplicateAiTurn), and follow-up answers reuse the
+    // locations vocabulary (tokenContainment). Silence is far worse than an
+    // imperfect repeat; the prompt-level no-repeat rule still applies.
+    const freshReply = openingGreetingTurnFinished && Date.now() - lastCustomerTranscriptAt < 8000;
     if (
+      !freshReply &&
       openingGreetingTurnFinished &&
       turnText.length > 12 &&
       // ONLY suppress a true restatement of the greeting intro (identity +
@@ -703,10 +715,10 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     ) {
       return { suppress: true, reason: 'duplicate_opening' };
     }
-    if (isDuplicateOutboundSpeech(turnText, outboundSpokenChunks)) {
+    if (!freshReply && isDuplicateOutboundSpeech(turnText, outboundSpokenChunks)) {
       return { suppress: true, reason: 'duplicate_spoken_line' };
     }
-    if (turnText.length > 12 && isNearDuplicateAiTurn(turnText)) {
+    if (!freshReply && turnText.length > 12 && isNearDuplicateAiTurn(turnText)) {
       return { suppress: true, reason: 'duplicate_recent_turn' };
     }
     return { suppress: false };
@@ -804,6 +816,16 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   const sendPcmToTwilio = (pcm: Buffer, flush = false) => {
     if (!streamSid) return;
+    // STUCK-VAD SELF-HEAL: vadIsSpeaking must never outlive the caller by more
+    // than 3s — mic echo/noise once wedged it true and ALL agent audio was
+    // dropped here forever (total silence). If no fresh speech energy arrived
+    // recently, force-clear the flag so playback resumes.
+    if (vadIsSpeaking && now2() - lastSpeechEnergyAt > 3_000) {
+      vadLog('stuck vadIsSpeaking self-heal — no fresh speech energy for 3s');
+      diagLog('vad STUCK >3s without energy → force LISTENING (audio un-mute)');
+      vadIsSpeaking = false;
+      vadSilenceStartedAt = null;
+    }
     if (suppressAiOutput) {
       if (vadIsSpeaking || (bargeInConfirmedAt > 0 && Date.now() - bargeInConfirmedAt < 280)) {
         outputLeftover = Buffer.alloc(0);
@@ -880,6 +902,9 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   // ---------- Speech-recovery ladder (see speech-recovery.ts) ----------
   // (The old response-watchdog was removed; the ladder is the single failsafe.)
+
+  /** Monotonic-ish wall clock for helpers declared before `now` exists. */
+  const now2 = () => Date.now();
 
   const clearRecoveryTick = () => {
     if (recoveryTickTimer) {
@@ -958,7 +983,15 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     // finished, or when a real barge-in was confirmed within the TTL.
     const bargeConfirmed = Date.now() - bargeInConfirmedAt < BARGE_IN_CONFIRM_TTL_MS;
     if (Date.now() < aiPlaybackEndsAt - 50 && !bargeConfirmed) {
-      vadLog('speech end during AI playback without confirmed barge-in — echo candidate, recovery not armed');
+      // Speech ended while the agent was STILL talking with no loud barge-in:
+      // the caller answering OVER the agent's audio (or mic echo). Recovery is
+      // NOT dropped — it is armed to start AFTER playback ends (+1.2s grace).
+      // If the caller's words were never transcribed, they still get the
+      // ask-to-repeat nudge quickly instead of 9s of dead air.
+      const startDelayMs = Math.max(1200, aiPlaybackEndsAt - Date.now() + 1200);
+      speechRecovery = armSpeechRecovery(speechRecovery, Date.now() + startDelayMs);
+      scheduleRecoveryTick();
+      vadLog(`speech end during playback — recovery armed with ${startDelayMs}ms start delay (echo candidate)`);
       return;
     }
     speechRecovery = armSpeechRecovery(speechRecovery, Date.now());
@@ -1357,7 +1390,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
         const runtimeInstructionBase = `
 OUTBOUND SCRIPT STATE (STRICT) — KANNADA ONLY, NEVER English:
-- Opening turn (already spoken): "${PDF_OPENING_KN} ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?" — NEVER say it again, NEVER ask the name again.
+- Opening turn (already spoken): "${PDF_OPENING_KN}" — NEVER say it again, NEVER ask the caller's name (this flow has no name step).
 - ONLY steps allowed now: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn. INTERESTED → locations once ("${PDF_AREAS_LINE_KN}") then listen. INTERESTED IN A LOCATION (after locations) → transfer line ("${PDF_HANDOFF_LINE_KN}"), NO endCall — live transfer to sales team.
 - LANGUAGE RULE (STRICT): Kannada is the default. Follow the language the CALLER is actually speaking — English, Marathi, Hindi — and stay in it until they switch back. Never switch on single loanwords or fillers. Natural conversational speech, never literal translation.
 - NO NAME STEP: this flow never asks the caller's name. Never ask for it, never confirm it.
@@ -1455,17 +1488,33 @@ CURRENT DATE: ${currentDateStr}
                   if (isOutboundCall && !openingGreetingTurnFinished) {
                     console.log('[GEMINI] Opening-phase interrupt ignored — keep intro playing');
                   } else {
+                  // ANTI-ECHO CUTOFF: during agent playback the caller's mic
+                  // carries the agent's own voice, which inflates vadIsSpeaking.
+                  // Accepting vadIsSpeaking here let Gemini's SELF-echo interrupts
+                  // cut agent audio mid-sentence ("agent goes silent"). A real
+                  // interruption is proven by (a) a loud sustained local barge-in
+                  // or (b) an input TRANSCRIPT — words only the caller could have
+                  // spoken (their mic audio is what the model transcribes).
+                  // Proof = a caller transcript that arrived DURING this model
+                  // turn (words spoken over the agent's audio — never echo; the
+                  // echo is the agent's OWN voice and is never transcribed as
+                  // input). A stale pre-turn transcript does NOT count.
+                  const transcriptProvesCaller =
+                    currentModelTurnStartedAt > 0 &&
+                    lastCustomerTranscriptAt >= currentModelTurnStartedAt;
                   const confirmedUserSpeech =
                     Date.now() - bargeInConfirmedAt < BARGE_IN_CONFIRM_TTL_MS ||
-                    vadIsSpeaking;
+                    transcriptProvesCaller;
                   if (!confirmedUserSpeech) {
                     console.log(
                       `[GEMINI] Turn interrupted ignored — no confirmed user speech ` +
                         `(aiPlaying=${Date.now() < aiPlaybackEndsAt} vadSpeaking=${vadIsSpeaking} gateOpen=${gateOpen} floor=${noiseFloorRms.toFixed(0)})`,
                     );
+                    diagLog(`interrupt IGNORED (echo guard) vad=${vadIsSpeaking}`);
                     return;
                   }
                   console.log(`[GEMINI] Turn interrupted — clearing playback (aiPlaying=${Date.now() < aiPlaybackEndsAt} vadSpeaking=${vadIsSpeaking} gateOpen=${gateOpen} floor=${noiseFloorRms.toFixed(0)})`);
+                  diagLog(`interrupt CONFIRMED → clearPlayback (barge or transcript proof)`);
                   capture?.onAiSpeakEnd();
                   clearPlayback();
                   outputLeftover = Buffer.alloc(0);
@@ -1480,6 +1529,7 @@ CURRENT DATE: ${currentDateStr}
                     .map((p: any) => p.text || '')
                     .join('')
                     .trim();
+                  currentModelTurnStartedAt = Date.now();
                   setCallState('AGENT_SPEAKING', 'model turn audio');
                   if (isOutboundCall && outboundHardMuteAfterClose) {
                     lastOutboundTurnSuppressed = true;
@@ -2244,6 +2294,9 @@ CURRENT DATE: ${currentDateStr}
             const vadEnergyThr = Math.max(VAD_ENERGY_MIN_RMS, noiseFloorRms * VAD_ENERGY_FLOOR_MULT);
             const speechEnergy =
               rms > vadEnergyThr && (speechLike || rms > vadEnergyThr * 1.45);
+            if (speechEnergy) {
+              lastSpeechEnergyAt = now;
+            }
             const speechDecision = evaluateLocalSpeech({
               vadIsSpeaking,
               speechEnergy,
