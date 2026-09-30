@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server';
-import twilio from 'twilio';
 import { prisma } from '@/lib/prisma';
 import { callLog } from '@/voice/call-capture/logger';
 import { LEAD_STATUS, SKIP_DIAL_STATUSES } from '@/lib/lead-status';
-import { markCalling, transitionLeadById } from '@/lib/lead-status-transitions';
+import { markCalling, transitionLeadById, releaseCallingLeadsForRedial } from '@/lib/lead-status-transitions';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +14,35 @@ function toE164(phone: string): string {
   return `+${digits}`;
 }
 
+function publicVoiceUrl(): string {
+  return (process.env.VOICE_SERVER_URL || process.env.APP_URL || '').replace(/\/$/, '');
+}
+
+function isUsableVoiceUrl(url: string): boolean {
+  if (!/^https:\/\//i.test(url)) return false;
+  const host = url.replace(/^https?:\/\//i, '').toLowerCase();
+  return !host.startsWith('localhost') && !host.includes('ngrok') && !host.includes('127.0.0.1');
+}
+
+async function livePlivoPhoneTails(authId: string, authToken: string): Promise<string[]> {
+  try {
+    const res = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/?status=live&limit=20`, {
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${authId}:${authToken}`).toString('base64')}`,
+      },
+    });
+    const body = await res.json().catch(() => ({}));
+    const tails = new Set<string>();
+    for (const c of body.objects || []) {
+      const tail = String(c.to_number || '').replace(/\D/g, '').slice(-10);
+      if (tail.length === 10) tails.add(tail);
+    }
+    return [...tails];
+  } catch {
+    return [];
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const { campaignId } = await req.json();
@@ -22,13 +50,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing campaignId' }, { status: 400 });
     }
 
-    const appUrl = (process.env.APP_URL || '').replace(/\/$/, '');
-    const provider = (process.env.VOICE_PROVIDER || 'twilio').toLowerCase();
+    const appUrl = publicVoiceUrl();
+    const provider = 'plivo';
 
-    if (!appUrl || appUrl.includes('localhost')) {
+    if (!isUsableVoiceUrl(appUrl)) {
       return NextResponse.json({
-        error: 'APP_URL must be your public ngrok URL so the voice agent can be reached',
+        error: 'VOICE_SERVER_URL / APP_URL must be the Render HTTPS URL (not localhost or ngrok)',
       }, { status: 500 });
+    }
+
+    const liveTails =
+      provider === 'plivo' && process.env.PLIVO_AUTH_ID && process.env.PLIVO_AUTH_TOKEN
+        ? await livePlivoPhoneTails(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN)
+        : [];
+    const released = await releaseCallingLeadsForRedial(campaignId, liveTails);
+    if (released > 0) {
+      callLog('CALL', `Released ${released} stuck calling lead(s) before dial`);
     }
 
     const leads = await prisma.lead.findMany({
@@ -42,7 +79,8 @@ export async function POST(req: Request) {
     if (leads.length === 0) {
       return NextResponse.json({
         success: false,
-        error: 'No dialable leads. Add a lead, or wait until a call in progress finishes.',
+        error:
+          'No dialable leads. A call may already be in progress, or add a pending lead first.',
         called: 0,
       }, { status: 400 });
     }
@@ -53,22 +91,14 @@ export async function POST(req: Request) {
       const to = toE164(lead.phone);
 
       try {
-        const marked = await markCalling(lead.id);
-        if (!marked.ok && marked.count === 0) {
-          results.push({ id: lead.id, phone: to, ok: false, error: 'status not dialable' });
+        if (liveTails.includes(to.replace(/\D/g, '').slice(-10))) {
+          results.push({ id: lead.id, phone: to, ok: false, error: 'call already in progress' });
           continue;
         }
 
-        const callerFrom =
-          provider === 'plivo' ? process.env.PLIVO_PHONE_NUMBER : process.env.TWILIO_PHONE_NUMBER;
-        if (callerFrom) {
-          await prisma.lead.update({
-            where: { id: lead.id },
-            data: { calledFrom: callerFrom, lastCalledAt: new Date() },
-          });
-        }
+        const callerFrom = process.env.PLIVO_PHONE_NUMBER;
 
-        if (provider === 'plivo') {
+        {
           const authId = process.env.PLIVO_AUTH_ID;
           const authToken = process.env.PLIVO_AUTH_TOKEN;
           const from = process.env.PLIVO_PHONE_NUMBER;
@@ -101,25 +131,23 @@ export async function POST(req: Request) {
             throw new Error(plivoBody?.error || `Plivo call failed (${plivoRes.status})`);
           }
           callLog('CALL', `CALL INITIATED  to=${to}`);
-        } else {
-          const accountSid = process.env.TWILIO_ACCOUNT_SID;
-          const authToken = process.env.TWILIO_AUTH_TOKEN;
-          const from = process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_PHONE_NUMBER_FALLBACK;
-          if (!accountSid || !authToken || !from) {
-            throw new Error('Twilio is not configured on the server');
-          }
-          const url =
-            `${appUrl}/api/voice/outbound` +
-            `?customerName=${encodeURIComponent(lead.name || '')}` +
-            `&customerPhone=${encodeURIComponent(to)}`;
-          const client = twilio(accountSid, authToken);
-          await client.calls.create({
-            to,
-            from,
-            url,
-            statusCallback: `${appUrl}/api/voice/status`,
-            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-            record: true,
+        }
+
+        const marked = await markCalling(lead.id);
+        if (!marked.ok && marked.count === 0) {
+          await prisma.lead.update({
+            where: { id: lead.id },
+            data: {
+              status: LEAD_STATUS.CALLING,
+              callStatus: LEAD_STATUS.CALLING,
+              lastCalledAt: new Date(),
+              ...(callerFrom ? { calledFrom: callerFrom } : {}),
+            },
+          });
+        } else if (callerFrom) {
+          await prisma.lead.update({
+            where: { id: lead.id },
+            data: { calledFrom: callerFrom, lastCalledAt: new Date() },
           });
         }
 

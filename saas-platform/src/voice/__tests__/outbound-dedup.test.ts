@@ -26,6 +26,28 @@ describe('outbound-dedup', () => {
     );
   });
 
+  it('STRICT rule: flags reworded repeats (same info, different words)', () => {
+    const spoken = new Set<string>();
+    registerOutboundSpeech(
+      'We currently have two projects that could be suitable for investment.',
+      spoken,
+    );
+    assert.equal(
+      isDuplicateOutboundSpeech(
+        'We have two projects that are suitable for investment.',
+        spoken,
+      ),
+      true,
+    );
+  });
+
+  it('STRICT rule: repeat-on-request only replays the immediately-previous line', () => {
+    const prev = 'Are you looking for a site in Mysore?';
+    const reworded = 'Looking for a site in Mysore, sir?';
+    assert.equal(allowsRepeatReplay(reworded, prev, true), true);
+    assert.equal(allowsRepeatReplay(reworded, prev, false), false);
+  });
+
   it('registers sentence chunks so partial repeats are caught', () => {
     const spoken = new Set<string>();
     const pitch =

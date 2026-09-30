@@ -15,13 +15,13 @@ export function DashboardShell({
 }) {
   return (
     <>
-      <header className="flex flex-col gap-4 mb-6 sm:mb-8 lg:mb-10">
+      <header className="flex flex-col gap-4 mb-8 sm:mb-12">
         <div className="min-w-0">
-          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-serif font-bold dark:text-stone-100 tracking-tight">
+          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-semibold tracking-tight text-neutral-900">
             {title}
           </h1>
           {subtitle && (
-            <p className="text-stone-500 dark:text-stone-400 mt-1.5 sm:mt-2 text-sm sm:text-base lg:text-lg max-w-2xl">
+            <p className="text-neutral-500 mt-1.5 sm:mt-2 text-sm sm:text-base max-w-2xl">
               {subtitle}
             </p>
           )}
@@ -52,15 +52,19 @@ export function DashboardCard({
 }) {
   return (
     <div
-      className={`bg-white dark:bg-stone-900 rounded-2xl sm:rounded-[1.75rem] border border-stone-200/90 dark:border-stone-800 overflow-hidden shadow-sm dark:shadow-none ${className}`}
+      className={`bg-white rounded-xl border border-neutral-200 overflow-hidden ${className}`}
     >
       {(title || actions) && (
-        <div className="p-4 sm:p-5 lg:p-6 border-b border-stone-100 dark:border-stone-800/80 flex flex-col gap-4">
+        <div className="p-4 sm:p-5 lg:p-6 border-b border-neutral-100 flex flex-col gap-4">
           <div className="min-w-0">
             {title && (
-              <h3 className="text-lg sm:text-xl font-serif font-bold dark:text-white tracking-tight">{title}</h3>
+              <h3 className="text-lg sm:text-xl font-semibold tracking-tight text-neutral-900">
+                {title}
+              </h3>
             )}
-            {subtitle && <p className="text-sm text-stone-500 dark:text-stone-400 mt-1">{subtitle}</p>}
+            {subtitle && (
+              <p className="text-sm text-neutral-500 mt-1">{subtitle}</p>
+            )}
           </div>
           {actions && <div className="w-full min-w-0">{actions}</div>}
         </div>
@@ -74,30 +78,25 @@ export function StatCard({
   label,
   value,
   icon: Icon,
-  color,
   delay = 0,
 }: {
   label: string;
   value: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
-  color: string;
+  icon: React.ComponentType<{ size?: number; className?: string; strokeWidth?: number }>;
   delay?: number;
 }) {
   return (
     <div
-      className="bg-white dark:bg-stone-900 p-4 sm:p-6 lg:p-8 rounded-2xl sm:rounded-[2rem] border border-stone-200 dark:border-stone-800 shadow-lg relative overflow-hidden group animate-fade-in"
+      className="bg-neutral-900 text-white p-5 sm:p-6 lg:p-7 rounded-xl animate-fade-in"
       style={{ animationDelay: `${delay}ms` }}
     >
-      <div className="absolute -right-4 -top-4 opacity-[0.04] group-hover:opacity-[0.08] transition-opacity hidden sm:block">
-        <Icon size={100} />
+      <div className="text-white/60 mb-3">
+        <Icon size={18} strokeWidth={1.75} />
       </div>
-      <div className={`p-2.5 sm:p-3 rounded-xl sm:rounded-2xl bg-stone-50 dark:bg-stone-800/50 ${color} shadow-inner mb-3 sm:mb-4 inline-flex`}>
-        <Icon size={20} />
-      </div>
-      <h4 className="text-stone-500 dark:text-stone-400 text-[9px] sm:text-[10px] font-black uppercase tracking-[0.15em] sm:tracking-[0.2em]">
-        {label}
-      </h4>
-      <p className="text-2xl sm:text-3xl lg:text-4xl font-black dark:text-white mt-1.5 sm:mt-2 tracking-tighter">{value}</p>
+      <h4 className="text-white/60 text-xs font-medium">{label}</h4>
+      <p className="text-2xl sm:text-3xl font-semibold text-white mt-1 tracking-tight">
+        {value}
+      </p>
     </div>
   );
 }

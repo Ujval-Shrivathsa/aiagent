@@ -398,23 +398,24 @@ export const OUTCOME_STATUS_FILTER_OPTIONS: { value: OutcomeStatus; label: strin
   })),
 ];
 
+/** Monochrome badge tones: black = active/positive, gray = neutral, faint = negative. */
 export const STATUS_BADGE_STYLES: Record<string, string> = {
-  [LEAD_STATUS.PENDING]: 'bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400',
-  [LEAD_STATUS.CALLING]: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 animate-pulse',
-  [LEAD_STATUS.ANSWERED]: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
-  [LEAD_STATUS.CALL_COMPLETED]: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
-  [LEAD_STATUS.INTERESTED]: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  [LEAD_STATUS.FOLLOW_UP]: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  [LEAD_STATUS.VISIT_SCHEDULED]: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  [LEAD_STATUS.NOT_INTERESTED]: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  [LEAD_STATUS.NOT_ANSWERED]: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
-  [LEAD_STATUS.CALL_ENDED]: 'bg-stone-200 text-stone-700 dark:bg-stone-700 dark:text-stone-300',
-  [LEAD_STATUS.FAILED]: 'bg-red-100 text-red-600 dark:bg-red-900/20 dark:text-red-400',
-  [OUTCOME_UNKNOWN]: 'bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400',
+  [LEAD_STATUS.PENDING]: 'bg-neutral-100 text-neutral-500 px-2.5 py-1',
+  [LEAD_STATUS.CALLING]: 'bg-neutral-900 text-white px-2.5 py-1',
+  [LEAD_STATUS.ANSWERED]: 'bg-neutral-900 text-white px-2.5 py-1',
+  [LEAD_STATUS.CALL_COMPLETED]: 'bg-neutral-100 text-neutral-700 px-2.5 py-1',
+  [LEAD_STATUS.INTERESTED]: 'bg-neutral-900 text-white px-2.5 py-1',
+  [LEAD_STATUS.FOLLOW_UP]: 'bg-neutral-200 text-neutral-900 px-2.5 py-1',
+  [LEAD_STATUS.VISIT_SCHEDULED]: 'bg-neutral-900 text-white px-2.5 py-1',
+  [LEAD_STATUS.NOT_INTERESTED]: 'bg-white text-neutral-400 border border-neutral-200 px-2.5 py-0.5',
+  [LEAD_STATUS.NOT_ANSWERED]: 'bg-neutral-100 text-neutral-400 px-2.5 py-1',
+  [LEAD_STATUS.CALL_ENDED]: 'bg-neutral-100 text-neutral-500 px-2.5 py-1',
+  [LEAD_STATUS.FAILED]: 'bg-white text-neutral-400 border border-neutral-200 px-2.5 py-0.5',
+  [OUTCOME_UNKNOWN]: 'bg-neutral-100 text-neutral-500 px-2.5 py-1',
   // legacy keys
-  'not - interested': 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  'scheduled visit': 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  completed: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
+  'not - interested': 'bg-white text-neutral-400 border border-neutral-200 px-2.5 py-0.5',
+  'scheduled visit': 'bg-neutral-900 text-white px-2.5 py-1',
+  completed: 'bg-neutral-100 text-neutral-700 px-2.5 py-1',
 };
 
 /** Attach canonical dual status fields for API / UI consumers. */

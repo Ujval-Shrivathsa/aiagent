@@ -4,22 +4,13 @@ import { callLog } from '@/voice/call-capture/logger';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-function wsHostFromRequest(req: Request): string {
-  const fromEnv = (process.env.APP_URL || process.env.VOICE_SERVER_URL || '')
-    .replace(/^https?:\/\//, '')
-    .replace(/\/$/, '');
-  const fromHeader = (req.headers.get('host') || '').replace(/\/$/, '');
-  return fromEnv || fromHeader;
-}
-
 export async function POST(req: Request) {
-  const wsHost = wsHostFromRequest(req);
-  callLog('CALL', 'CALL ANSWERED  inbound');
+  // Outbound-only product: nobody should be calling this number in.
+  // Politely hang up instead of opening an AI stream.
+  callLog('CALL', 'CALL ANSWERED  inbound — hanging up (outbound-only number)');
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" extraHeaders="isOutbound=false">
-    wss://${wsHost}/media-stream?isOutbound=false
-  </Stream>
+  <Hangup />
 </Response>`;
 
   return new NextResponse(xml, {

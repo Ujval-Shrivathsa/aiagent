@@ -25,7 +25,7 @@ import {
   Search,
   Mic,
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "motion/react";
 import { DashboardShell, DashboardCard, StatCard } from "@/components/dashboard/Shell";
 import { DualStatusBadges, DualStatusContainers, DualStatusFilters, CallStatusBadge, OutcomeStatusBadge } from "@/components/dashboard/DualStatus";
 import { LEAD_STATUS, normalizeLeadStatus, OUTCOME_STATUSES, OUTCOME_UNKNOWN } from "@/lib/lead-status";
@@ -43,6 +43,8 @@ export default function Dashboard() {
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
   const [newLead, setNewLead] = useState({ name: "", phone: "" });
+  const [isSavingLead, setIsSavingLead] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [callStatusFilter, setCallStatusFilter] = useState<string>("all");
   const [outcomeStatusFilter, setOutcomeStatusFilter] = useState<string>("all");
@@ -177,19 +179,27 @@ export default function Dashboard() {
 
   const handleManualAdd = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingLead) return;
+    setIsSavingLead(true);
     try {
       const res = await fetch("/api/leads", {
         method: "POST",
         body: JSON.stringify({ ...newLead, campaignId: activeCampaignId }),
         headers: { "Content-Type": "application/json" },
       });
-      if (res.ok) {
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok && data.success) {
         setIsModalOpen(false);
         setNewLead({ name: "", phone: "" });
-        fetchAllData();
+        await fetchAllData();
+      } else {
+        alert(data.error || `Could not save contact (${res.status}). Please try again.`);
       }
     } catch (e) {
       console.error("Add error", e);
+      alert("Could not reach the server. Check your connection and try again.");
+    } finally {
+      setIsSavingLead(false);
     }
   };
 
@@ -199,11 +209,21 @@ export default function Dashboard() {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("campaignId", activeCampaignId);
+    setIsUploading(true);
     try {
       const res = await fetch("/api/leads/upload", { method: "POST", body: formData });
-      if (res.ok) fetchAllData();
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok && data.success) {
+        await fetchAllData();
+      } else {
+        alert(data.error || `Import failed (${res.status}). Please try again.`);
+      }
     } catch (e) {
       console.error("Upload error", e);
+      alert("Could not reach the server. Check your connection and try again.");
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
@@ -212,10 +232,14 @@ export default function Dashboard() {
     try {
       const res = await fetch(`/api/leads?id=${id}`, { method: "DELETE" });
       if (res.ok) {
-        fetchAllData();
+        await fetchAllData();
+      } else {
+        const data = await res.json().catch(() => ({} as any));
+        alert(data.error || `Delete failed (${res.status}). Please try again.`);
       }
     } catch (e) {
       console.error("Delete error", e);
+      alert("Could not reach the server. Check your connection and try again.");
     }
   };
 
@@ -223,13 +247,16 @@ export default function Dashboard() {
     if (selectedLeads.length === 0) return;
     if (!confirm(`Are you sure you want to delete ${selectedLeads.length} contacts?`)) return;
     try {
-      for (const id of selectedLeads) {
-        await fetch(`/api/leads?id=${id}`, { method: "DELETE" });
-      }
+      const results = await Promise.all(
+        selectedLeads.map((id) => fetch(`/api/leads?id=${id}`, { method: "DELETE" }).then((r) => r.ok).catch(() => false)),
+      );
+      const failed = results.filter((ok) => !ok).length;
+      if (failed > 0) alert(`${failed} of ${selectedLeads.length} deletes failed. Please try again.`);
       setSelectedLeads([]);
-      fetchAllData();
+      await fetchAllData();
     } catch (e) {
       console.error("Bulk delete error", e);
+      alert("Could not reach the server. Check your connection and try again.");
     }
   };
 
@@ -255,6 +282,16 @@ export default function Dashboard() {
         setIsCalling(false);
         fetchAllData();
         return;
+      }
+      const failedRows = Array.isArray(startData.results)
+        ? startData.results.filter((r: { ok?: boolean; error?: string }) => !r.ok)
+        : [];
+      if (failedRows.length) {
+        alert(
+          failedRows
+            .map((r: { phone?: string; error?: string }) => `${r.phone || "lead"}: ${r.error || "failed"}`)
+            .join("\n"),
+        );
       }
       
       const interval = setInterval(async () => {
@@ -370,8 +407,8 @@ export default function Dashboard() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-stone-50 dark:bg-stone-950">
-        <Loader2 className="animate-spin text-gold" size={40} />
+      <div className="min-h-screen flex items-center justify-center bg-white">
+        <Loader2 className="animate-spin text-neutral-400" size={32} />
       </div>
     );
   }
@@ -387,32 +424,36 @@ export default function Dashboard() {
           <>
             <Link
               href="/dashboard/recordings"
-              className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 px-4 sm:px-5 py-2.5 rounded-2xl flex items-center justify-center gap-2 hover:shadow-md transition-all dark:text-stone-200 text-sm font-semibold min-h-[44px] flex-1 sm:flex-none"
+              className="btn-secondary flex-1 sm:flex-none"
             >
-              <Mic size={16} /> Recordings
+              <Mic size={16} strokeWidth={1.75} /> Recordings
             </Link>
             <button
               type="button"
               onClick={() => setIsModalOpen(true)}
-              className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 px-4 sm:px-5 py-2.5 rounded-2xl flex items-center justify-center gap-2 hover:shadow-md transition-all dark:text-stone-200 text-sm font-semibold min-h-[44px] flex-1 sm:flex-none"
+              className="btn-secondary flex-1 sm:flex-none"
             >
-              <Plus size={16} /> Add Lead
+              <Plus size={16} strokeWidth={1.75} /> Add Lead
             </button>
             <button
               type="button"
               onClick={startCampaign}
               disabled={isCalling || leads.length === 0}
-              className="gold-gradient text-white px-4 sm:px-5 py-2.5 rounded-2xl font-bold flex items-center justify-center gap-2 hover:shadow-xl hover:scale-[1.02] transition-all disabled:opacity-50 text-sm min-h-[44px] w-full sm:w-auto"
+              className="btn-primary w-full sm:w-auto"
             >
               {isCalling ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-              {isCalling ? "Launching…" : callingCount > 0 ? `Calling (${callingCount})` : "Launch Campaign"}
+              {isCalling
+                ? "Launching…"
+                : callingCount > 0
+                  ? `Call again (${callingCount} stuck)`
+                  : "Launch Campaign"}
             </button>
           </>
         }
       >
 
         {/* Tab switcher */}
-        <div className="flex gap-1.5 sm:gap-2 mb-6 sm:mb-8 p-1 bg-stone-100 dark:bg-stone-900 rounded-2xl w-full sm:w-fit border border-stone-200 dark:border-stone-800 overflow-x-auto">
+        <div className="inline-flex bg-neutral-100 rounded-full p-1 mb-8 sm:mb-10 w-full sm:w-fit">
           {[
             { id: "overview" as const, label: "Overview" },
             { id: "interested" as const, label: "Confirmed", count: interestedLeads.length },
@@ -421,15 +462,15 @@ export default function Dashboard() {
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`px-4 sm:px-5 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 flex-1 sm:flex-none min-h-[44px] whitespace-nowrap ${
+              className={`px-5 py-2 rounded-full text-sm font-medium transition-colors flex items-center justify-center gap-2 flex-1 sm:flex-none min-h-[40px] whitespace-nowrap ${
                 activeTab === tab.id
-                  ? "bg-white dark:bg-stone-800 text-gold shadow-sm"
-                  : "text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
+                  ? "bg-white text-neutral-900"
+                  : "text-neutral-500 hover:text-neutral-900"
               }`}
             >
               {tab.label}
               {tab.count != null && tab.count > 0 && (
-                <span className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 text-[10px] font-black px-2 py-0.5 rounded-full">
+                <span className="text-neutral-400 text-xs font-medium">
                   {tab.count}
                 </span>
               )}
@@ -438,15 +479,14 @@ export default function Dashboard() {
         </div>
         {activeTab === "overview" && (
           <>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-10">
-              <StatCard label="Total Leads" value={String(leads.length)} icon={Users} color="text-blue-500" />
-              <StatCard label="Hot Leads" value={String(interestedLeads.length)} icon={ThumbsUp} color="text-emerald-500" delay={50} />
-              <StatCard label="Completed" value={String(completedCount)} icon={PhoneCall} color="text-gold" delay={100} />
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-10">
+              <StatCard label="Total Leads" value={String(leads.length)} icon={Users} />
+              <StatCard label="Hot Leads" value={String(interestedLeads.length)} icon={ThumbsUp} delay={50} />
+              <StatCard label="Completed" value={String(completedCount)} icon={PhoneCall} delay={100} />
               <StatCard
                 label="Success Rate"
                 value={leads.length > 0 ? `${Math.round((interestedLeads.length / leads.length) * 100)}%` : "0%"}
                 icon={TrendingUp}
-                color="text-emerald-500"
                 delay={150}
               />
             </div>
@@ -464,27 +504,27 @@ export default function Dashboard() {
                     <div className="space-y-3">
                       <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
                         <div className="relative flex-1 min-w-0">
-                          <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none" />
+                          <Search size={15} strokeWidth={1.75} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
                           <input
                             type="text"
                             placeholder="Search name or phone…"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
-                            className="pl-10 pr-3 py-2.5 bg-white dark:bg-stone-950 border border-stone-200 dark:border-stone-700 rounded-xl text-sm text-stone-800 dark:text-stone-100 placeholder:text-stone-400 outline-none focus:ring-2 focus:ring-gold/25 focus:border-gold/40 w-full min-h-[42px]"
+                            className="pl-10 pr-3 py-2.5 bg-white border border-neutral-200 rounded-lg text-sm text-neutral-900 placeholder:text-neutral-400 input-base w-full min-h-[42px]"
                           />
                         </div>
                         <div className="flex gap-2 shrink-0">
                           {selectedLeads.length > 0 && (
-                            <button type="button" onClick={handleBulkDelete} className="px-3.5 py-2.5 bg-red-50 dark:bg-red-950/30 border border-red-200/80 dark:border-red-900/50 rounded-xl text-red-600 dark:text-red-400 flex items-center justify-center gap-2 text-xs font-semibold min-h-[42px]">
-                              <Trash2 size={14} /> Delete {selectedLeads.length}
+                            <button type="button" onClick={handleBulkDelete} className="px-4 py-2.5 border border-neutral-200 rounded-full text-neutral-500 hover:text-neutral-900 hover:border-neutral-400 transition-colors flex items-center justify-center gap-2 text-xs font-semibold min-h-[42px]">
+                              <Trash2 size={14} strokeWidth={1.75} /> Delete {selectedLeads.length}
                             </button>
                           )}
-                          <button type="button" onClick={() => fileInputRef.current?.click()} className="px-3.5 py-2.5 bg-white dark:bg-stone-950 border border-stone-200 dark:border-stone-700 rounded-xl text-stone-600 dark:text-stone-300 flex items-center justify-center gap-2 text-xs font-semibold min-h-[42px] hover:border-gold/40 hover:text-gold transition-colors">
-                            <FileUp size={14} /> Import
+                          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading} className="px-4 py-2.5 bg-white border border-neutral-200 rounded-full text-neutral-700 flex items-center justify-center gap-2 text-xs font-semibold min-h-[42px] hover:border-neutral-400 transition-colors disabled:opacity-50">
+                            <FileUp size={14} strokeWidth={1.75} /> {isUploading ? "Importing…" : "Import"}
                           </button>
                         </div>
                       </div>
-                      <div className="pt-3 border-t border-stone-100 dark:border-stone-800/80">
+                      <div className="pt-3 border-t border-neutral-100">
                         <DualStatusFilters
                           callFilter={callStatusFilter}
                           outcomeFilter={outcomeStatusFilter}
@@ -496,16 +536,16 @@ export default function Dashboard() {
                   }
                 >
                   {/* Mobile / tablet card list */}
-                  <div className="md:hidden divide-y divide-stone-100 dark:divide-stone-800/80">
+                  <div className="md:hidden divide-y divide-neutral-100">
                     {filteredLeads.length === 0 ? (
                       <div className="px-6 py-16 text-center">
-                        <div className="mx-auto w-12 h-12 rounded-2xl bg-stone-100 dark:bg-stone-800 flex items-center justify-center mb-4">
-                          <Database size={22} className="text-stone-400" />
+                        <div className="mx-auto w-12 h-12 rounded-full bg-neutral-100 flex items-center justify-center mb-4">
+                          <Database size={22} strokeWidth={1.5} className="text-neutral-400" />
                         </div>
-                        <p className="text-sm font-medium text-stone-600 dark:text-stone-300">
+                        <p className="text-sm font-medium text-neutral-600">
                           {leads.length === 0 ? "No leads yet" : "No leads match these filters"}
                         </p>
-                        <p className="text-xs text-stone-400 mt-1.5 max-w-xs mx-auto">
+                        <p className="text-xs text-neutral-400 mt-1.5 max-w-xs mx-auto">
                           {leads.length === 0
                             ? "Use Import or Add Lead to start a campaign."
                             : "Try clearing search or status filters."}
@@ -516,37 +556,37 @@ export default function Dashboard() {
                         <div
                           key={lead.id}
                           onClick={() => openLeadDetails(lead)}
-                          className="p-4 flex items-start gap-3 active:bg-stone-50 dark:active:bg-stone-800/40 cursor-pointer"
+                          className="p-4 flex items-start gap-3 active:bg-neutral-50 cursor-pointer"
                         >
                           <input
                             type="checkbox"
                             checked={selectedLeads.includes(lead.id)}
                             onChange={() => toggleLeadSelection(lead.id)}
                             onClick={(e) => e.stopPropagation()}
-                            className="mt-1 w-4 h-4 rounded border-stone-300 text-gold cursor-pointer shrink-0"
+                            className="mt-1 w-4 h-4 accent-neutral-900 cursor-pointer shrink-0"
                           />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <p className="font-semibold text-sm dark:text-stone-100 truncate">
-                                  {lead.name || <span className="text-stone-400 font-normal italic">Unknown</span>}
+                                <p className="font-medium text-sm text-neutral-900 truncate">
+                                  {lead.name || <span className="text-neutral-400 italic">Unknown</span>}
                                 </p>
-                                <p className="text-stone-400 text-[12px] font-mono mt-0.5 truncate">{lead.phone}</p>
+                                <p className="text-neutral-400 text-[12px] font-mono mt-0.5 truncate">{lead.phone}</p>
                               </div>
                               <DualStatusBadges lead={lead} />
                             </div>
                             <div className="mt-3 flex items-center justify-between">
                               {lead.summary ? (
-                                <span className="text-[11px] font-medium text-gold flex items-center gap-1">
-                                  <Eye size={12} /> View report
+                                <span className="text-[11px] font-medium text-neutral-600 flex items-center gap-1">
+                                  <Eye size={12} strokeWidth={1.75} /> View report
                                 </span>
                               ) : (
-                                <span className="text-stone-400 text-[11px]">No summary</span>
+                                <span className="text-neutral-400 text-[11px]">No summary</span>
                               )}
                               <button
                                 type="button"
                                 onClick={(e) => { e.stopPropagation(); handleDelete(lead.id); }}
-                                className="p-2 text-red-500/80 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-lg"
+                                className="p-2 text-neutral-400 hover:text-neutral-900 hover:bg-neutral-100 rounded-full transition-colors"
                                 aria-label="Delete lead"
                               >
                                 <Trash2 size={14} />
@@ -562,26 +602,26 @@ export default function Dashboard() {
                   <div className="hidden md:block overflow-x-auto dashboard-scroll">
                     <table className="w-full text-left">
                       <thead>
-                        <tr className="border-b border-stone-100 dark:border-stone-800 text-stone-500 dark:text-stone-400 text-[11px] font-medium">
+                        <tr className="border-b border-neutral-100 text-neutral-400 text-xs">
                           <th className="px-4 lg:px-6 py-3.5 w-10"></th>
-                          <th className="px-4 lg:px-6 py-3.5 font-medium">Name</th>
-                          <th className="px-4 lg:px-6 py-3.5 font-medium">Call status</th>
-                          <th className="px-4 lg:px-6 py-3.5 font-medium">Lead interest</th>
-                          <th className="px-4 lg:px-6 py-3.5 font-medium">Summary</th>
-                          <th className="px-4 lg:px-6 py-3.5 text-right font-medium">Action</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-normal">Name</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-normal">Call status</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-normal">Lead interest</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-normal">Summary</th>
+                          <th className="px-4 lg:px-6 py-3.5 text-right font-normal">Action</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-stone-100 dark:divide-stone-800/80">
+                      <tbody className="divide-y divide-neutral-100">
                         {filteredLeads.length === 0 ? (
                           <tr>
                             <td colSpan={6} className="px-6 py-20 text-center">
-                              <div className="mx-auto w-12 h-12 rounded-2xl bg-stone-100 dark:bg-stone-800 flex items-center justify-center mb-4">
-                                <Database size={22} className="text-stone-400" />
+                              <div className="mx-auto w-12 h-12 rounded-full bg-neutral-100 flex items-center justify-center mb-4">
+                                <Database size={22} strokeWidth={1.5} className="text-neutral-400" />
                               </div>
-                              <p className="text-sm font-medium text-stone-600 dark:text-stone-300">
+                              <p className="text-sm font-medium text-neutral-600">
                                 {leads.length === 0 ? "No leads yet" : "No leads match these filters"}
                               </p>
-                              <p className="text-xs text-stone-400 mt-1.5">
+                              <p className="text-xs text-neutral-400 mt-1.5">
                                 {leads.length === 0
                                   ? "Use Import or Add Lead to start a campaign."
                                   : "Try clearing search or status filters."}
@@ -590,14 +630,14 @@ export default function Dashboard() {
                           </tr>
                         ) : (
                           filteredLeads.map((lead) => (
-                            <tr key={lead.id} onClick={() => openLeadDetails(lead)} className="hover:bg-stone-50/80 dark:hover:bg-stone-800/30 transition-colors group cursor-pointer">
+                            <tr key={lead.id} onClick={() => openLeadDetails(lead)} className="hover:bg-neutral-50 transition-colors group cursor-pointer">
                               <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
-                                <input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 rounded border-stone-300 text-gold cursor-pointer" />
+                                <input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 accent-neutral-900 cursor-pointer" />
                               </td>
                               <td className="px-4 lg:px-6 py-4">
                                 <div className="flex flex-col min-w-0">
-                                  <span className="font-semibold text-sm dark:text-stone-100 truncate">{lead.name || <span className="text-stone-400 font-normal italic">Unknown</span>}</span>
-                                  <span className="text-stone-400 text-[12px] font-mono mt-0.5">{lead.phone}</span>
+                                  <span className="font-medium text-sm text-neutral-900 truncate">{lead.name || <span className="text-neutral-400 italic">Unknown</span>}</span>
+                                  <span className="text-neutral-400 text-[12px] font-mono mt-0.5">{lead.phone}</span>
                                 </div>
                               </td>
                               <td className="px-4 lg:px-6 py-4">
@@ -608,14 +648,14 @@ export default function Dashboard() {
                               </td>
                               <td className="px-4 lg:px-6 py-4 text-center">
                                 {lead.summary ? (
-                                  <Eye size={16} className="inline text-gold opacity-60 group-hover:opacity-100" />
+                                  <Eye size={16} strokeWidth={1.75} className="inline text-neutral-500 opacity-60 group-hover:opacity-100 transition-opacity" />
                                 ) : (
-                                  <span className="text-stone-300">—</span>
+                                  <span className="text-neutral-300">—</span>
                                 )}
                               </td>
                               <td className="px-4 lg:px-6 py-4 text-right">
-                                <button type="button" onClick={(e) => { e.stopPropagation(); handleDelete(lead.id); }} className="p-2 bg-red-50 dark:bg-red-950/20 text-red-500 rounded-xl opacity-0 group-hover:opacity-100 transition-all">
-                                  <Trash2 size={14} />
+                                <button type="button" onClick={(e) => { e.stopPropagation(); handleDelete(lead.id); }} className="p-2 text-neutral-400 hover:text-neutral-900 hover:bg-neutral-100 rounded-full opacity-0 group-hover:opacity-100 transition-all">
+                                  <Trash2 size={14} strokeWidth={1.75} />
                                 </button>
                               </td>
                             </tr>
@@ -629,28 +669,25 @@ export default function Dashboard() {
 
               {/* Calendar Widget */}
               <div className="space-y-6 sm:space-y-8">
-                <div className="bg-white dark:bg-stone-900 rounded-2xl sm:rounded-[2.5rem] border border-stone-200 dark:border-stone-800 overflow-hidden shadow-lg">
-                  <div className="p-4 sm:p-6 border-b border-stone-100 dark:border-stone-800 bg-stone-50/30 dark:bg-stone-800/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <Calendar size={20} className="text-gold shrink-0" />
-                      <h3 className="text-base sm:text-lg font-serif font-bold dark:text-white">Meeting Calendar</h3>
-                    </div>
+                <div className="bg-white rounded-xl border border-neutral-200 overflow-hidden">
+                  <div className="p-4 sm:p-6 border-b border-neutral-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <h3 className="text-base sm:text-lg font-semibold tracking-tight text-neutral-900">Meeting Calendar</h3>
                     <div className="flex items-center gap-1 sm:gap-2 self-end sm:self-auto">
-                      <button type="button" onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() - 1)))} className="p-2.5 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-xl transition-all min-h-[44px] min-w-[44px] flex items-center justify-center">
-                        <ChevronLeft size={16} className="text-stone-500" />
+                      <button type="button" onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() - 1)))} className="p-2.5 hover:bg-neutral-100 rounded-full transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center">
+                        <ChevronLeft size={16} strokeWidth={1.75} className="text-neutral-500" />
                       </button>
-                      <span className="text-xs font-bold text-stone-600 dark:text-stone-300 min-w-[6.5rem] sm:min-w-[100px] text-center">
+                      <span className="text-xs font-medium text-neutral-600 min-w-[6.5rem] sm:min-w-[100px] text-center">
                         {currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
                       </span>
-                      <button type="button" onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() + 1)))} className="p-2.5 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-xl transition-all min-h-[44px] min-w-[44px] flex items-center justify-center">
-                        <ChevronRight size={16} className="text-stone-500" />
+                      <button type="button" onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() + 1)))} className="p-2.5 hover:bg-neutral-100 rounded-full transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center">
+                        <ChevronRight size={16} strokeWidth={1.75} className="text-neutral-500" />
                       </button>
                     </div>
                   </div>
                   <div className="p-3 sm:p-6">
                     <div className="grid grid-cols-7 gap-1 sm:gap-2 mb-3 sm:mb-4 text-center">
                       {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(d => (
-                        <div key={d} className="text-[9px] sm:text-[10px] font-black text-stone-400 uppercase">{d}</div>
+                        <div key={d} className="section-label text-center">{d}</div>
                       ))}
                     </div>
                     <div className="grid grid-cols-7 gap-1 sm:gap-2">
@@ -666,23 +703,22 @@ export default function Dashboard() {
                                 setSelectedDay(day);
                               }
                             }}
-                            className={`aspect-square min-h-[36px] sm:min-h-0 p-1 sm:p-2 rounded-lg sm:rounded-xl flex flex-col items-center justify-center relative transition-all ${
-                              day ? 'hover:bg-stone-100 dark:hover:bg-stone-800 cursor-pointer' : ''
+                            className={`aspect-square min-h-[36px] sm:min-h-0 p-1 sm:p-2 rounded-lg flex flex-col items-center justify-center relative transition-colors ${
+                              day ? 'hover:bg-neutral-100 cursor-pointer' : ''
                             } ${
                               meetings.length > 0 
-                                ? 'bg-gold/30 dark:bg-gold/20 ring-2 sm:ring-4 ring-gold/60 shadow-[0_0_20px_rgba(212,175,55,0.5)] animate-pulse' 
-                                : isToday ? 'bg-stone-100 dark:bg-stone-800' : ''
-                            }`}
-                          >
+                                ? 'bg-neutral-900 text-white' 
+                                : isToday ? 'bg-neutral-100' : ''
+                            }`}>
                             {day && (
                               <>
-                                <span className={`text-[10px] sm:text-xs font-bold ${
-                                  meetings.length > 0 ? 'text-gold' : isToday ? 'text-stone-900 dark:text-white' : 'text-stone-600 dark:text-stone-300'
+                                <span className={`text-[10px] sm:text-xs font-medium ${
+                                  meetings.length > 0 ? 'text-white' : isToday ? 'text-neutral-900' : 'text-neutral-600'
                                 }`}>{day}</span>
                                 {meetings.length > 0 && (
                                   <div className="absolute bottom-0.5 sm:bottom-1.5 flex gap-0.5">
                                     {meetings.slice(0, 3).map((_, idx) => (
-                                      <div key={idx} className="w-1 h-1 rounded-full bg-gold" />
+                                      <div key={idx} className="w-1 h-1 rounded-full bg-white/70" />
                                     ))}
                                   </div>
                                 )}
@@ -696,34 +732,34 @@ export default function Dashboard() {
                 </div>
 
                 {/* Upcoming Meetings */}
-                <div className="bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 rounded-2xl sm:rounded-[2.5rem] p-5 sm:p-8 shadow-lg">
+                <div className="bg-white rounded-xl border border-neutral-200 p-5 sm:p-8">
                   <div className="flex items-center justify-between mb-4 sm:mb-6">
-                    <h3 className="text-base sm:text-lg font-serif font-bold text-emerald-900 dark:text-emerald-100">Hot Leads</h3>
-                    <div className="p-2 bg-emerald-100 dark:bg-emerald-900/40 rounded-xl text-emerald-600"><Zap size={18} /></div>
+                    <h3 className="text-base sm:text-lg font-semibold tracking-tight text-neutral-900">Hot Leads</h3>
+                    <div className="text-neutral-400"><Zap size={17} strokeWidth={1.5} /></div>
                   </div>
                   <div className="space-y-3 sm:space-y-4">
                     {interestedLeads.length === 0 ? (
-                      <div className="py-8 text-center text-emerald-400/50 flex flex-col items-center gap-2">
-                        <ThumbsUp size={28} /><span className="text-[10px] font-black uppercase tracking-widest">No hot leads yet</span>
+                      <div className="py-8 text-center text-neutral-300 flex flex-col items-center gap-2">
+                        <ThumbsUp size={26} strokeWidth={1.5} /><span className="section-label">No hot leads yet</span>
                       </div>
                     ) : (
                       interestedLeads.slice(0, 5).map((lead, i) => (
-                        <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} key={i} className="bg-white dark:bg-stone-900 p-3 sm:p-4 rounded-2xl shadow-md border border-emerald-100/50 dark:border-emerald-800/20 flex items-center gap-3 sm:gap-4">
-                          <div className="w-10 h-10 rounded-full bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center text-emerald-600 font-bold text-xs uppercase shrink-0">{lead.name?.charAt(0) || '?'}</div>
+                        <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} key={i} className="bg-white p-3 sm:p-4 rounded-xl border border-neutral-100 flex items-center gap-3 sm:gap-4">
+                          <div className="w-9 h-9 rounded-full bg-neutral-100 flex items-center justify-center text-neutral-600 font-medium text-xs shrink-0">{lead.name?.charAt(0) || '?'}</div>
                           <div className="flex-1 min-w-0">
-                            <h5 className="font-black text-[10px] uppercase tracking-tighter dark:text-stone-200 truncate">{lead.name}</h5>
-                            <p className="text-[10px] text-stone-500 font-mono mt-0.5 truncate">{lead.phone}</p>
+                            <h5 className="font-medium text-sm text-neutral-900 truncate">{lead.name}</h5>
+                            <p className="text-[11px] text-neutral-400 font-mono mt-0.5 truncate">{lead.phone}</p>
                           </div>
-                          <Clock size={14} className="text-emerald-500 shrink-0" />
+                          <Clock size={14} strokeWidth={1.75} className="text-neutral-300 shrink-0" />
                         </motion.div>
                       ))
                     )}
                   </div>
                 </div>
 
-                <div className="bg-gold/10 border border-gold/20 rounded-2xl sm:rounded-[2.5rem] p-5 sm:p-8">
-                  <div className="flex items-center gap-3 sm:gap-4 mb-4 sm:mb-6 text-gold"><ShieldCheck size={20} /><span className="text-[10px] font-black uppercase tracking-[0.2em]">Security Verified</span></div>
-                  <p className="text-xs text-stone-500 dark:text-stone-400 leading-relaxed italic">All AI interactions are encrypted and monitored for quality assurance.</p>
+                <div className="rounded-xl border border-neutral-200 p-5 sm:p-7">
+                  <div className="flex items-center gap-3 mb-3 text-neutral-500"><ShieldCheck size={17} strokeWidth={1.5} /><span className="section-label">Security Verified</span></div>
+                  <p className="text-xs text-neutral-400 leading-relaxed">All AI interactions are encrypted and monitored for quality assurance.</p>
                 </div>
               </div>
             </div>
@@ -733,40 +769,40 @@ export default function Dashboard() {
         {/* Confirmed Leads Tab */}
         {activeTab === 'interested' && (
           <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
-            <div className="mb-6 sm:mb-10 p-5 sm:p-8 rounded-2xl sm:rounded-[2.5rem] bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-950/30 dark:to-teal-950/30 border border-emerald-100 dark:border-emerald-900/30 flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6 shadow-lg">
+            <div className="mb-8 sm:mb-10 rounded-xl bg-neutral-900 p-6 sm:p-10 flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6">
               <div className="flex items-center gap-4 flex-1 min-w-0">
-                <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-2xl sm:rounded-3xl bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shadow-inner shrink-0">
-                  <ThumbsUp size={28} />
+                <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-white/10 flex items-center justify-center text-white shrink-0">
+                  <ThumbsUp size={24} strokeWidth={1.5} />
                 </div>
                 <div className="min-w-0">
-                  <h3 className="text-xl sm:text-3xl font-serif font-bold text-emerald-900 dark:text-emerald-100">Confirmed Leads</h3>
-                  <p className="text-emerald-600 dark:text-emerald-400 mt-1 text-sm sm:text-lg">Customers who said <strong>"Yes"</strong></p>
+                  <h3 className="text-xl sm:text-3xl font-semibold tracking-tight text-white">Confirmed Leads</h3>
+                  <p className="text-neutral-400 mt-1 text-sm sm:text-base">Customers who said <strong className="font-medium text-white">"Yes"</strong></p>
                 </div>
               </div>
               <div className="sm:ml-auto sm:text-right flex sm:block items-baseline gap-2 pl-16 sm:pl-0">
-                <div className="text-3xl sm:text-5xl font-black text-emerald-600 dark:text-emerald-400">{interestedLeads.length}</div>
-                <div className="text-xs sm:text-sm text-emerald-500 font-semibold uppercase tracking-widest">Hot Leads</div>
+                <div className="text-3xl sm:text-5xl font-semibold text-white tracking-tight">{interestedLeads.length}</div>
+                <div className="text-xs text-neutral-400 font-medium">Hot Leads</div>
               </div>
             </div>
 
-            <div className="bg-white dark:bg-stone-900 rounded-2xl sm:rounded-[2.5rem] border border-stone-200 dark:border-stone-800 overflow-hidden shadow-lg">
-              <div className="p-4 sm:p-8 border-b border-stone-100 dark:border-stone-800 bg-stone-50/30 dark:bg-stone-800/20 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+            <div className="bg-white rounded-xl border border-neutral-200 overflow-hidden">
+              <div className="p-4 sm:p-6 lg:p-8 border-b border-neutral-100 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
                 <div>
-                  <h3 className="text-lg sm:text-2xl font-serif font-bold dark:text-white">Confirmed List</h3>
-                  <p className="text-xs sm:text-sm text-stone-500 mt-1">Updated after each outbound call</p>
+                  <h3 className="text-lg sm:text-2xl font-semibold tracking-tight text-neutral-900">Confirmed List</h3>
+                  <p className="text-xs sm:text-sm text-neutral-500 mt-1">Updated after each outbound call</p>
                 </div>
                 {selectedLeads.length > 0 && (
-                  <button type="button" onClick={handleBulkDelete} className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-2xl text-red-500 flex items-center justify-center gap-2 font-black text-[10px] uppercase tracking-widest min-h-[44px]">
-                    <Trash2 size={16} /> Delete {selectedLeads.length}
+                  <button type="button" onClick={handleBulkDelete} className="px-4 py-2.5 border border-neutral-200 rounded-full text-neutral-500 hover:text-neutral-900 hover:border-neutral-400 transition-colors flex items-center justify-center gap-2 font-medium text-xs min-h-[44px]">
+                    <Trash2 size={14} strokeWidth={1.75} /> Delete {selectedLeads.length}
                   </button>
                 )}
               </div>
 
               {/* Mobile cards */}
-              <div className="md:hidden divide-y divide-stone-100 dark:divide-stone-800">
+              <div className="md:hidden divide-y divide-neutral-100">
                 {interestedLeads.length === 0 ? (
-                  <div className="px-4 py-16 text-center text-stone-400">
-                    <ThumbsUp size={36} className="opacity-20 mx-auto mb-3" />
+                  <div className="px-4 py-16 text-center text-neutral-400">
+                    <ThumbsUp size={32} strokeWidth={1.5} className="opacity-30 mx-auto mb-3" />
                     <p className="font-medium text-sm">No confirmed leads yet.</p>
                   </div>
                 ) : (
@@ -774,26 +810,26 @@ export default function Dashboard() {
                     <div
                       key={lead.id}
                       onClick={() => openLeadDetails(lead)}
-                      className="p-4 flex items-start gap-3 cursor-pointer active:bg-emerald-50/40 dark:active:bg-emerald-900/10"
+                      className="p-4 flex items-start gap-3 cursor-pointer active:bg-neutral-50"
                     >
                       <input
                         type="checkbox"
                         checked={selectedLeads.includes(lead.id)}
                         onChange={() => toggleLeadSelection(lead.id)}
                         onClick={(e) => e.stopPropagation()}
-                        className="mt-1 w-4 h-4 rounded border-stone-300 cursor-pointer shrink-0"
+                        className="mt-1 w-4 h-4 accent-neutral-900 cursor-pointer shrink-0"
                       />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
-                            <p className="uppercase font-black text-xs tracking-tighter dark:text-white truncate">
-                              {lead.name || <span className="text-stone-400 normal-case font-normal italic">Unknown</span>}
+                            <p className="font-medium text-sm text-neutral-900 truncate">
+                              {lead.name || <span className="text-neutral-400 italic">Unknown</span>}
                             </p>
-                            <p className="text-stone-500 font-mono text-[11px] mt-0.5 truncate">{lead.phone}</p>
+                            <p className="text-neutral-400 font-mono text-[11px] mt-0.5 truncate">{lead.phone}</p>
                           </div>
                           <DualStatusBadges lead={lead} />
                         </div>
-                        <p className="text-[10px] text-stone-400 mt-2">
+                        <p className="text-[10px] text-neutral-400 mt-2">
                           {lead.createdAt ? new Date(lead.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}
                           <span className="mx-1.5 opacity-40">·</span>#{i + 1}
                         </p>
@@ -806,22 +842,22 @@ export default function Dashboard() {
               <div className="hidden md:block p-0 overflow-x-auto dashboard-scroll">
                 <table className="w-full text-left">
                   <thead>
-                    <tr className="bg-stone-50 dark:bg-stone-800/50 text-stone-400 dark:text-stone-500 text-[11px] font-black uppercase tracking-[0.2em]">
-                      <th className="px-4 lg:px-8 py-5 w-12"></th>
-                      <th className="px-4 lg:px-8 py-5">#</th>
-                      <th className="px-4 lg:px-8 py-5">Name</th>
-                      <th className="px-4 lg:px-8 py-5">Phone Number</th>
-                      <th className="px-4 lg:px-8 py-5">Call Date</th>
-                      <th className="px-4 lg:px-8 py-5">Call Status</th>
-                      <th className="px-4 lg:px-8 py-5">Customer Outcome</th>
+                    <tr className="bg-neutral-50 text-neutral-400 text-xs">
+                      <th className="px-4 lg:px-8 py-4 w-12"></th>
+                      <th className="px-4 lg:px-8 py-4 font-normal">#</th>
+                      <th className="px-4 lg:px-8 py-4 font-normal">Name</th>
+                      <th className="px-4 lg:px-8 py-4 font-normal">Phone Number</th>
+                      <th className="px-4 lg:px-8 py-4 font-normal">Call Date</th>
+                      <th className="px-4 lg:px-8 py-4 font-normal">Call Status</th>
+                      <th className="px-4 lg:px-8 py-4 font-normal">Customer Outcome</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
+                  <tbody className="divide-y divide-neutral-100">
                     {interestedLeads.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="px-8 py-24 text-center">
-                          <div className="flex flex-col items-center gap-4 text-stone-400">
-                            <ThumbsUp size={40} className="opacity-20" />
+                          <div className="flex flex-col items-center gap-4 text-neutral-400">
+                            <ThumbsUp size={36} strokeWidth={1.5} className="opacity-30" />
                             <p className="font-medium">No confirmed leads yet.</p>
                             <p className="text-sm">When customers say "Yes" to Priya, they'll appear here automatically.</p>
                           </div>
@@ -835,13 +871,13 @@ export default function Dashboard() {
                           animate={{ opacity: 1, x: 0 }} 
                           transition={{ delay: i * 0.05 }} 
                           onClick={() => openLeadDetails(lead)}
-                          className="hover:bg-emerald-50/30 dark:hover:bg-emerald-900/10 transition-all cursor-pointer"
+                          className="hover:bg-neutral-50 transition-colors cursor-pointer"
                         >
-                          <td className="px-4 lg:px-8 py-6" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 rounded border-stone-300 cursor-pointer" /></td>
-                          <td className="px-4 lg:px-8 py-6 text-stone-300 text-sm font-medium">{i + 1}</td>
-                          <td className="px-4 lg:px-8 py-6 uppercase font-black text-xs tracking-tighter dark:text-white">{lead.name || <span className="text-stone-400 normal-case font-normal italic">Unknown</span>}</td>
-                          <td className="px-4 lg:px-8 py-6 text-stone-600 dark:text-stone-300 font-mono text-sm">{lead.phone}</td>
-                          <td className="px-4 lg:px-8 py-6 text-stone-500 text-sm">{lead.createdAt ? new Date(lead.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
+                          <td className="px-4 lg:px-8 py-6" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={selectedLeads.includes(lead.id)} onChange={() => toggleLeadSelection(lead.id)} className="w-4 h-4 accent-neutral-900 cursor-pointer" /></td>
+                          <td className="px-4 lg:px-8 py-6 text-neutral-300 text-sm">{i + 1}</td>
+                          <td className="px-4 lg:px-8 py-6 font-medium text-sm text-neutral-900">{lead.name || <span className="text-neutral-400 italic">Unknown</span>}</td>
+                          <td className="px-4 lg:px-8 py-6 text-neutral-500 font-mono text-sm">{lead.phone}</td>
+                          <td className="px-4 lg:px-8 py-6 text-neutral-500 text-sm">{lead.createdAt ? new Date(lead.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
                           <td className="px-4 lg:px-8 py-6">
                             <CallStatusBadge lead={lead} />
                           </td>
@@ -863,19 +899,21 @@ export default function Dashboard() {
       <AnimatePresence>
         {isModalOpen && (
           <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsModalOpen(false)} className="absolute inset-0 bg-stone-900/60 backdrop-blur-md" />
-            <motion.div initial={{ opacity: 0, y: 50, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 50, scale: 0.98 }} className="bg-white dark:bg-stone-900 w-full max-w-md p-6 sm:p-10 rounded-t-3xl sm:rounded-3xl shadow-2xl relative z-10 max-h-[90vh] overflow-y-auto">
-              <h2 className="text-xl sm:text-2xl font-serif font-bold dark:text-white mb-6">Add New Contact</h2>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsModalOpen(false)} className="absolute inset-0 bg-neutral-900/40" />
+            <motion.div initial={{ opacity: 0, y: 50, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 50, scale: 0.98 }} className="bg-white w-full max-w-md p-6 sm:p-10 rounded-t-2xl sm:rounded-2xl relative z-10 max-h-[90vh] overflow-y-auto">
+              <h2 className="text-xl sm:text-2xl font-semibold tracking-tight text-neutral-900 mb-6">Add New Contact</h2>
               <form onSubmit={handleManualAdd} className="space-y-4">
                 <div>
-                  <label className="text-xs font-bold text-stone-500 mb-1 block">FULL NAME</label>
-                  <input type="text" required className="w-full px-4 py-3 bg-stone-50 dark:bg-stone-800 rounded-xl outline-none focus:ring-2 focus:ring-gold/20 min-h-[48px]" value={newLead.name} onChange={e => setNewLead({...newLead, name: e.target.value})} />
+                  <label className="section-label mb-1.5 block">Full name</label>
+                  <input type="text" required className="w-full px-4 py-3 bg-white border border-neutral-200 rounded-lg text-sm outline-none input-base min-h-[48px]" value={newLead.name} onChange={e => setNewLead({...newLead, name: e.target.value})} />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-stone-500 mb-1 block">PHONE NUMBER (WITH +91)</label>
-                  <input type="text" required className="w-full px-4 py-3 bg-stone-50 dark:bg-stone-800 rounded-xl outline-none focus:ring-2 focus:ring-gold/20 min-h-[48px]" value={newLead.phone} onChange={e => setNewLead({...newLead, phone: e.target.value})} />
+                  <label className="section-label mb-1.5 block">Phone number (with +91)</label>
+                  <input type="text" required className="w-full px-4 py-3 bg-white border border-neutral-200 rounded-lg text-sm outline-none input-base min-h-[48px]" value={newLead.phone} onChange={e => setNewLead({...newLead, phone: e.target.value})} />
                 </div>
-                <button className="w-full gold-gradient text-white py-4 rounded-2xl font-bold mt-4 shadow-lg min-h-[52px]">Save Contact</button>
+                <button type="submit" disabled={isSavingLead} className="btn-primary w-full mt-4 min-h-[48px]">
+                  {isSavingLead ? "Saving…" : "Save Contact"}
+                </button>
               </form>
             </motion.div>
           </div>
@@ -886,33 +924,33 @@ export default function Dashboard() {
       <AnimatePresence>
         {selectedLead && (
           <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedLead(null)} className="absolute inset-0 bg-stone-900/60 backdrop-blur-md" />
-            <motion.div initial={{ opacity: 0, y: 50, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 50, scale: 0.98 }} className="bg-white dark:bg-stone-900 w-full max-w-2xl p-5 sm:p-10 rounded-t-3xl sm:rounded-3xl shadow-2xl relative z-10 max-h-[92vh] overflow-y-auto">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedLead(null)} className="absolute inset-0 bg-neutral-900/40" />
+            <motion.div initial={{ opacity: 0, y: 50, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 50, scale: 0.98 }} className="bg-white w-full max-w-2xl p-5 sm:p-10 rounded-t-2xl sm:rounded-2xl relative z-10 max-h-[92vh] overflow-y-auto">
               <div className="flex justify-between items-start mb-6 sm:mb-8 gap-3">
                 <div className="min-w-0">
-                  <h2 className="text-2xl sm:text-3xl font-serif font-bold dark:text-white truncate">{selectedLead.name}</h2>
-                  <p className="text-stone-500 font-mono text-sm mt-1 break-all">{selectedLead.phone}</p>
+                  <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight text-neutral-900 truncate">{selectedLead.name}</h2>
+                  <p className="text-neutral-500 font-mono text-sm mt-1 break-all">{selectedLead.phone}</p>
                   {selectedLead.calledFrom && (
-                    <p className="text-stone-400 text-xs mt-1">Called from {selectedLead.calledFrom}</p>
+                    <p className="text-neutral-400 text-xs mt-1">Called from {selectedLead.calledFrom}</p>
                   )}
                   {selectedLead.lastCalledAt && (
-                    <p className="text-stone-400 text-xs mt-0.5">
+                    <p className="text-neutral-400 text-xs mt-0.5">
                       Last called {new Date(selectedLead.lastCalledAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
                     </p>
                   )}
                 </div>
-                <button type="button" onClick={() => setSelectedLead(null)} className="p-2.5 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-xl transition-all shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"><X size={24} className="text-stone-400" /></button>
+                <button type="button" onClick={() => setSelectedLead(null)} className="p-2.5 hover:bg-neutral-100 rounded-full transition-colors shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"><X size={22} strokeWidth={1.75} className="text-neutral-400" /></button>
               </div>
 
               <div className="space-y-6 sm:space-y-8">
                 <div className="flex flex-wrap items-center gap-2">
                   <span
-                    className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-semibold ${
+                    className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium ${
                       leadLookingLabel(selectedLead) === 'Looking for Lead'
-                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                        ? 'bg-neutral-900 text-white'
                         : leadLookingLabel(selectedLead) === 'Not Looking for Lead'
-                          ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                          : 'bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400'
+                          ? 'bg-white text-neutral-400 border border-neutral-200'
+                          : 'bg-neutral-100 text-neutral-500'
                     }`}
                   >
                     {leadLookingLabel(selectedLead)}
@@ -920,42 +958,34 @@ export default function Dashboard() {
                 </div>
 
                 <div>
-                  <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-3 sm:mb-4">AI Intelligence Report</h4>
-                  <div className="bg-stone-50 dark:bg-stone-800/50 p-5 sm:p-8 rounded-2xl sm:rounded-3xl border border-stone-100 dark:border-stone-700/50 shadow-inner">
+                  <h4 className="section-label mb-3 sm:mb-4">AI Intelligence Report</h4>
+                  <div className="bg-neutral-50 p-5 sm:p-8 rounded-xl border border-neutral-100">
                     {summaryLoading ? (
-                      <div className="py-4 text-center opacity-50">
-                        <Loader2 size={24} className="animate-spin mx-auto mb-2" />
-                        <p className="text-[10px] font-black uppercase tracking-widest">Loading report…</p>
+                      <div className="py-4 text-center">
+                        <Loader2 size={22} className="animate-spin mx-auto mb-2 text-neutral-400" />
+                        <p className="section-label">Loading report…</p>
                       </div>
                     ) : selectedLead.summary ? (
                       selectedLead.summary.includes('\n\n') ? (
                         <>
-                          <div className="flex items-center gap-2 mb-4 pb-4 border-b border-stone-200/50 dark:border-stone-700/50">
-                            <Clock size={14} className="text-gold" />
-                            <span className="text-[10px] font-black uppercase tracking-widest text-stone-400">
+                          <div className="flex items-center gap-2 mb-4 pb-4 border-b border-neutral-200/70">
+                            <Clock size={13} strokeWidth={1.75} className="text-neutral-400" />
+                            <span className="section-label">
                               {selectedLead.summary.split('\n\n')[0]}
                             </span>
                           </div>
-                          <p className="text-sm text-stone-600 dark:text-stone-300 italic leading-relaxed font-medium">
-                            "{selectedLead.summary.split('\n\n')[1]}"
+                          <p className="text-sm text-neutral-700 leading-relaxed">
+                            {selectedLead.summary.split('\n\n')[1]}
                           </p>
                         </>
                       ) : (
-                        <div className="space-y-4">
-                           <div className="flex items-center gap-2 mb-4 pb-4 border-b border-stone-200/50 dark:border-stone-700/50">
-                            <Clock size={14} className="text-gold" />
-                            <span className="text-[10px] font-black uppercase tracking-widest text-stone-400">
-                              Metadata row
-                            </span>
-                          </div>
-                          <p className="text-sm text-stone-600 dark:text-stone-300 italic leading-relaxed">
-                            {selectedLead.summary}
-                          </p>
-                        </div>
+                        <p className="text-sm text-neutral-700 leading-relaxed">
+                          {selectedLead.summary}
+                        </p>
                       )
                     ) : (
                       <div className="py-4 text-center">
-                        <p className="text-sm text-stone-500 dark:text-stone-400 leading-relaxed">
+                        <p className="text-sm text-neutral-500 leading-relaxed">
                           {summaryEmptyMessage(selectedLead)}
                         </p>
                       </div>
@@ -978,15 +1008,15 @@ export default function Dashboard() {
                   </div>
                   {selectedLead.duration != null && (
                     <div>
-                      <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-2">Duration</h4>
-                      <p className="text-sm font-semibold text-stone-600 dark:text-stone-300">{selectedLead.duration}s</p>
+                      <h4 className="section-label mb-2">Duration</h4>
+                      <p className="text-sm font-medium text-neutral-700">{selectedLead.duration}s</p>
                     </div>
                   )}
                 </div>
 
                 {(leadRecording?.hasAudio || selectedLead.recordingUrl) && (
                   <div>
-                    <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-3">Call Recording</h4>
+                    <h4 className="section-label mb-3">Call Recording</h4>
                     <audio
                       controls
                       className="w-full rounded-xl mb-2"
@@ -999,9 +1029,9 @@ export default function Dashboard() {
                     {leadRecording && (
                       <Link
                         href={`/dashboard/recordings?call=${leadRecording.callId}`}
-                        className="text-xs font-bold text-gold hover:underline inline-flex items-center gap-1 min-h-[44px]"
+                        className="text-sm font-medium text-neutral-900 underline underline-offset-4 decoration-neutral-300 hover:decoration-neutral-900 inline-flex items-center gap-1.5 min-h-[44px] transition-colors"
                       >
-                        <Mic size={12} /> View full transcript
+                        <Mic size={13} strokeWidth={1.75} /> View full transcript
                       </Link>
                     )}
                   </div>
@@ -1009,8 +1039,8 @@ export default function Dashboard() {
 
                 {selectedLead.transcription && (
                   <div>
-                    <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-2">Transcript</h4>
-                    <p className="text-sm text-stone-600 dark:text-stone-300 bg-stone-50 dark:bg-stone-800/50 p-4 rounded-2xl whitespace-pre-wrap max-h-40 overflow-y-auto">
+                    <h4 className="section-label mb-2">Transcript</h4>
+                    <p className="text-sm text-neutral-600 bg-neutral-50 p-4 rounded-xl border border-neutral-100 whitespace-pre-wrap max-h-40 overflow-y-auto">
                       {selectedLead.transcription}
                     </p>
                   </div>
@@ -1018,10 +1048,10 @@ export default function Dashboard() {
 
                 {selectedLead.appointmentTime && (
                   <div>
-                    <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gold mb-2">Visit Scheduled</h4>
-                    <div className="flex items-center gap-3 text-stone-600 dark:text-stone-300">
-                      <Calendar size={18} className="text-emerald-500 shrink-0" />
-                      <span className="font-bold text-sm sm:text-base">{new Date(selectedLead.appointmentTime).toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short' })}</span>
+                    <h4 className="section-label mb-2">Visit Scheduled</h4>
+                    <div className="flex items-center gap-3 text-neutral-700">
+                      <Calendar size={16} strokeWidth={1.75} className="text-neutral-400 shrink-0" />
+                      <span className="font-medium text-sm sm:text-base">{new Date(selectedLead.appointmentTime).toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short' })}</span>
                     </div>
                   </div>
                 )}
@@ -1035,39 +1065,39 @@ export default function Dashboard() {
       <AnimatePresence>
         {selectedDay && (
           <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedDay(null)} className="absolute inset-0 bg-stone-900/60 backdrop-blur-md" />
-            <motion.div initial={{ opacity: 0, y: 50, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 50, scale: 0.98 }} className="bg-white dark:bg-stone-900 w-full max-w-md p-5 sm:p-10 rounded-t-3xl sm:rounded-3xl shadow-2xl relative z-10 max-h-[90vh] overflow-y-auto">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedDay(null)} className="absolute inset-0 bg-neutral-900/40" />
+            <motion.div initial={{ opacity: 0, y: 50, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 50, scale: 0.98 }} className="bg-white w-full max-w-md p-5 sm:p-10 rounded-t-2xl sm:rounded-2xl relative z-10 max-h-[90vh] overflow-y-auto">
               <div className="flex justify-between items-start mb-6 sm:mb-8 gap-3">
                 <div className="min-w-0">
-                  <h2 className="text-xl sm:text-2xl font-serif font-bold dark:text-white">
+                  <h2 className="text-xl sm:text-2xl font-semibold tracking-tight text-neutral-900">
                     {selectedDay} {currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
                   </h2>
-                  <p className="text-stone-500 text-sm mt-1">Scheduled Appointments</p>
+                  <p className="text-neutral-500 text-sm mt-1">Scheduled Appointments</p>
                 </div>
-                <button type="button" onClick={() => setSelectedDay(null)} className="p-2.5 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-xl transition-all shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"><X size={24} className="text-stone-400" /></button>
+                <button type="button" onClick={() => setSelectedDay(null)} className="p-2.5 hover:bg-neutral-100 rounded-full transition-colors shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"><X size={22} strokeWidth={1.75} className="text-neutral-400" /></button>
               </div>
 
               <div className="space-y-3 sm:space-y-4 max-h-[50vh] sm:max-h-[400px] overflow-y-auto pr-1">
                 {getMeetingsForDay(selectedDay).length === 0 ? (
-                  <div className="py-12 text-center text-stone-400 italic">No appointments for this day.</div>
+                  <div className="py-12 text-center text-neutral-400">No appointments for this day.</div>
                 ) : (
                   getMeetingsForDay(selectedDay).map((lead, i) => (
-                    <div key={i} className="p-4 bg-stone-50 dark:bg-stone-800/50 rounded-2xl border border-stone-100 dark:border-stone-700/50 flex items-center justify-between gap-3">
+                    <div key={i} className="p-4 bg-white rounded-xl border border-neutral-200 flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <h5 className="font-black text-xs uppercase tracking-tight dark:text-white truncate">{lead.name}</h5>
-                        <div className="flex flex-wrap items-center gap-2 mt-1 text-stone-500 font-mono text-[9px]">
+                        <h5 className="font-medium text-sm text-neutral-900 truncate">{lead.name}</h5>
+                        <div className="flex flex-wrap items-center gap-2 mt-1 text-neutral-400 font-mono text-[11px]">
                           <span className="truncate">{lead.phone}</span>
                           <span className="opacity-30">|</span>
-                          <Clock size={12} className="text-emerald-500" />
+                          <Clock size={12} strokeWidth={1.75} />
                           {new Date(lead.appointmentTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                         </div>
                       </div>
                       <button 
                         type="button"
                         onClick={() => { setSelectedDay(null); openLeadDetails(lead); }}
-                        className="p-2.5 bg-white dark:bg-stone-900 rounded-xl shadow-sm text-gold shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"
+                        className="p-2.5 border border-neutral-200 rounded-full text-neutral-500 hover:text-neutral-900 hover:border-neutral-400 transition-colors shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"
                       >
-                        <ArrowRight size={16} />
+                        <ArrowRight size={16} strokeWidth={1.75} />
                       </button>
                     </div>
                   ))

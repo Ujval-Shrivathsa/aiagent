@@ -88,6 +88,56 @@ describe('end-call-guard', () => {
     assert.equal(r.reason, 'conversation_eligible');
   });
 
+  it('allows endCall after the 10s silence-timeout close even with no customer speech', () => {
+    const r = shouldAllowEndCall({
+      callDurationMs: 20_000,
+      customerClearGoodbye: false,
+      customerUtteranceCount: 0,
+      batchHasNotInterested: false,
+      isOutbound: true,
+      silenceTimeoutClose: true,
+    });
+    assert.equal(r.allow, true);
+    assert.equal(r.reason, 'silence_timeout_close');
+  });
+
+  it('does not let other calls claim the silence timeout', () => {
+    const r = shouldAllowEndCall({
+      callDurationMs: 8_000,
+      customerClearGoodbye: false,
+      customerUtteranceCount: 1,
+      batchHasNotInterested: false,
+      isOutbound: true,
+      silenceTimeoutClose: false,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it('allows endCall after the busy / call-back-later close even with no customer speech', () => {
+    const r = shouldAllowEndCall({
+      callDurationMs: 20_000,
+      customerClearGoodbye: false,
+      customerUtteranceCount: 0,
+      batchHasNotInterested: false,
+      isOutbound: true,
+      busyCallbackClose: true,
+    });
+    assert.equal(r.allow, true);
+    assert.equal(r.reason, 'busy_callback_close');
+  });
+
+  it('does not let other calls claim the busy close', () => {
+    const r = shouldAllowEndCall({
+      callDurationMs: 8_000,
+      customerClearGoodbye: false,
+      customerUtteranceCount: 1,
+      batchHasNotInterested: false,
+      isOutbound: true,
+      busyCallbackClose: false,
+    });
+    assert.equal(r.allow, false);
+  });
+
   it('counts meaningful utterances only', () => {
     assert.equal(isMeaningfulCustomerUtterance('ha', () => false), true);
     assert.equal(isMeaningfulCustomerUtterance('houda', () => false), true);

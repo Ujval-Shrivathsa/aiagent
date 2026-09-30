@@ -36,7 +36,7 @@ function toneClass(value: string): string {
   return STATUS_BADGE_STYLES[key] || STATUS_BADGE_STYLES.pending;
 }
 
-/** Soft status chip — readable, not shouting ALL-CAPS. */
+/** Quiet status pill — grayscale only. */
 export function StatusChip({
   value,
   label,
@@ -46,9 +46,9 @@ export function StatusChip({
 }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold tracking-tight whitespace-nowrap ${toneClass(value)}`}
+      className={`inline-flex items-center gap-1.5 rounded-full text-xs font-medium whitespace-nowrap ${toneClass(value)}`}
     >
-      <span className="w-1.5 h-1.5 rounded-full bg-current opacity-70 shrink-0" />
+      <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0" />
       {label || value}
     </span>
   );
@@ -97,14 +97,14 @@ export function DualStatusContainers({
       : normalizeLeadStatus(outcome);
 
   const fieldClass =
-    "w-full mt-2 py-2.5 px-3 bg-white dark:bg-stone-950 border border-stone-200/80 dark:border-stone-700/80 rounded-xl text-sm text-stone-800 dark:text-stone-100 outline-none focus:ring-2 focus:ring-gold/25 focus:border-gold/40 min-h-[44px]";
+    "w-full mt-2 py-2.5 px-3 bg-white border border-neutral-200 rounded-lg text-sm text-neutral-900 input-base min-h-[44px]";
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-      <div className="rounded-2xl border border-stone-200/80 dark:border-stone-700/60 bg-gradient-to-b from-stone-50 to-white dark:from-stone-800/50 dark:to-stone-900/80 p-4">
-        <div className="flex items-center gap-2 text-stone-500 dark:text-stone-400">
-          <Phone size={14} className="text-gold" />
-          <span className="text-[11px] font-semibold tracking-wide">Call status</span>
+      <div className="rounded-xl border border-neutral-200 bg-white p-4">
+        <div className="flex items-center gap-2 text-neutral-500">
+          <Phone size={14} strokeWidth={1.75} />
+          <span className="section-label">Call status</span>
         </div>
         {editable && onCallStatusChange ? (
           <select
@@ -125,10 +125,10 @@ export function DualStatusContainers({
         )}
       </div>
 
-      <div className="rounded-2xl border border-stone-200/80 dark:border-stone-700/60 bg-gradient-to-b from-stone-50 to-white dark:from-stone-800/50 dark:to-stone-900/80 p-4">
-        <div className="flex items-center gap-2 text-stone-500 dark:text-stone-400">
-          <Target size={14} className="text-gold" />
-          <span className="text-[11px] font-semibold tracking-wide">Lead interest</span>
+      <div className="rounded-xl border border-neutral-200 bg-white p-4">
+        <div className="flex items-center gap-2 text-neutral-500">
+          <Target size={14} strokeWidth={1.75} />
+          <span className="section-label">Lead interest</span>
         </div>
         {editable && onOutcomeStatusChange ? (
           <select
@@ -152,6 +152,9 @@ export function DualStatusContainers({
   );
 }
 
+const SELECT_CHEVRON =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")";
+
 function FilterField({
   icon: Icon,
   label,
@@ -160,7 +163,7 @@ function FilterField({
   allLabel,
   options,
 }: {
-  icon: ComponentType<{ size?: number; className?: string }>;
+  icon: ComponentType<{ size?: number; className?: string; strokeWidth?: number }>;
   label: string;
   value: string;
   onChange: (value: string) => void;
@@ -169,17 +172,15 @@ function FilterField({
 }) {
   return (
     <label className="flex flex-col gap-1.5 min-w-0 flex-1 sm:flex-none sm:min-w-[10.5rem]">
-      <span className="inline-flex items-center gap-1.5 text-[10px] font-medium text-stone-500 dark:text-stone-400 px-0.5">
-        <Icon size={12} className="text-gold/80" />
+      <span className="section-label inline-flex items-center gap-1.5 px-0.5">
+        <Icon size={12} strokeWidth={1.75} />
         {label}
       </span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="appearance-none py-2.5 pl-3 pr-8 bg-white dark:bg-stone-950 border border-stone-200 dark:border-stone-700 rounded-xl text-[13px] text-stone-700 dark:text-stone-200 outline-none focus:ring-2 focus:ring-gold/25 focus:border-gold/40 min-h-[42px] w-full cursor-pointer bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat"
-        style={{
-          backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a8a29e' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E")`,
-        }}
+        className="appearance-none py-2.5 pl-3 pr-8 bg-white border border-neutral-200 rounded-lg text-[13px] text-neutral-700 input-base min-h-[42px] w-full cursor-pointer bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat"
+        style={{ backgroundImage: SELECT_CHEVRON }}
       >
         <option value="all">{allLabel}</option>
         {options.map((opt) => (

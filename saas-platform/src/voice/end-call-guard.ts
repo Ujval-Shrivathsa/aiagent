@@ -14,6 +14,10 @@ export type EndCallGuardInput = {
   batchHasNotInterested: boolean;
   /** PDF outbound flow — short scripted closes are allowed after customer spoke. */
   isOutbound?: boolean;
+  /** 10-second silence timeout reached (cold-call spec trigger 3). */
+  silenceTimeoutClose?: boolean;
+  /** Busy / call-back-later close line spoken (cold-call spec trigger 4). */
+  busyCallbackClose?: boolean;
 };
 
 export type EndCallGuardResult = {
@@ -31,6 +35,16 @@ export function shouldAllowEndCall(input: EndCallGuardInput): EndCallGuardResult
 
   if (customerClearGoodbye) {
     return { allow: true, reason: 'customer_clear_goodbye' };
+  }
+
+  // Cold-call spec trigger 3: 10s silence timeout close — always allowed.
+  if (input.silenceTimeoutClose) {
+    return { allow: true, reason: 'silence_timeout_close' };
+  }
+
+  // Cold-call spec trigger 4: busy / call-back-later close — always allowed.
+  if (input.busyCallbackClose) {
+    return { allow: true, reason: 'busy_callback_close' };
   }
 
   if (batchHasNotInterested && customerUtteranceCount >= 1) {

@@ -11,21 +11,30 @@ import { evaluateBargeIn, evaluateLocalSpeech } from '../turn-policy';
 import { isSpeechLike, shouldOpenGate } from '../speech-likelihood';
 
 describe('audio-pipeline-config', () => {
-  it('loads stable turn-detection defaults (avoid mid-speech cuts)', () => {
+  it('loads the sharp-hearing / fast-turn contract (final requirement)', () => {
     const cfg = loadAudioPipelineConfig();
-    assert.equal(cfg.aadSilenceDurationMs, 400);
-    assert.equal(cfg.vadSilenceMs, 480);
+    // Turn-end: near-instant commit for short answers (~100ms target).
+    assert.equal(cfg.aadSilenceDurationMs, 100);
+    assert.equal(cfg.vadSilenceMs, 100);
     assert.ok(cfg.vadSilenceMs >= cfg.aadSilenceDurationMs, 'local VAD should outlast AAD');
-    assert.equal(cfg.responseWatchdogMs, 1400);
-    assert.ok(cfg.gateOpenMinRms <= 130, 'quiet speech gate threshold');
+    // Sharp hearing: quiet speech must clear all start thresholds.
+    assert.ok(cfg.gateOpenMinRms <= 100, 'quiet speech gate threshold');
+    assert.ok(cfg.vadEnergyMinRms <= 100, 'quiet speech VAD threshold');
+    assert.ok(cfg.inputGain >= 2.4, 'full gain to the model — caller never shouts');
     assert.ok(cfg.gateFloor >= 0.55, 'closed gate passes quiet speech');
     assert.ok(cfg.speechLikeGateFloor >= 0.7, 'speech-like duck boost for quiet callers');
-    assert.ok(cfg.bargeInMinRms >= 1900, 'barge-in RMS should ignore background TV');
+    // Noise immunity: barge-in stays speech-gated so TV/room noise cannot clear AI audio.
+    assert.ok(cfg.bargeInMinRms >= 1700, 'barge-in RMS should ignore background TV');
     assert.equal(cfg.bargeInRequireGateOpen, true);
+    // Fast interruption: arms quickly, but speech-like frames only.
+    assert.ok(cfg.bargeInMinMs <= 260, 'barge-in arms fast for real speech');
     assert.ok(cfg.gateReleaseMs >= 200);
     assert.ok(cfg.gateFloor >= 0.15, 'closed gate should still pass speech to Gemini');
-    assert.match(cfg.aadEndSensitivity, /LOW|MEDIUM/);
+    // AAD: HIGH sensitivity on both edges — first syllable in, quick commit out.
+    assert.match(cfg.aadEndSensitivity, /HIGH|MEDIUM/);
     assert.match(cfg.aadStartSensitivity, /HIGH/);
+    // Recovery budget: stuck-state failsafe fires fast.
+    assert.ok(cfg.responseWatchdogMs <= 1400, 'recovery ladder arms quickly');
   });
 
   it('honours env overrides', () => {
@@ -41,22 +50,22 @@ describe('audio-pipeline-config', () => {
 });
 
 describe('tts speech-config', () => {
-  it('defaults to auto TTS for Kanglish mix', () => {
+  it('defaults to kn-IN TTS for Kannada-first cold calls', () => {
     const prevLang = process.env.VOICE_TTS_LANGUAGE_CODE;
     const prevVoice = process.env.VOICE_TTS_VOICE_NAME;
     delete process.env.VOICE_TTS_LANGUAGE_CODE;
     delete process.env.VOICE_TTS_VOICE_NAME;
     try {
       const settings = loadLiveSpeechSettings();
-      assert.equal(settings.languageCode, null);
+      assert.equal(settings.languageCode, 'kn-IN');
       assert.equal(settings.voiceName, 'Kore');
       const cfg = buildLiveSpeechConfig(settings);
-      assert.equal(cfg.languageCode, undefined);
+      assert.equal(cfg.languageCode, 'kn-IN');
       assert.deepEqual(
         (cfg.voiceConfig as any).prebuiltVoiceConfig.voiceName,
         'Kore'
       );
-      assert.match(describeSpeechConfig(settings), /auto/);
+      assert.match(describeSpeechConfig(settings), /kn-IN/);
     } finally {
       if (prevLang === undefined) delete process.env.VOICE_TTS_LANGUAGE_CODE;
       else process.env.VOICE_TTS_LANGUAGE_CODE = prevLang;

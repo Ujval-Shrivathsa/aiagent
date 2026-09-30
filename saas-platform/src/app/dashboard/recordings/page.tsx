@@ -14,7 +14,7 @@ import {
   RefreshCw,
   Headphones,
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "motion/react";
 import { DashboardShell, DashboardCard, StatCard } from "@/components/dashboard/Shell";
 
 type RecordingItem = {
@@ -138,18 +138,18 @@ export default function RecordingsPage() {
             type="button"
             onClick={fetchRecordings}
             disabled={loading}
-            className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 px-4 sm:px-5 py-2.5 rounded-2xl flex items-center justify-center gap-2 hover:shadow-md transition-all dark:text-stone-200 text-sm font-semibold disabled:opacity-50 min-h-[44px] w-full sm:w-auto"
+            className="btn-secondary w-full sm:w-auto"
           >
-            <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+            <RefreshCw size={16} strokeWidth={1.75} className={loading ? "animate-spin" : ""} />
             Refresh
           </button>
         }
       >
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 lg:gap-6 mb-6 sm:mb-10">
-          <StatCard label="Total Calls" value={String(stats.total)} icon={Mic} color="text-gold" delay={0} />
-          <StatCard label="Outbound" value={String(stats.outbound)} icon={PhoneOutgoing} color="text-blue-500" delay={50} />
-          <StatCard label="Inbound" value={String(stats.inbound)} icon={PhoneIncoming} color="text-emerald-500" delay={100} />
-          <StatCard label="Talk Time" value={`${stats.totalMin}m`} icon={Clock} color="text-purple-500" delay={150} />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-8 sm:mb-10">
+          <StatCard label="Total Calls" value={String(stats.total)} icon={Mic} delay={0} />
+          <StatCard label="Outbound" value={String(stats.outbound)} icon={PhoneOutgoing} delay={50} />
+          <StatCard label="Inbound" value={String(stats.inbound)} icon={PhoneIncoming} delay={100} />
+          <StatCard label="Talk Time" value={`${stats.totalMin}m`} icon={Clock} delay={150} />
         </div>
 
         <DashboardCard
@@ -158,25 +158,25 @@ export default function RecordingsPage() {
           actions={
             <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 w-full">
               <div className="relative flex-1 min-w-0">
-                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+                <Search size={16} strokeWidth={1.75} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
                 <input
                   type="text"
                   placeholder="Search phone…"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  className="pl-9 pr-4 py-2.5 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-gold/30 w-full min-h-[44px]"
+                  className="pl-9 pr-4 py-2.5 bg-white border border-neutral-200 rounded-full text-sm input-base w-full min-h-[44px]"
                 />
               </div>
-              <div className="flex rounded-xl overflow-hidden border border-stone-200 dark:border-stone-700 text-xs font-bold w-full sm:w-auto">
+              <div className="inline-flex bg-neutral-100 rounded-full p-1 w-full sm:w-auto">
                 {(["all", "outbound", "inbound"] as const).map((f) => (
                   <button
                     key={f}
                     type="button"
                     onClick={() => setFilter(f)}
-                    className={`flex-1 sm:flex-none px-3 sm:px-4 py-2.5 capitalize transition-colors min-h-[44px] ${
+                    className={`flex-1 sm:flex-none px-4 py-1.5 rounded-full text-sm font-medium capitalize transition-colors min-h-[36px] ${
                       filter === f
-                        ? "gold-gradient text-white"
-                        : "bg-stone-50 dark:bg-stone-800 text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
+                        ? "bg-white text-neutral-900"
+                        : "text-neutral-500 hover:text-neutral-900"
                     }`}
                   >
                     {f}
@@ -187,14 +187,14 @@ export default function RecordingsPage() {
           }
         >
           {loading && recordings.length === 0 ? (
-            <div className="py-24 flex flex-col items-center gap-3 text-stone-400">
-              <Loader2 className="animate-spin text-gold" size={36} />
-              <p className="text-xs font-bold uppercase tracking-widest">Loading recordings…</p>
+            <div className="py-24 flex flex-col items-center gap-3 text-neutral-400">
+              <Loader2 className="animate-spin" size={32} />
+              <p className="section-label">Loading recordings…</p>
             </div>
           ) : filtered.length === 0 ? (
-            <div className="py-16 sm:py-24 flex flex-col items-center gap-4 text-stone-400 px-4 sm:px-8 text-center">
-              <Headphones size={48} className="opacity-20" />
-              <p className="font-medium text-stone-600 dark:text-stone-300">No recordings yet</p>
+            <div className="py-16 sm:py-24 flex flex-col items-center gap-4 text-neutral-400 px-4 sm:px-8 text-center">
+              <Headphones size={44} strokeWidth={1.5} className="opacity-30" />
+              <p className="font-medium text-neutral-600">No recordings yet</p>
               <p className="text-sm max-w-md">
                 After a call ends, the stereo WAV and transcript appear here automatically.
               </p>
@@ -202,37 +202,37 @@ export default function RecordingsPage() {
           ) : (
             <>
               {/* Mobile / tablet cards */}
-              <div className="md:hidden divide-y divide-stone-100 dark:divide-stone-800">
+              <div className="md:hidden divide-y divide-neutral-100">
                 {filtered.map((r) => (
                   <button
                     key={r.callId}
                     type="button"
                     onClick={() => openDetail(r)}
-                    className="w-full text-left p-4 active:bg-stone-50 dark:active:bg-stone-800/40 transition-colors"
+                    className="w-full text-left p-4 active:bg-neutral-50 transition-colors"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="font-mono text-sm dark:text-stone-200 truncate">{r.phone || "—"}</p>
-                        <p className="text-[11px] text-stone-500 mt-1">{formatWhen(r.startedAt)}</p>
+                        <p className="font-mono text-sm text-neutral-900 truncate">{r.phone || "—"}</p>
+                        <p className="text-[11px] text-neutral-500 mt-1">{formatWhen(r.startedAt)}</p>
                       </div>
                       <span
-                        className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider ${
+                        className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${
                           r.outbound
-                            ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-                            : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                            ? "bg-neutral-900 text-white"
+                            : "bg-neutral-100 text-neutral-600"
                         }`}
                       >
-                        {r.outbound ? <PhoneOutgoing size={10} /> : <PhoneIncoming size={10} />}
+                        {r.outbound ? <PhoneOutgoing size={11} strokeWidth={1.75} /> : <PhoneIncoming size={11} strokeWidth={1.75} />}
                         {r.outbound ? "Out" : "In"}
                       </span>
                     </div>
-                    <div className="mt-3 flex items-center justify-between text-[11px] text-stone-500">
+                    <div className="mt-3 flex items-center justify-between text-[11px] text-neutral-500">
                       <span className="flex items-center gap-3">
-                        <span className="inline-flex items-center gap-1"><Clock size={12} />{formatDuration(r.durationSec)}</span>
+                        <span className="inline-flex items-center gap-1"><Clock size={12} strokeWidth={1.75} />{formatDuration(r.durationSec)}</span>
                         <span className="inline-flex items-center gap-1"><MessageSquare size={12} />{r.turnCount}</span>
                       </span>
-                      <span className="inline-flex items-center gap-1.5 text-gold font-bold uppercase tracking-wider">
-                        <Play size={12} />
+                      <span className="inline-flex items-center gap-1.5 text-neutral-900 font-medium">
+                        <Play size={12} strokeWidth={1.75} />
                         {r.hasAudio ? "Play" : "View"}
                       </span>
                     </div>
@@ -244,44 +244,44 @@ export default function RecordingsPage() {
               <div className="hidden md:block overflow-x-auto dashboard-scroll">
                 <table className="w-full text-left">
                   <thead>
-                    <tr className="bg-stone-50/80 dark:bg-stone-800/40 text-stone-400 text-[10px] font-black uppercase tracking-[0.2em]">
-                      <th className="px-4 lg:px-6 py-4">When</th>
-                      <th className="px-4 lg:px-6 py-4">Phone</th>
-                      <th className="px-4 lg:px-6 py-4">Direction</th>
-                      <th className="px-4 lg:px-6 py-4">Duration</th>
-                      <th className="px-4 lg:px-6 py-4">Turns</th>
-                      <th className="px-4 lg:px-6 py-4 text-right">Actions</th>
+                    <tr className="bg-neutral-50 text-neutral-400 text-xs">
+                      <th className="px-4 lg:px-6 py-4 font-normal">When</th>
+                      <th className="px-4 lg:px-6 py-4 font-normal">Phone</th>
+                      <th className="px-4 lg:px-6 py-4 font-normal">Direction</th>
+                      <th className="px-4 lg:px-6 py-4 font-normal">Duration</th>
+                      <th className="px-4 lg:px-6 py-4 font-normal">Turns</th>
+                      <th className="px-4 lg:px-6 py-4 text-right font-normal">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
+                  <tbody className="divide-y divide-neutral-100">
                     {filtered.map((r) => (
                       <tr
                         key={r.callId}
                         onClick={() => openDetail(r)}
-                        className="hover:bg-stone-50 dark:hover:bg-stone-800/30 cursor-pointer transition-colors group"
+                        className="hover:bg-neutral-50 cursor-pointer transition-colors group"
                       >
-                        <td className="px-4 lg:px-6 py-4 text-sm text-stone-600 dark:text-stone-300 whitespace-nowrap">
+                        <td className="px-4 lg:px-6 py-4 text-sm text-neutral-600 whitespace-nowrap">
                           {formatWhen(r.startedAt)}
                         </td>
-                        <td className="px-4 lg:px-6 py-4 font-mono text-sm dark:text-stone-200">
+                        <td className="px-4 lg:px-6 py-4 font-mono text-sm text-neutral-900">
                           {r.phone || "—"}
                         </td>
                         <td className="px-4 lg:px-6 py-4">
                           <span
-                            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
                               r.outbound
-                                ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-                                : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                ? "bg-neutral-900 text-white"
+                                : "bg-neutral-100 text-neutral-600"
                             }`}
                           >
-                            {r.outbound ? <PhoneOutgoing size={12} /> : <PhoneIncoming size={12} />}
+                            {r.outbound ? <PhoneOutgoing size={12} strokeWidth={1.75} /> : <PhoneIncoming size={12} strokeWidth={1.75} />}
                             {r.outbound ? "Outbound" : "Inbound"}
                           </span>
                         </td>
-                        <td className="px-4 lg:px-6 py-4 text-sm text-stone-500">{formatDuration(r.durationSec)}</td>
+                        <td className="px-4 lg:px-6 py-4 text-sm text-neutral-500">{formatDuration(r.durationSec)}</td>
                         <td className="px-4 lg:px-6 py-4">
-                          <span className="inline-flex items-center gap-1 text-sm text-stone-500">
-                            <MessageSquare size={14} />
+                          <span className="inline-flex items-center gap-1 text-sm text-neutral-500">
+                            <MessageSquare size={14} strokeWidth={1.75} />
                             {r.turnCount}
                           </span>
                         </td>
@@ -292,9 +292,9 @@ export default function RecordingsPage() {
                               e.stopPropagation();
                               openDetail(r);
                             }}
-                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-stone-100 dark:bg-stone-800 text-gold text-xs font-bold uppercase tracking-wider opacity-80 group-hover:opacity-100 hover:bg-gold/10 transition-all"
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-neutral-900 text-white text-xs font-medium opacity-70 group-hover:opacity-100 hover:opacity-100 transition-opacity"
                           >
-                            <Play size={14} />
+                            <Play size={13} strokeWidth={1.75} />
                             {r.hasAudio ? "Play" : "Transcript"}
                           </button>
                         </td>
@@ -316,45 +316,45 @@ export default function RecordingsPage() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => !detailLoading && setSelected(null)}
-              className="absolute inset-0 bg-stone-900/60 backdrop-blur-md"
+              className="absolute inset-0 bg-neutral-900/40"
             />
             <motion.div
               initial={{ opacity: 0, y: 24, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 24, scale: 0.98 }}
-              className="bg-white dark:bg-stone-900 w-full max-w-2xl max-h-[92vh] rounded-t-3xl sm:rounded-3xl shadow-2xl relative z-10 flex flex-col overflow-hidden"
+              className="bg-white w-full max-w-2xl max-h-[92vh] rounded-t-2xl sm:rounded-2xl relative z-10 flex flex-col overflow-hidden"
             >
               {detailLoading || !selected ? (
                 <div className="p-16 flex flex-col items-center gap-3">
-                  <Loader2 className="animate-spin text-gold" size={32} />
-                  <p className="text-sm text-stone-500">Loading transcript…</p>
+                  <Loader2 className="animate-spin text-neutral-400" size={28} />
+                  <p className="text-sm text-neutral-500">Loading transcript…</p>
                 </div>
               ) : (
                 <>
-                  <div className="p-4 sm:p-6 lg:p-8 border-b border-stone-100 dark:border-stone-800 flex justify-between items-start gap-3">
+                  <div className="p-4 sm:p-6 lg:p-8 border-b border-neutral-100 flex justify-between items-start gap-3">
                     <div className="min-w-0">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-gold mb-1">
+                      <p className="section-label mb-1">
                         {selected.outbound ? "Outbound call" : "Inbound call"}
                       </p>
-                      <h2 className="text-xl sm:text-2xl font-serif font-bold dark:text-white truncate">
+                      <h2 className="text-xl sm:text-2xl font-semibold tracking-tight text-neutral-900 truncate">
                         {selected.phone || "Unknown number"}
                       </h2>
-                      <p className="text-xs sm:text-sm text-stone-500 mt-1">
+                      <p className="text-xs sm:text-sm text-neutral-500 mt-1">
                         {formatWhen(selected.startedAt)} · {formatDuration(selected.durationSec)}
                       </p>
                     </div>
                     <button
                       type="button"
                       onClick={() => setSelected(null)}
-                      className="p-2.5 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-xl shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"
+                      className="p-2.5 hover:bg-neutral-100 rounded-full transition-colors shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center"
                     >
-                      <X size={22} className="text-stone-400" />
+                      <X size={20} strokeWidth={1.75} className="text-neutral-400" />
                     </button>
                   </div>
 
                   {selected.hasAudio && (
                     <div className="px-4 sm:px-6 lg:px-8 pt-4 sm:pt-6">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-stone-400 mb-2">
+                      <p className="section-label mb-2">
                         Recording (L = customer · R = AI)
                       </p>
                       <audio
@@ -366,11 +366,11 @@ export default function RecordingsPage() {
                   )}
 
                   <div className="p-4 sm:p-6 lg:p-8 overflow-y-auto flex-1 space-y-3 sm:space-y-4">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-stone-400">
+                    <p className="section-label">
                       Conversation
                     </p>
                     {selected.conversation.length === 0 ? (
-                      <p className="text-sm text-stone-400 italic py-8 text-center">No transcript captured.</p>
+                      <p className="text-sm text-neutral-400 py-8 text-center">No transcript captured.</p>
                     ) : (
                       selected.conversation.map((turn, i) => (
                         <div
@@ -380,11 +380,11 @@ export default function RecordingsPage() {
                           <div
                             className={`max-w-[90%] sm:max-w-[85%] rounded-2xl px-3.5 sm:px-4 py-2.5 sm:py-3 text-sm leading-relaxed ${
                               turn.speaker === "customer"
-                                ? "bg-stone-100 dark:bg-stone-800 text-stone-800 dark:text-stone-200 rounded-bl-md"
-                                : "gold-gradient text-white rounded-br-md shadow-md"
+                                ? "bg-neutral-100 text-neutral-800 rounded-bl-md"
+                                : "bg-neutral-900 text-white rounded-br-md"
                             }`}
                           >
-                            <p className="text-[9px] font-black uppercase tracking-wider opacity-70 mb-1">
+                            <p className="text-[10px] font-medium uppercase tracking-wider opacity-60 mb-1">
                               {turn.speaker === "customer" ? "Customer" : "Bhoomi"} · {turn.timestamp}
                             </p>
                             {turn.text}

@@ -2,8 +2,7 @@
  * Cache outbound system instructions when Plivo answer URL fires (callee picked up)
  * so the media-stream handler can skip rebuild latency on connect.
  */
-import { resolveCustomerIdentity } from './customer-identity/resolve-identity';
-import { buildOutboundSystemInstruction } from './Outbound/callguide';
+import { buildOutboundSystemInstruction } from './kannada-script';
 
 type CachedOpening = {
   instruction: string;
@@ -17,18 +16,12 @@ function phoneKey(phoneDigits: string): string {
   return phoneDigits.replace(/\D/g, '').slice(-10);
 }
 
-export function cacheOutboundOpeningInstruction(phoneDigits: string, customerName: string): void {
+export function cacheOutboundOpeningInstruction(phoneDigits: string, _customerName: string): void {
   const key = phoneKey(phoneDigits);
   if (!key) return;
-  const name = customerName.trim();
-  const blacklisted = ['customer', 'contact', 'lead', 'unknown', 'null', 'undefined', 'unnamed', ''];
-  const identity =
-    name && !blacklisted.includes(name.toLowerCase())
-      ? resolveCustomerIdentity({ rawName: name.replace(/_/g, ' '), source: 'campaign' })
-      : null;
   const currentDateStr = new Date().toLocaleDateString('en-IN');
   cache.set(key, {
-    instruction: buildOutboundSystemInstruction(currentDateStr, identity, { deferProjectReference: true }),
+    instruction: buildOutboundSystemInstruction(currentDateStr, undefined, { deferProjectReference: true }),
     at: Date.now(),
   });
 }

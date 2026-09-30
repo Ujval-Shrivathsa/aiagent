@@ -6,6 +6,14 @@
 const MIN_CHUNK_CHARS = 12;
 const MIN_OVERLAP_CHARS = 18;
 const DUPLICATE_OVERLAP_RATIO = 0.55;
+/**
+ * STRICT no-repeat rule: a turn whose tokens largely overlap something already
+ * spoken counts as a repeat EVEN IF REWORDED (same info in different words).
+ * Containment = |A∩B| / min(|A|,|B|) so a shortened version of a prior line
+ * still matches, while genuinely NEW information stays below the threshold.
+ */
+const MIN_TOKEN_SET_SIZE = 4;
+const TOKEN_CONTAINMENT_RATIO = 0.65;
 
 export function normalizeForDedup(text: string): string {
   return String(text || '')
@@ -45,6 +53,21 @@ function overlapRatio(a: string, b: string): number {
   return 0;
 }
 
+function tokenSet(text: string): Set<string> {
+  return new Set(normalizeForDedup(text).split(' ').filter(Boolean));
+}
+
+/** Fraction of the smaller token set covered by the larger one (0..1). */
+function tokenContainment(a: string, b: string): number {
+  const sa = tokenSet(a);
+  const sb = tokenSet(b);
+  if (sa.size < MIN_TOKEN_SET_SIZE || sb.size < MIN_TOKEN_SET_SIZE) return 0;
+  const [smaller, larger] = sa.size <= sb.size ? [sa, sb] : [sb, sa];
+  let hit = 0;
+  for (const t of smaller) if (larger.has(t)) hit += 1;
+  return hit / smaller.size;
+}
+
 export function isDuplicateOutboundSpeech(
   text: string,
   spoken: ReadonlySet<string>,
@@ -56,6 +79,8 @@ export function isDuplicateOutboundSpeech(
   for (const prior of spoken) {
     if (prior.length < 14) continue;
     if (overlapRatio(norm, prior) >= DUPLICATE_OVERLAP_RATIO) return true;
+    // STRICT: reworded repeats — same information, different words.
+    if (tokenContainment(norm, prior) >= TOKEN_CONTAINMENT_RATIO) return true;
   }
 
   const chunks = splitSpeakableChunks(text);
@@ -85,5 +110,12 @@ export function allowsRepeatReplay(
   repeatReplayPending: boolean,
 ): boolean {
   if (!repeatReplayPending || !lastPlayedRaw.trim()) return false;
-  return overlapRatio(normalizeForDedup(text), normalizeForDedup(lastPlayedRaw)) >= DUPLICATE_OVERLAP_RATIO;
+  const norm = normalizeForDedup(text);
+  const prev = normalizeForDedup(lastPlayedRaw);
+  // The ONLY allowed repeat: the caller explicitly asked, and the replay is the
+  // immediately-previous message (verbatim or a close rewording of it).
+  return (
+    overlapRatio(norm, prev) >= DUPLICATE_OVERLAP_RATIO ||
+    tokenContainment(norm, prev) >= TOKEN_CONTAINMENT_RATIO
+  );
 }

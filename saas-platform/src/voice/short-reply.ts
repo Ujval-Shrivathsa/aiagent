@@ -4,7 +4,7 @@
  */
 
 const OPENING_ECHO =
-  /this is bhoomi|alliance square|residential site in mys(?:ore|uru)|looking for a (?:residential )?(?:site|plot) in mys(?:ore|uru)|are you looking for a (?:residential )?(?:site|plot)|hi,? are you looking|hello,? are you looking|ನೋಡ್ತಿದ್ದೀರಾ|ಮಾತಾಡ್ತಿದ್ದೀನಿ|enquiry ಮಾಡಿದ್ದೀರಲ್ಲ|ನಮಸ್ಕಾರ\s*ಸರ್/i;
+  /this is (?:bhoomi|priya)|i am priya|alliance square|residential site in mys(?:ore|uru)|looking for a (?:residential )?(?:site|plot) in mys(?:ore|uru)|are you looking for a (?:residential )?(?:site|plot)|hi,? are you looking|hello,? are you looking|site (?:ನೋಡ್ತಿದೀರಾ|ನೋಡ್ತಿದ್ದೀರಾ)|ಸೈಟ್\s*ನೋಡ|ಅಲೈಯನ್ಸ್\s*ಸ್ಕ್ವೇರ್|ನಾನು\s*ಪ್ರಿಯಾ|ನೋಡ್ತಿದ್ದೀರಾ|ನೋಡ್ತಿದೀರಾ|ಮಾತಾಡ್ತಿದ್ದೀನಿ|ಮಾತಾಡ್ತಿದೀನಿ|enquiry ಮಾಡಿದ್ದೀರಲ್ಲ|ನಮಸ್ಕಾರ\s*ಸರ್/i;
 
 /** Roman + Kannada script short replies common on Mysuru calls. */
 const SHORT_AFFIRMATIVE =

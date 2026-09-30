@@ -184,6 +184,56 @@ export async function applyProviderTerminalStatus(
   return { ...result, mapped: to };
 }
 
+/**
+ * Launch Campaign means “dial now”. Stuck calling/answered rows (missed hangup
+ * webhooks) must become dialable immediately, except numbers currently live on Plivo.
+ */
+export async function releaseCallingLeadsForRedial(
+  campaignId: string,
+  skipPhoneTails: string[] = [],
+): Promise<number> {
+  const skip = skipPhoneTails.map((t) => t.replace(/\D/g, '').slice(-10)).filter((t) => t.length >= 10);
+  const result = await prisma.lead.updateMany({
+    where: {
+      campaignId,
+      status: { in: [LEAD_STATUS.CALLING, LEAD_STATUS.ANSWERED] },
+      ...(skip.length
+        ? { NOT: { OR: skip.map((tail) => ({ phone: { contains: tail } })) } }
+        : {}),
+    },
+    data: {
+      status: LEAD_STATUS.NOT_ANSWERED,
+      callStatus: LEAD_STATUS.NOT_ANSWERED,
+      outcomeStatus: OUTCOME_UNKNOWN,
+    },
+  });
+  return result.count;
+}
+
+/** Unstick leads left in calling/answered when hangup webhooks never arrived. */
+export async function releaseStaleCallingLeads(
+  campaignId: string,
+  staleMs = 3 * 60 * 1000,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - staleMs);
+  const result = await prisma.lead.updateMany({
+    where: {
+      campaignId,
+      status: { in: [LEAD_STATUS.CALLING, LEAD_STATUS.ANSWERED] },
+      OR: [
+        { lastCalledAt: { lt: cutoff } },
+        { lastCalledAt: null, createdAt: { lt: cutoff } },
+      ],
+    },
+    data: {
+      status: LEAD_STATUS.NOT_ANSWERED,
+      callStatus: LEAD_STATUS.NOT_ANSWERED,
+      outcomeStatus: OUTCOME_UNKNOWN,
+    },
+  });
+  return result.count;
+}
+
 export function assertCanTransition(from: string, to: string): void {
   if (!canTransition(from, to)) {
     throw new Error(`Invalid lead status transition: ${from} → ${to}`);

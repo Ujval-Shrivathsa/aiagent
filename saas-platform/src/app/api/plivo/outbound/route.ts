@@ -3,11 +3,23 @@ import { callLog } from '@/voice/call-capture/logger';
 import { cacheOutboundOpeningInstruction } from '@/voice/opening-prewarm-cache';
 
 function wsHostFromRequest(req: Request): string {
-  const fromEnv = (process.env.APP_URL || process.env.VOICE_SERVER_URL || '')
+  const candidates = [
+    process.env.VOICE_SERVER_URL,
+    process.env.APP_URL,
+    req.headers.get('host'),
+  ];
+  for (const raw of candidates) {
+    const host = String(raw || '')
+      .replace(/^https?:\/\//, '')
+      .replace(/\/$/, '');
+    if (!host) continue;
+    const lower = host.toLowerCase();
+    if (lower.includes('localhost') || lower.includes('ngrok') || lower.includes('vercel.app')) continue;
+    return host;
+  }
+  return String(process.env.VOICE_SERVER_URL || process.env.APP_URL || '')
     .replace(/^https?:\/\//, '')
     .replace(/\/$/, '');
-  const fromHeader = (req.headers.get('host') || '').replace(/\/$/, '');
-  return fromEnv || fromHeader;
 }
 
 function xmlEscape(value: string): string {
