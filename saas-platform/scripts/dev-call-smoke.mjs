@@ -2,16 +2,22 @@
  * DEV-ONLY smoke test — simulates a Plivo media-stream call against the local
  * dev server WITHOUT touching the database (no customerPhone param).
  *
- * Scenario timeline:
- *   0.0s  connect + start event
- *   0-2s  silence (agent should speak the opening)
- *   2-3.2s "speech" burst (noise — local VAD should fire USER_SPEAKING)
- *   3.2-9s silence (agent should reply / stay quiet, keep listening)
- *   9-10s "speech" burst
- *   10-24s LONG silence (quiet-caller reprompt may fire; call must NOT end)
+ * AUDIO DISCRIMINATION SCENARIO (speech-first pipeline validation):
+ *   0.0-2s   silence (agent speaks the opening)
+ *   2-6s     FAN/AC hum: steady 120Hz sine, LOW crest — must NEVER fire VAD
+ *   6-10s    WHITE-NOISE bursts (keyboard/static-like): HIGH crest, flat
+ *            spectrum — must NEVER fire VAD (the old rms≈5000 bug)
+ *   10-11s   quiet speech-level burst — MODERATE crest, speech-shaped:
+ *            this SHOULD fire VAD (the quiet-caller path)
+ *   11-13.5s silence (agent may reply to the quiet burst; line stays open)
+ *   13.5-15s SHORT speech burst (short-answer profile, e.g. "ಹೌದು")
+ *   15-24s   silence (quiet-caller reprompt may fire; call must NOT end)
  *
- * PASS criteria: server keeps the WS open for the full run and sends >=2
- * audio bursts back (opening + at least one reply/reprompt).
+ * PASS criteria:
+ *   - line stays open the full run, ≥2 audio bursts back
+ *     (opening + at least one reply/reprompt)
+ *   - server log shows NO "[VAD] Customer speech START" during the fan and
+ *     white-noise phases, and AT LEAST ONE START during the speech phases.
  *
  * Run: node scripts/dev-call-smoke.mjs
  */
@@ -34,13 +40,46 @@ function pcmToMuLaw(sample) {
 }
 const silenceByte = pcmToMuLaw(0);
 
-function frame(kind) {
-  // 160 samples = 20ms @ 8kHz
+// 160 samples = 20ms @ 8kHz
+function fanFrame(tSec) {
+  // Steady 120Hz hum + mild harmonic — the classic AC/fan signature.
   const buf = Buffer.alloc(160);
   for (let i = 0; i < 160; i++) {
-    buf[i] = kind === 'speech' ? pcmToMuLaw(Math.round((Math.random() * 2 - 1) * 9000)) : silenceByte;
+    const t = tSec + i / 8000;
+    const v = 2400 * Math.sin(2 * Math.PI * 120 * t) + 700 * Math.sin(2 * Math.PI * 240 * t);
+    buf[i] = pcmToMuLaw(Math.round(v));
   }
   return buf.toString('base64');
+}
+function whiteNoiseFrame() {
+  const buf = Buffer.alloc(160);
+  for (let i = 0; i < 160; i++) {
+    buf[i] = pcmToMuLaw(Math.round((Math.random() * 2 - 1) * 9000));
+  }
+  return buf.toString('base64');
+}
+function speechBurstFrame(tSec, opts = {}) {
+  // Speech-shaped: 180Hz glottal harmonics + formant-ish partials, periodic
+  // consonant-like spikes (high crest), and syllable envelope (on/off). The
+  // envelope makes it look like short bursts of speech, not steady tone.
+  const amp = opts.amp ?? 3000;
+  const buf = Buffer.alloc(160);
+  for (let i = 0; i < 160; i++) {
+    const t = tSec + i / 8000;
+    const syllable = Math.sin(2 * Math.PI * 3.2 * t) > -0.15 ? 1 : 0.25;
+    const spike = i % 53 < 7 ? 2.2 : 1;
+    const v =
+      amp * syllable * spike *
+      (Math.sin(2 * Math.PI * 180 * t) +
+        0.55 * Math.sin(2 * Math.PI * 700 * t) +
+        0.35 * Math.sin(2 * Math.PI * 1300 * t) +
+        0.12 * (Math.random() * 2 - 1));
+    buf[i] = pcmToMuLaw(Math.round(v));
+  }
+  return buf.toString('base64');
+}
+function frame(payload) {
+  return payload;
 }
 
 const ws = new WebSocket(URL);
@@ -58,11 +97,17 @@ ws.on('open', () => {
   const t0 = Date.now();
   const timer = setInterval(() => {
     const t = Date.now() - t0;
-    const speaking =
-      (t >= 2000 && t < 3200) || (t >= 9000 && t < 10000);
+    let payload;
+    if (t < 2000) payload = null; // silence
+    else if (t < 6000) payload = fanFrame(t / 1000);
+    else if (t < 10000) payload = whiteNoiseFrame();
+    else if (t < 11000) payload = speechBurstFrame(t / 1000, { amp: 2200 }); // quiet speech
+    else if (t < 13500) payload = null; // silence
+    else if (t < 15000) payload = speechBurstFrame(t / 1000, { amp: 3200 }); // short reply
+    else payload = null;
     ws.send(JSON.stringify({
       event: 'media',
-      media: { payload: frame(speaking ? 'speech' : 'silence'), timestamp: String(t) },
+      media: { payload: payload ?? Buffer.from(Buffer.alloc(160, silenceByte)).toString('base64'), timestamp: String(t) },
     }));
     if (t >= RUN_MS) {
       clearInterval(timer);

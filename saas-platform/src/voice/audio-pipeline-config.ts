@@ -4,23 +4,31 @@
  * Stages (do not conflate):
  *   1. raw telephony mu-law  — recording only
  *   2. denoised PCM          — HP + adaptive gate + gain (this module)
- *   3. speech detection      — local VAD + Gemini AAD
+ *   3. speech detection      — classifyFrame + debounced gate + local VAD + Gemini AAD
  *   4. transcription         — Gemini inputAudioTranscription
  *   5. assistant generation  — Gemini Live AUDIO modality
  *
  * PERFORMANCE CONTRACT (final requirement — do not regress):
- *   - Sharpest possible hearing: low energy floors, high start-of-speech
- *     sensitivity, full gain to the model. The caller must never need to
- *     raise their voice or repeat a turn.
+ *   - SPEECH-FIRST DETECTION: a caller turn STARTS only after ~60ms of
+ *     consecutive speech-class frames (band-energy + flatness + crest
+ *     evidence). Single noisy frames — doors, keyboard, one loud packet —
+ *     can NEVER start a turn. This is the fix for "background noise
+ *     triggers the agent".
+ *   - SHARP HEARING: energy thresholds stay LOW (85 RMS floor-relative) and
+ *     classification requires positive speech evidence, not high volume —
+ *     normal and quiet speech are detected without shouting. This is the
+ *     fix for "users must scream": the old floor tracked UP under sustained
+ *     speech; the classification-driven floor now NEVER tracks up on
+ *     speech-class frames.
  *   - RELIABLE turn-end over 8kHz telephony: ~250ms local VAD + ~250ms AAD
- *     commit. 100ms committed turns on intra-word pauses (the old bug:
- *     "agent never hears my answer"), so the turn boundary now absorbs
- *     normal Kannada word gaps while still replying in well under a second.
- *   - Fast interruption: barge-in arms in ~150ms and only for speech-like
+ *     commit (100ms committed half-spoken turns — the old bug).
+ *   - Fast interruption: barge-in arms in ~150ms and only for speech-class
  *     frames, so room noise still cannot clear the agent's audio.
  *   - STABILITY: silence NEVER ends a call. The quiet-caller reprompt cycle
  *     loops forever (see kannada-script.ts); recovery ends in resume-and-
  *     listen, never in a hangup.
+ *   - ALWAYS FORWARD: every caller frame reaches Gemini (classification
+ *     shapes only VAD/barge-in/floor — it never gates the audio stream).
  *
  * All values are overridable via env so we can tune without code changes.
  */
@@ -46,32 +54,46 @@ export type AudioPipelineConfig = {
   inputGain: number;
   noiseFloorMin: number;
   noiseFloorMax: number;
+  // --- Noise-floor adaptation (classification-driven) ---
+  floorSteadyRate: number;
+  floorTransientRate: number;
+  floorAiPlayingSteadyRate: number;
+  floorAiPlayingTransientRate: number;
+  floorSpeechRate: number;
+  floorQuietPullMult: number;
+  floorQuietPullRate: number;
+  // --- Noise gate (barge-in eligibility only — audio is always forwarded) ---
   gateOpenMinRms: number;
   gateOpenMaxRms: number;
   gateFloorMult: number;
   gateCloseRatio: number;
   gateReleaseMs: number;
-  gateFloor: number;
   bargeInMinRms: number;
   bargeInFloorMult: number;
   bargeInMinMs: number;
   /** Require the noise gate to be open before local barge-in fires. */
   bargeInRequireGateOpen: boolean;
+  // --- Frame classification (speech vs noise vs ambiguous) ---
+  speechScoreMin: number;
+  speechAmbiguousScoreMin: number;
+  speechMaxLowEnergyRatio: number;
+  speechMaxFlatness: number;
+  speechSilentFloorMult: number;
+  // --- Debounced speech gate (turn START) ---
+  speechGateStartMs: number;
+  speechGateWindowMs: number;
+  speechGateSpeakingToleranceMs: number;
+  // --- Local VAD (turn END) ---
   vadEnergyMinRms: number;
   vadEnergyFloorMult: number;
   vadSilenceMs: number;
+  // --- Gemini AAD ---
   aadSilenceDurationMs: number;
   aadPrefixPaddingMs: number;
   aadEndSensitivity: string;
   aadStartSensitivity: string;
   /** Nudge Gemini if no audio reply this long after customer speech ends. */
   responseWatchdogMs: number;
-  /** Crest factor / ZCR — speech vs steady background (TV, fan). */
-  speechMinCrestFactor: number;
-  speechMinZeroCrossRate: number;
-  speechQuietFloorMult: number;
-  /** Closed-gate gain boost when frame is speech-like (quiet caller pickup). */
-  speechLikeGateFloor: number;
   voiceDebug: boolean;
 };
 
@@ -82,21 +104,50 @@ export function loadAudioPipelineConfig(): AudioPipelineConfig {
     inputGain: num(process.env.VOICE_INPUT_GAIN, 3.1),
     noiseFloorMin: num(process.env.VOICE_NOISE_FLOOR_MIN, 30),
     noiseFloorMax: num(process.env.VOICE_NOISE_FLOOR_MAX, 750),
-    // Open the gate for very quiet speech (≈85 RMS ≈ 3× typical noise floor).
+    // Floor adaptation: sustained noise (fan/AC) converges at 6%/frame (~1s
+    // to converge); transients barely move it. SPEECH NEVER RAISES THE FLOOR —
+    // enforced structurally in nextNoiseFloorRms (the old fixed-rate blend
+    // tracked the floor up under a continuous speaker until only shouting
+    // cleared the thresholds — the scream-trap). floorSpeechRate is kept for
+    // env backward-compat only and is ignored by the adaptation.
+    floorSteadyRate: num(process.env.VOICE_FLOOR_STEADY_RATE, 0.06),
+    floorTransientRate: num(process.env.VOICE_FLOOR_TRANSIENT_RATE, 0.008),
+    floorAiPlayingSteadyRate: num(process.env.VOICE_FLOOR_AI_STEADY_RATE, 0.012),
+    floorAiPlayingTransientRate: num(process.env.VOICE_FLOOR_AI_TRANSIENT_RATE, 0.003),
+    floorSpeechRate: num(process.env.VOICE_FLOOR_SPEECH_RATE, 0),
+    floorQuietPullMult: num(process.env.VOICE_FLOOR_QUIET_PULL_MULT, 1.9),
+    floorQuietPullRate: num(process.env.VOICE_FLOOR_QUIET_PULL_RATE, 0.07),
+    // Gate: opens on speech-class frames above the floor-relative threshold;
+    // eligibility signal for local barge-in ONLY.
     gateOpenMinRms: num(process.env.VOICE_GATE_OPEN_MIN_RMS, 85),
     gateOpenMaxRms: num(process.env.VOICE_GATE_OPEN_MAX_RMS, 1100),
     gateFloorMult: num(process.env.VOICE_GATE_FLOOR_MULT, 1.75),
     gateCloseRatio: num(process.env.VOICE_GATE_CLOSE_RATIO, 0.6),
     gateReleaseMs: num(process.env.VOICE_GATE_RELEASE_MS, 220),
-    gateFloor: num(process.env.VOICE_GATE_FLOOR, 0.72),
-    // Fast interruption: arms in ~150ms but only for speech-like frames —
-    // TV/room noise still cannot clear AI audio. Absolute floor lowered to
-    // 1700 so a NORMAL-volume interruption is never ignored.
+    // Fast interruption: arms in ~150ms but only for speech-class frames —
+    // TV/room noise still cannot clear AI audio. Absolute floor kept at 1700.
     bargeInMinRms: num(process.env.VOICE_BARGE_IN_MIN_RMS, 1700),
     bargeInFloorMult: num(process.env.VOICE_BARGE_IN_FLOOR_MULT, 6.5),
     bargeInMinMs: num(process.env.VOICE_BARGE_IN_MIN_MS, 150),
     bargeInRequireGateOpen: str(process.env.VOICE_BARGE_IN_REQUIRE_GATE, '1') !== '0',
+    // Classification: positive evidence must clear 1.0 for 'speech';
+    // low-band rumble (fan/AC/traffic) and flat-spectrum hiss (keyboard,
+    // static) are NEGATIVE evidence. Ambiguous band keeps the frame
+    // harmless-but-forwarded.
+    speechScoreMin: num(process.env.VOICE_SPEECH_SCORE_MIN, 1.0),
+    speechAmbiguousScoreMin: num(process.env.VOICE_SPEECH_AMBIGUOUS_MIN, 0.55),
+    speechMaxLowEnergyRatio: num(process.env.VOICE_SPEECH_MAX_LOW_RATIO, 0.82),
+    speechMaxFlatness: num(process.env.VOICE_SPEECH_MAX_FLATNESS, 0.78),
+    speechSilentFloorMult: num(process.env.VOICE_SPEECH_SILENT_FLOOR_MULT, 1.1),
+    // Debounced gate: ~3 consecutive speech frames (60ms) start a turn; the
+    // candidate window forgives one diphthong gap; inside a turn, ≤140ms of
+    // ambiguous frames never splits the turn. Onset cost is hidden inside
+    // the 120ms AAD prefix padding — no perceived latency.
+    speechGateStartMs: num(process.env.VOICE_SPEECH_GATE_START_MS, 60),
+    speechGateWindowMs: num(process.env.VOICE_SPEECH_GATE_WINDOW_MS, 90),
+    speechGateSpeakingToleranceMs: num(process.env.VOICE_SPEECH_GATE_TOLERANCE_MS, 140),
     // VAD start threshold ≈ half a quiet "yes" — soft speech still counts.
+    // END-side only now: the START side is owned by the debounced gate.
     vadEnergyMinRms: num(process.env.VOICE_VAD_ENERGY_MIN_RMS, 85),
     vadEnergyFloorMult: num(process.env.VOICE_VAD_ENERGY_FLOOR_MULT, 1.45),
     // Turn-end: ~250ms local VAD + ~250ms AAD. 100ms was TOO aggressive on
@@ -115,12 +166,6 @@ export function loadAudioPipelineConfig(): AudioPipelineConfig {
     // Recovery budget: nudge within ~0.7s of speech end, full recovery
     // ladder (nudge → escalate → regenerate) inside ~2s. See speech-recovery.ts.
     responseWatchdogMs: num(process.env.VOICE_RESPONSE_WATCHDOG_MS, 700),
-    // Speech-like: slightly relaxed crest floor accepts soft/hoarse voices;
-    // ZCR still rejects steady TV/fan/AC tones.
-    speechMinCrestFactor: num(process.env.VOICE_SPEECH_MIN_CREST, 1.8),
-    speechMinZeroCrossRate: num(process.env.VOICE_SPEECH_MIN_ZCR, 0.03),
-    speechQuietFloorMult: num(process.env.VOICE_SPEECH_QUIET_FLOOR_MULT, 1.08),
-    speechLikeGateFloor: num(process.env.VOICE_SPEECH_LIKE_GATE_FLOOR, 0.88),
     voiceDebug: str(process.env.VOICE_DEBUG, '') === '1' || str(process.env.LATENCY_DEBUG, '') === '1',
   };
 }

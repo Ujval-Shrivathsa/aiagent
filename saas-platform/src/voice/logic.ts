@@ -58,7 +58,18 @@ import {
   type FollowLanguage,
 } from '../voice/language/language-follow';
 import { evaluateBargeIn, evaluateLocalSpeech } from '../voice/turn-policy';
-import { analyzePcmFrame, isSpeechLike, shouldOpenGate } from '../voice/speech-likelihood';
+import {
+  analyzePcmFrame,
+  classifyFrame,
+  createSpeechGateState,
+  updateSpeechGate,
+  nextNoiseFloorRms,
+  DEFAULT_NOISE_FLOOR,
+  DEFAULT_SPEECH_CLASSIFY,
+  DEFAULT_SPEECH_GATE,
+  type NoiseFloorConfig,
+  type SpeechClassifyConfig,
+} from '../voice/speech-likelihood';
 import {
   armSpeechRecovery,
   cancelSpeechRecovery,
@@ -289,6 +300,21 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let noiseFloorRms = 150;
   const NOISE_FLOOR_MIN = audioCfg.noiseFloorMin;
   const NOISE_FLOOR_MAX = audioCfg.noiseFloorMax;
+  // Classification-driven floor adaptation (see speech-likelihood.ts):
+  // sustained noise converges fast, transients barely move the floor, and
+  // SPEECH never raises it (the old fixed-rate blend was the scream-trap).
+  const FLOOR_CFG: NoiseFloorConfig = {
+    ...DEFAULT_NOISE_FLOOR,
+    steadyRate: audioCfg.floorSteadyRate,
+    transientRate: audioCfg.floorTransientRate,
+    aiPlayingSteadyRate: audioCfg.floorAiPlayingSteadyRate,
+    aiPlayingTransientRate: audioCfg.floorAiPlayingTransientRate,
+    speechRate: audioCfg.floorSpeechRate,
+    quietPullMult: audioCfg.floorQuietPullMult,
+    quietPullRate: audioCfg.floorQuietPullRate,
+    min: NOISE_FLOOR_MIN,
+    max: NOISE_FLOOR_MAX,
+  };
   let gateOpen = false;
   let gateBelowSince: number | null = null;
   const GATE_OPEN_MIN_RMS = audioCfg.gateOpenMinRms;
@@ -314,11 +340,29 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const BARGE_IN_FLOOR_MULT = audioCfg.bargeInFloorMult;
   const BARGE_IN_MIN_MS = audioCfg.bargeInMinMs;
   const BARGE_IN_REQUIRE_GATE = audioCfg.bargeInRequireGateOpen;
-  const speechLikeConfig = {
-    minCrestFactor: audioCfg.speechMinCrestFactor,
-    minZeroCrossRate: audioCfg.speechMinZeroCrossRate,
-    quietSpeechFloorMult: audioCfg.speechQuietFloorMult,
+  // Speech-first frame classification config (positive evidence required —
+  // see speech-likelihood.ts). Replaces the old crest/ZCR-only isSpeechLike.
+  const CLASSIFY_CFG: SpeechClassifyConfig = {
+    ...DEFAULT_SPEECH_CLASSIFY,
+    speechScoreMin: audioCfg.speechScoreMin,
+    ambiguousScoreMin: audioCfg.speechAmbiguousScoreMin,
+    maxLowEnergyRatio: audioCfg.speechMaxLowEnergyRatio,
+    maxFlatnessSpeech: audioCfg.speechMaxFlatness,
+    silentFloorMult: audioCfg.speechSilentFloorMult,
   };
+  // Debounced gate: N consecutive speech-class frames required to START a
+  // caller turn — single noisy frames (door, keyboard, loud packet) can no
+  // longer fire USER_SPEAKING.
+  const GATE_CFG = {
+    ...DEFAULT_SPEECH_GATE,
+    startConsecutiveMs: audioCfg.speechGateStartMs,
+    candidateWindowMs: audioCfg.speechGateWindowMs,
+    speakingToleranceMs: audioCfg.speechGateSpeakingToleranceMs,
+  };
+  let speechGate = createSpeechGateState();
+  let sustainedNoiseFrames = 0;
+  let lastClassLogAt = 0;
+  let lastClassCounts = { speech: 0, ambiguous: 0, noise: 0, silent: 0 };
   let suppressAiOutput = false;
   let suppressRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   // Speech-recovery ladder — single failsafe for "spoke but nothing happened".
@@ -825,6 +869,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       diagLog('vad STUCK >3s without energy → force LISTENING (audio un-mute)');
       vadIsSpeaking = false;
       vadSilenceStartedAt = null;
+      speechGate = createSpeechGateState();
     }
     if (suppressAiOutput) {
       if (vadIsSpeaking || (bargeInConfirmedAt > 0 && Date.now() - bargeInConfirmedAt < 280)) {
@@ -1409,7 +1454,7 @@ OUTBOUND SCRIPT STATE (STRICT) — KANNADA ONLY, NEVER English:
 CURRENT DATE: ${currentDateStr}
 `;
 
-        console.log(`[VOICE] Audio pipeline: gain=${inputGain} gateMin=${GATE_OPEN_MIN_RMS} gateRel=${GATE_RELEASE_MS}ms bargeMinRms=${BARGE_IN_MIN_RMS} bargeHold=${BARGE_IN_MIN_MS}ms vadSilence=${VAD_SILENCE_MS}ms aadSilence=${audioCfg.aadSilenceDurationMs}ms aadEnd=${audioCfg.aadEndSensitivity} aadStart=${audioCfg.aadStartSensitivity}`);
+        console.log(`[VOICE] Audio pipeline: gain=${inputGain} class=${audioCfg.speechScoreMin}score gateStart=${audioCfg.speechGateStartMs}ms floorMax=${NOISE_FLOOR_MAX} gateRel=${GATE_RELEASE_MS}ms bargeMinRms=${BARGE_IN_MIN_RMS} bargeHold=${BARGE_IN_MIN_MS}ms vadSilence=${VAD_SILENCE_MS}ms aadSilence=${audioCfg.aadSilenceDurationMs}ms aadEnd=${audioCfg.aadEndSensitivity} aadStart=${audioCfg.aadStartSensitivity}`);
         console.log(
           `[VOICE] TTS: ${describeSpeechConfig(ttsSettings, activeTtsLanguageCode)} (Kannada-first — follows the caller's language)`,
         );
@@ -2174,37 +2219,55 @@ CURRENT DATE: ${currentDateStr}
           const frame = analyzePcmFrame(cleaned, sampleCount);
           const rms = frame.rms;
           const now = Date.now();
-          const speechLike = isSpeechLike({
-            ...frame,
-            noiseFloorRms,
-            config: speechLikeConfig,
-          });
 
+          // ---- SPEECH-FIRST FRAME CLASSIFICATION (replaces isSpeechLike) ----
+          // Every frame gets positive/negative speech evidence. 'speech' is
+          // the ONLY class that can start a turn or arm barge-in; 'ambiguous'
+          // and 'noise' are harmless (audio is ALWAYS forwarded to Gemini —
+          // classification shapes VAD/barge-in/floor, never the stream).
           const aiPlaying = now < aiPlaybackEndsAt;
           // Opening phase: keep the noise-floor/gate/VAD logic but never let
           // it clear the intro — local barge-in and playback clearing are
           // gated off until the opening question has fully played.
           const openingPhase = isOutboundCall && !openingGreetingTurnFinished;
-          if (rms < noiseFloorRms * 2) {
-            noiseFloorRms += (rms - noiseFloorRms) * 0.07;
-          } else if (aiPlaying && !speechLike && rms < noiseFloorRms * 5) {
-            noiseFloorRms += (rms - noiseFloorRms) * 0.016;
-          } else if (aiPlaying && rms < noiseFloorRms * 4.5) {
-            noiseFloorRms += (rms - noiseFloorRms) * 0.0015;
-          } else {
-            noiseFloorRms += (rms - noiseFloorRms) * 0.003;
+          const frameClass = classifyFrame({ metrics: frame, noiseFloorRms, config: CLASSIFY_CFG });
+          if (DIAG) {
+            lastClassCounts[frameClass]++;
+            if (now - lastClassLogAt >= 10_000) {
+              diagLog(
+                `classify 10s: speech=${lastClassCounts.speech} amb=${lastClassCounts.ambiguous} ` +
+                  `noise=${lastClassCounts.noise} silent=${lastClassCounts.silent} floor=${noiseFloorRms.toFixed(0)}`,
+              );
+              lastClassCounts = { speech: 0, ambiguous: 0, noise: 0, silent: 0 };
+              lastClassLogAt = now;
+            }
           }
-          if (noiseFloorRms < NOISE_FLOOR_MIN) noiseFloorRms = NOISE_FLOOR_MIN;
-          if (noiseFloorRms > NOISE_FLOOR_MAX) noiseFloorRms = NOISE_FLOOR_MAX;
 
+          // ---- ADAPTIVE NOISE FLOOR (classification-driven) ----
+          // Sustained fan/AC/TV noise pulls the floor up FAST (steady signature
+          // held ≥160ms), transients barely move it, and speech NEVER raises it
+          // — the old fixed-rate blend tracked the floor up under a continuous
+          // speaker until only shouting cleared the thresholds (the scream-trap).
+          if (frameClass === 'noise' || frameClass === 'ambiguous') {
+            sustainedNoiseFrames++;
+          } else {
+            sustainedNoiseFrames = 0;
+          }
+          noiseFloorRms = nextNoiseFloorRms(noiseFloorRms, frame, frameClass, aiPlaying, FLOOR_CFG, sustainedNoiseFrames);
+
+          // ---- NOISE GATE (barge-in eligibility only) ----
           const gateOpenRms = Math.min(GATE_OPEN_MAX_RMS, Math.max(GATE_OPEN_MIN_RMS, noiseFloorRms * GATE_FLOOR_MULT));
           const gateCloseRms = gateOpenRms * GATE_CLOSE_RATIO;
           const quietOpenRms = Math.max(GATE_OPEN_MIN_RMS * 0.72, noiseFloorRms * 1.28);
           const wasGateOpen = gateOpen;
-          if (shouldOpenGate({ rms, gateOpenRms, gateCloseRms, quietOpenRms, gateOpen, speechLike })) {
+          const gateEligible =
+            frameClass === 'speech' &&
+            frame.crestFactor >= 1.7 &&
+            (rms >= quietOpenRms || rms >= gateOpenRms);
+          if (gateEligible) {
             gateOpen = true;
             gateBelowSince = null;
-          } else if (gateOpen && rms < gateCloseRms && !speechLike) {
+          } else if (gateOpen && rms < gateCloseRms && frameClass !== 'speech') {
             if (gateBelowSince === null) {
               gateBelowSince = now;
             } else if (now - gateBelowSince >= GATE_RELEASE_MS) {
@@ -2216,14 +2279,14 @@ CURRENT DATE: ${currentDateStr}
             lastGateLogAt = now;
             vadLog(
               `gate ${gateOpen ? 'OPEN' : 'CLOSE'} rms=${rms.toFixed(0)} thrOpen=${gateOpenRms.toFixed(0)} ` +
-                `speechLike=${speechLike} crest=${frame.crestFactor.toFixed(1)} floor=${noiseFloorRms.toFixed(0)}`,
+                `class=${frameClass} crest=${frame.crestFactor.toFixed(1)} flat=${frame.spectralFlatness.toFixed(2)} low=${frame.lowEnergyRatio.toFixed(2)} floor=${noiseFloorRms.toFixed(0)}`,
             );
           }
           if (voiceDebug && now - lastNoiseMetricLogAt > 5000) {
             lastNoiseMetricLogAt = now;
             vadLog(
               `metrics floor=${noiseFloorRms.toFixed(0)} rms=${rms.toFixed(0)} gate=${gateOpen ? 'open' : 'closed'} ` +
-                `speechLike=${speechLike} zcr=${frame.zeroCrossRate.toFixed(3)} aiPlaying=${now < aiPlaybackEndsAt}`,
+                `class=${frameClass} zcr=${frame.zeroCrossRate.toFixed(3)} flat=${frame.spectralFlatness.toFixed(2)} low=${frame.lowEnergyRatio.toFixed(2)} aiPlaying=${aiPlaying}`,
             );
           }
           const effectiveGain = inputGain;
@@ -2259,7 +2322,9 @@ CURRENT DATE: ${currentDateStr}
             }
 
             const bargeInRms = Math.max(BARGE_IN_MIN_RMS, noiseFloorRms * BARGE_IN_FLOOR_MULT);
-            const bargeDecision = speechLike && !openingPhase
+            // Barge-in arms ONLY on speech-class frames — noise/ambiguous can
+            // never clear the agent's audio even when loud.
+            const bargeDecision = frameClass === 'speech' && !openingPhase
               ? evaluateBargeIn({
                   now,
                   aiPlaybackEndsAt,
@@ -2292,19 +2357,36 @@ CURRENT DATE: ${currentDateStr}
             }
 
             const vadEnergyThr = Math.max(VAD_ENERGY_MIN_RMS, noiseFloorRms * VAD_ENERGY_FLOOR_MULT);
-            const speechEnergy =
-              rms > vadEnergyThr && (speechLike || rms > vadEnergyThr * 1.45);
-            if (speechEnergy) {
+            // END-side energy check only: the START side is owned by the
+            // debounced speech gate (N consecutive speech-class frames).
+            const speechEnergy = rms > vadEnergyThr && (frameClass === 'speech' || frameClass === 'ambiguous');
+            if (frameClass === 'speech') {
               lastSpeechEnergyAt = now;
             }
+            // ---- DEBOUNCED TURN START ----
+            const gateDecision = updateSpeechGate({
+              state: speechGate,
+              frameClass,
+              now,
+              config: GATE_CFG,
+            });
+            speechGate = gateDecision.state;
+            const confirmedStart = gateDecision.event === 'start';
+            // SUB-TURN BLIP GUARD: a single loud noise frame right AFTER a
+            // confirmed turn began must not be mistaken for continuing speech
+            // when the energy check would already have ended the turn.
+            const blipAfterStart =
+              confirmedStart &&
+              rms <= vadEnergyThr &&
+              (frame.peak < vadEnergyThr * 2.2 || frame.crestFactor > 8);
             const speechDecision = evaluateLocalSpeech({
               vadIsSpeaking,
-              speechEnergy,
+              speechEnergy: speechEnergy && !blipAfterStart,
               now,
               silenceStartedAt: vadSilenceStartedAt,
               silenceMs: VAD_SILENCE_MS,
             });
-            if (speechDecision.event === 'start') {
+            if (speechDecision.event === 'start' || (confirmedStart && !vadIsSpeaking && !blipAfterStart)) {
               vadIsSpeaking = true;
               vadSilenceStartedAt = null;
               vadSpeakingSince = now;
@@ -2314,12 +2396,12 @@ CURRENT DATE: ${currentDateStr}
               clearRecoveryTick();
               capture?.onCustomerSpeakStart();
               console.log(
-                `[VAD] Customer speech START rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} floor=${noiseFloorRms.toFixed(0)}`
+                `[VAD] Customer speech START (debounced) rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} floor=${noiseFloorRms.toFixed(0)} class=${frameClass}`
               );
               diagLog(
-                `vad START rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} gate=${gateOpen ? 'open' : 'closed'} state→USER_SPEAKING`,
+                `vad START rms=${rms.toFixed(0)} thr=${vadEnergyThr.toFixed(0)} gate=${gateOpen ? 'open' : 'closed'} flat=${frame.spectralFlatness.toFixed(2)} low=${frame.lowEnergyRatio.toFixed(2)} state→USER_SPEAKING`,
               );
-              setCallState('USER_SPEAKING', 'local VAD start');
+              setCallState('USER_SPEAKING', 'local VAD start (debounced)');
               customerStartedAnsweringOpening();
               latLog('AUDIO_IN (customer speech start)');
               clearWaitTick();
@@ -2328,6 +2410,10 @@ CURRENT DATE: ${currentDateStr}
             } else if (speechDecision.event === 'end') {
                 vadIsSpeaking = false;
                 vadSilenceStartedAt = null;
+                // A turn ENDED: a fresh debounced start is required before the
+                // next turn — residual 'speech' frames from the tail of the
+                // last syllable cannot immediately re-open USER_SPEAKING.
+                speechGate = createSpeechGateState();
               capture?.onCustomerSpeakEnd();
               allowAiOutput();
               speechEndAt = now;

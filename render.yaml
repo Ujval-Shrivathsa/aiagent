@@ -42,6 +42,38 @@ services:
         value: "1700"
       - key: VOICE_BARGE_IN_MIN_MS
         value: "150"
+      - key: VOICE_BARGE_IN_FLOOR_MULT
+        value: "3.5"
+      - key: VOICE_SPEECH_SCORE_MIN
+        value: "1.0"
+      - key: VOICE_SPEECH_AMBIGUOUS_MIN
+        value: "0.55"
+        # Classification vetoes: low-band rumble + flat-spectrum noise are
+        # never speech, whatever their crest factor.
+      - key: VOICE_SPEECH_MAX_LOW_RATIO
+        value: "0.82"
+      - key: VOICE_SPEECH_MAX_FLATNESS
+        value: "0.78"
+      - key: VOICE_SPEECH_SILENT_FLOOR_MULT
+        value: "1.1"
+      - key: VOICE_SPEECH_GATE_START_MS
+        value: "60"
+      - key: VOICE_SPEECH_GATE_WINDOW_MS
+        value: "90"
+      - key: VOICE_SPEECH_GATE_TOLERANCE_MS
+        value: "140"
+        # Floor adaptation: speech NEVER raises the floor (scream-trap fix);
+        # sustained fan/AC noise converges into it fast; transients don't.
+      - key: VOICE_FLOOR_STEADY_RATE
+        value: "0.06"
+      - key: VOICE_FLOOR_TRANSIENT_RATE
+        value: "0.008"
+      - key: VOICE_FLOOR_SPEECH_RATE
+        value: "0.0008"
+      - key: VOICE_FLOOR_QUIET_PULL_MULT
+        value: "1.9"
+      - key: VOICE_FLOOR_QUIET_PULL_RATE
+        value: "0.07"
       - key: VOICE_RESPONSE_WATCHDOG_MS
         value: "700"
       - key: APP_URL
