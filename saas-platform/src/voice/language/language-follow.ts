@@ -21,15 +21,24 @@ import { detectScriptLanguage, isPrimarilyKannada } from './script-detect';
 
 export type FollowLanguage = 'kn' | 'en' | 'mr' | 'hi';
 
-export const TTS_LANGUAGE_BY_CONVERSATION: Record<FollowLanguage, string> = {
-  kn: 'kn-IN',
+/**
+ * TTS languageCode per conversation language.
+ *
+ * `kn` maps to null on purpose: Kannada is NOT in Google's documented Live
+ * language list, so a `kn-IN` code is silently ignored by the API while the
+ * model detects Kannada from the script by itself. Sending null lets the
+ * native-audio model handle Kannada — and lets it switch naturally when the
+ * caller switches. en/mr/hi ARE documented locales and are sent explicitly.
+ */
+export const TTS_LANGUAGE_BY_CONVERSATION: Record<FollowLanguage, string | null> = {
+  kn: null,
   en: 'en-IN',
   mr: 'mr-IN',
   hi: 'hi-IN',
 };
 
-export function ttsLanguageFor(lang: FollowLanguage): string {
-  return TTS_LANGUAGE_BY_CONVERSATION[lang] ?? 'kn-IN';
+export function ttsLanguageFor(lang: FollowLanguage): string | null {
+  return TTS_LANGUAGE_BY_CONVERSATION[lang] ?? null;
 }
 
 /** Common English loanwords in Mysuru real-estate Kannada — not a language switch. */

@@ -70,27 +70,42 @@ describe('audio-pipeline-config', () => {
 });
 
 describe('tts speech-config', () => {
-  it('defaults to kn-IN TTS for Kannada-first cold calls', () => {
+  it('defaults to native auto-detect (no languageCode) for Kannada-first calls', () => {
     const prevLang = process.env.VOICE_TTS_LANGUAGE_CODE;
     const prevVoice = process.env.VOICE_TTS_VOICE_NAME;
     delete process.env.VOICE_TTS_LANGUAGE_CODE;
     delete process.env.VOICE_TTS_VOICE_NAME;
     try {
       const settings = loadLiveSpeechSettings();
-      assert.equal(settings.languageCode, 'kn-IN');
+      // Kannada is NOT a documented Live locale, so no languageCode is sent.
+      assert.equal(settings.languageCode, null);
       assert.equal(settings.voiceName, 'Kore');
       const cfg = buildLiveSpeechConfig(settings);
-      assert.equal(cfg.languageCode, 'kn-IN');
+      assert.equal(cfg.languageCode, undefined, 'no languageCode key is sent');
+      assert.equal('languageCode' in cfg, false);
       assert.deepEqual(
         (cfg.voiceConfig as any).prebuiltVoiceConfig.voiceName,
         'Kore'
       );
-      assert.match(describeSpeechConfig(settings), /kn-IN/);
+      assert.match(describeSpeechConfig(settings), /auto/);
     } finally {
       if (prevLang === undefined) delete process.env.VOICE_TTS_LANGUAGE_CODE;
       else process.env.VOICE_TTS_LANGUAGE_CODE = prevLang;
       if (prevVoice === undefined) delete process.env.VOICE_TTS_VOICE_NAME;
       else process.env.VOICE_TTS_VOICE_NAME = prevVoice;
+    }
+  });
+
+  it('normalizes a configured kn-IN to auto, since the API ignores it', () => {
+    const prevLang = process.env.VOICE_TTS_LANGUAGE_CODE;
+    process.env.VOICE_TTS_LANGUAGE_CODE = 'kn-IN';
+    try {
+      const settings = loadLiveSpeechSettings();
+      assert.equal(settings.languageCode, null);
+      assert.equal('languageCode' in buildLiveSpeechConfig(settings), false);
+    } finally {
+      if (prevLang === undefined) delete process.env.VOICE_TTS_LANGUAGE_CODE;
+      else process.env.VOICE_TTS_LANGUAGE_CODE = prevLang;
     }
   });
 

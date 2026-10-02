@@ -91,7 +91,10 @@ describe('language-follow — defaults and switching', () => {
   });
 
   it('TTS mapping and prompt text', () => {
-    assert.equal(ttsLanguageFor('kn'), 'kn-IN');
+    // Kannada has NO documented Live locale: `kn-IN` is accepted but silently
+    // ignored, so we send nothing and let the native-audio model detect the
+    // script. en/mr/hi ARE documented and are sent explicitly.
+    assert.equal(ttsLanguageFor('kn'), null);
     assert.equal(ttsLanguageFor('en'), 'en-IN');
     assert.equal(ttsLanguageFor('mr'), 'mr-IN');
     assert.equal(ttsLanguageFor('hi'), 'hi-IN');

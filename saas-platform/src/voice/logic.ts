@@ -8,9 +8,14 @@ import {
   getOutboundGreetingInstruction,
   PDF_OPENING_KN,
   PDF_AREAS_LINE_KN,
+  PDF_INTEREST_QUESTION_KN,
   OUTBOUND_YES_LOCATIONS_NUDGE,
   OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE,
   buildOutboundHandoffTransferNudge,
+  buildOutboundCallbackTimeNudge,
+  buildOutboundCallbackOutsideWindowNudge,
+  PDF_THANKS_CLOSE_KN,
+  CALLBACK_OUTSIDE_WINDOW_LINE_KN,
   OUTBOUND_REPEAT_NUDGE,
   OUTBOUND_NO_REPEAT_NUDGE,
   looksLikeRepeatRequest,
@@ -47,7 +52,12 @@ import { CallCaptureSession } from '../voice/call-capture/session';
 import { callLog } from '../voice/call-capture/logger';
 import { loadAudioPipelineConfig } from '../voice/audio-pipeline-config';
 import { takeCachedOutboundOpeningInstruction } from '../voice/opening-prewarm-cache';
-import { buildLiveSpeechConfig, describeSpeechConfig, loadLiveSpeechSettings } from '../voice/tts/speech-config';
+import {
+  buildLiveSpeechConfig,
+  buildLiveVoiceBehaviorConfig,
+  describeSpeechConfig,
+  loadLiveSpeechSettings,
+} from '../voice/tts/speech-config';
 import { detectScriptLanguage } from '../voice/language/script-detect';
 import {
   followLanguageFromUtterance,
@@ -58,6 +68,14 @@ import {
   type FollowLanguage,
 } from '../voice/language/language-follow';
 import { evaluateBargeIn, evaluateLocalSpeech } from '../voice/turn-policy';
+import {
+  parseCallbackTime,
+  spokenTimeLabel,
+  looksLikeCallbackTimeRequest,
+  requestedMinutesOfDay,
+  isWithinCallbackWindow,
+  CALLBACK_WINDOW_LABEL,
+} from '../voice/callback-time';
 import {
   analyzePcmFrame,
   classifyFrame,
@@ -175,10 +193,14 @@ function normalizeVoiceEvent(raw: any): any {
 const OUTBOUND_END_CALL_TOOL = {
   name: "endCall",
   description:
-    "End the outbound call ONLY when: (1) the caller clearly said goodbye / asked to end, or " +
-    "(2) the caller confirmed they are not interested (after the notInterested close line). " +
-    "After delivering a scripted closing that includes 'Thank you.' exactly ONCE for the whole call, " +
-    "call endCall in the SAME turn — if the closing already includes Thank you, do NOT say it again. " +
+    "End the outbound call ONLY when: (1) the caller clearly said goodbye / asked to end, " +
+    "(2) the caller confirmed they are not interested (after the notInterested close line), or " +
+    "(3) the caller is interested in a location and you JUST spoke the sales-team closing line " +
+    "('the sales team will call you') plus the thank-you line — then call endCall in the SAME turn, " +
+    "right after that line. " +
+    "'Thank you' is spoken at most ONCE per call, and only in the thank-you line " +
+    "('ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.'). Never add 'thank you' to the not-interested close — " +
+    "a caller who declined must not be thanked. If the closing already thanked them, do NOT say it again. " +
     "NEVER end the call because of silence, a quiet caller, short pauses, short replies, or a topic change — " +
     "silence ALWAYS means keep listening. The system will never ask you to end a call due to silence.",
   parameters: {
@@ -203,6 +225,40 @@ const NOT_INTERESTED_TOOL = {
     type: Type.OBJECT,
     properties: {},
     required: [],
+  },
+};
+
+/**
+ * Records the callback window the caller agreed to. The sales team is reachable
+ * 10am–7pm only, so this is how the promise becomes something the team can
+ * actually act on instead of living only in a recording.
+ *
+ * `timeOfDay` is 24-hour "HH:MM" because a 12-hour string is ambiguous without
+ * a reliable meridiem from the model; `day` is kept to today/tomorrow because
+ * that is the only range this flow promises.
+ */
+const SET_CALLBACK_TIME_TOOL = {
+  name: "setCallbackTime",
+  description:
+    "Record the callback time the customer agreed to. ONLY call this for a time inside " +
+    "10am-7pm that the customer actually agreed to. If the customer asks for a time outside " +
+    "10am-7pm, do NOT call this — tell them the time is not possible, that the sales team is " +
+    "available 10am to 7pm, and offer another day or a call soon. Do not call this if they " +
+    "gave no specific time.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      day: {
+        type: Type.STRING,
+        enum: ["today", "tomorrow"],
+        description: "Which day they asked for.",
+      },
+      timeOfDay: {
+        type: Type.STRING,
+        description: "24-hour local time they agreed to, HH:MM, between 10:00 and 19:00.",
+      },
+    },
+    required: ["timeOfDay"],
   },
 };
 
@@ -275,10 +331,10 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   const ttsSettings = loadLiveSpeechSettings();
   /** LANGUAGE FOLLOW — Kannada default; follows the caller's actual language. */
   let languageSwitchState: LanguageSwitchState = createLanguageSwitchState();
-  let activeTtsLanguageCode: string =
-    ttsSettings.languageCode && ttsSettings.languageCode !== 'auto'
-      ? ttsSettings.languageCode
-      : 'kn-IN';
+  // null = send NO languageCode. Kannada has no documented Live locale, so the
+  // native-audio model detects it from the script (see tts/speech-config.ts).
+  let activeTtsLanguageCode: string | null =
+    ttsSettings.languageCode ?? ttsLanguageFor(languageSwitchState.language);
   let pendingLanguageSwitchPrompt: string | null = null;
   const inputGain = audioCfg.inputGain;
   const voiceDebug = audioCfg.voiceDebug;
@@ -436,10 +492,12 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let outboundNotInterestedNudgeSent = false;
   let outboundYesAskNameNudgeSent = false;
   let outboundLocationsNudgeSent = false;
+  /** Callback-time handling: at most one confirm and one refusal per call. */
+  let outboundCallbackTimeNudgeSent = false;
+  let outboundCallbackRefusedNudgeSent = false;
   /** First name used to address the caller once they state it ("{name} ಸರ್"). */
   // (outboundCallerFirstName removed — no name step in the final flow.)
   let outboundTransferStarted = false;
-  let outboundTransferRequested = false;
   let outboundCallUuid: string | null = null;
   let outboundThanksSpoken = false;
   let outboundNoRepeatNudgeSent = false;
@@ -794,9 +852,12 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       console.log('[GUARD] Areas line delivered — next yes goes to sales-team transfer');
     }
     if (!outboundTransferStarted && looksLikeHandoffLine(turnText)) {
+      // SALES-TEAM CLOSING: the "sales team will call you" line ENDS the call.
+      // No live transfer — hard-mute, let the line play out, then hang up.
       outboundTransferStarted = true;
-      console.log('[GUARD] Handoff line delivered — starting sales-team transfer (no endCall)');
-      startSalesTeamTransfer();
+      outboundBusyCloseSent = true;
+      console.log('[GUARD] Sales-team closing line delivered — hangup after playback');
+      activateOutboundPostThanksMute();
     }
     if (
       isOutboundCall &&
@@ -810,41 +871,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
   };
 
-  /**
-   * Sales-team transfer after the INTERESTED handoff line.
-   * Replaces the customer leg's XML with a Dial to PLIVO_TRANSFER_NUMBER via
-   * Plivo's live-call transfer API — the AI stream ends, the caller is bridged
-   * to the sales phone. Without PLIVO_TRANSFER_NUMBER the call stays open.
-   */
-  const startSalesTeamTransfer = () => {
-    if (outboundTransferRequested) return;
-    outboundTransferRequested = true;
-    const transferTo = (process.env.PLIVO_TRANSFER_NUMBER || '').replace(/\D/g, '');
-    const authId = process.env.PLIVO_AUTH_ID || '';
-    const authToken = process.env.PLIVO_AUTH_TOKEN || '';
-    const base = (process.env.APP_URL || '').replace(/\/+$/, '');
-    if (!transferTo || !authId || !authToken || !base || !outboundCallUuid) {
-      console.log(
-        `[TRANSFER] Skipped (transferNumber=${transferTo ? 'set' : 'missing'} callUuid=${outboundCallUuid ? 'yes' : 'no'} appUrl=${base ? 'yes' : 'no'}) — call stays open`,
-      );
-      return;
-    }
-    const transferUrl = `${base}/api/plivo/transfer-answer`;
-    console.log(`[TRANSFER] Sales-team transfer: call=${outboundCallUuid} → ${transferTo}`);
-    void fetch(`https://api.plivo.com/v1/Account/${authId}/Call/${outboundCallUuid}/`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${Buffer.from(`${authId}:${authToken}`).toString('base64')}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ legs: 'aleg', aleg_url: transferUrl, aleg_method: 'POST' }),
-    })
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`Plivo transfer API ${r.status}: ${await r.text().catch(() => '')}`);
-        console.log('[TRANSFER] Sales-team transfer accepted by Plivo');
-      })
-      .catch((e) => console.error('[TRANSFER] Transfer request failed:', e?.message || e));
-  };
+  // (Live sales-team transfer removed — the interested path now speaks the
+  // sales-team closing line and the call ENDS; the team calls the customer back.)
 
   const armWaitingForCustomer = () => {
     // No-op — removed; the 5s/10s silence protocol owns all waiting.
@@ -1434,22 +1462,24 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
         }
 
         const runtimeInstructionBase = `
-OUTBOUND SCRIPT STATE (STRICT) — KANNADA ONLY, NEVER English:
-- Opening turn (already spoken): "${PDF_OPENING_KN}" — NEVER say it again, NEVER ask the caller's name (this flow has no name step).
-- ONLY steps allowed now: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn. INTERESTED → locations once ("${PDF_AREAS_LINE_KN}") then listen. INTERESTED IN A LOCATION (after locations) → transfer line ("${PDF_HANDOFF_LINE_KN}"), NO endCall — live transfer to sales team.
-- LANGUAGE RULE (STRICT): Kannada is the default. Follow the language the CALLER is actually speaking — English, Marathi, Hindi — and stay in it until they switch back. Never switch on single loanwords or fillers. Natural conversational speech, never literal translation.
+OUTBOUND SCRIPT STATE — where the call is right now:
+- Opening turn (already spoken): "${PDF_OPENING_KN}" — never say it again, and never ask the caller's name (this flow has no name step).
+- ONLY steps allowed now: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn. INTERESTED → locations once ("${PDF_AREAS_LINE_KN}") + the ONE cheerful interest question (freshly phrased, reference: "${PDF_INTEREST_QUESTION_KN}") then listen. INTERESTED IN A LOCATION (after locations) → sales-team closing line ("${PDF_HANDOFF_LINE_KN}") + the ONE thank-you ("${PDF_THANKS_CLOSE_KN}") + endCall SAME turn — the call ENDS after the thank-you.
+- CALLBACK TIME: the sales team is available ${CALLBACK_WINDOW_LABEL}, and that is the ONLY window you may promise. If they ask for a time inside it, confirm that exact time back, call setCallbackTime with it, then close as above. If they ask for a time outside it, say ONCE, warmly and without being defensive, that the time is not possible: "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}" — that line names the window and offers another day or a call soon. Never agree to an hour outside ${CALLBACK_WINDOW_LABEL}; never call setCallbackTime for one.
+- LANGUAGE: Kannada is the default and where you start. Follow the language the CALLER is actually speaking — English, Marathi, Hindi — and stay in it until they switch back. Never switch on a single loanword or filler. Natural conversational speech, never literal translation.
 - NO NAME STEP: this flow never asks the caller's name. Never ask for it, never confirm it.
-- ONE QUESTION ONLY (ABSOLUTE): the opening question is the ONLY question on this call. NEVER ask about investment / construction / purpose / budget, and never ask permission to transfer or continue.
-- NEVER repeat any line, question, or closing twice on this call — reworded counts as a repeat. Say each script line in FULL once.
-- NEVER echo the caller's words back before answering — one response per turn, no duplicate sentences.
-- If the caller asks who you are or an unrelated question mid-call, answer briefly then return to the current script step.
-- Internal messages (SYSTEM / nudge) are PRIVATE directives — never quote, mention, or refer to them in speech. Never say you "can only say" certain lines.
-- NEVER ask permission to continue — after any reply, move to the next step naturally.
+- TWO QUESTIONS MAX: (1) the opening question and (2) the ONE cheerful interest question right after the locations line, freshly phrased. Never ask about investment / construction / purpose / budget, and never ask permission to transfer or continue.
+- Never repeat any line, question or closing twice on this call — reworded counts as a repeat. Say each script line in FULL once.
+- Never echo the caller's words back before answering — one response per turn, no duplicate sentences.
+- If the caller asks who you are or asks something unrelated mid-call, answer briefly, then return to the current script step.
+- Internal messages (SYSTEM / nudge) are private directives — never quote, mention or refer to them in speech. Never say you "can only say" certain lines.
+- Never ask permission to continue — after any reply, move to the next step on your own.
 - Never say you are an AI or language model. You are a sales officer on a live call.
-- "ಧನ್ಯವಾದ" is spoken EXACTLY ONCE per call — ONLY inside the transfer handoff line. The not-interested close NEVER contains it. The transfer line NEVER calls endCall.
-- SILENCE = KEEP LISTENING (ABSOLUTE): silence NEVER ends this call. The system may send a private availability-check nudge after a quiet stretch — say the given short line ONCE, then keep listening. NEVER call endCall because the caller was silent, quiet, or slow to reply.
-- SPEECH PACING: reply within ~100 MILLISECONDS (0.1s) after the caller stops — STRICT. Each turn is ONE smooth utterance at a calm pace — pause at commas, never mid-sentence, the full line in one breath, then a real pause while you listen. No long gaps, no word-by-word delivery.
-- HEARING GUARANTEE (PERMANENT): every soft, short, or accented caller utterance is a REAL turn — respond immediately, never claim you cannot hear them, never ask them to speak louder. If a private nudge says words were not recognized, briefly acknowledge and ask them kindly to repeat ONCE ("ಒಂದು ಸಲ ಮತ್ತೆ ಹೇಳಿ"); if a nudge says they are waiting for your reply, speak now. The caller must never need to shout or repeat themselves twice.
+- "ಧನ್ಯವಾದ" is spoken EXACTLY ONCE per call, and ONLY in this line: "${PDF_THANKS_CLOSE_KN}". The sales-team line carries no thanks. Never add a thank-you to the not-interested close or after it — someone who declined must not be thanked. Every closing line is followed by endCall in the SAME turn.
+- SILENCE = KEEP LISTENING: silence NEVER ends this call. The system may send a private availability-check nudge after a quiet stretch — say the given short line ONCE, then keep listening. Never call endCall because the caller was silent, quiet, or slow to reply.
+- HOW YOU SOUND: keep speaking the way you started — close to the mic, gentle and warm, an audible smile, a real breath before a longer line, commas that are actual pauses. Vary your rhythm instead of delivering every turn at the same speed and shape. If the caller sounds tired, soften; if they sound pleased, brighten. A short line is a fine line — never rush to finish a sentence just to get to the end of it.
+- Reply at a natural human moment after the caller stops — promptly, but not stampeded; a small relaxed beat sounds human.
+- HEARING GUARANTEE: every soft, short or accented caller utterance is a REAL turn — respond immediately, never claim you cannot hear them, never ask them to speak louder. If a private nudge says words were not recognized, briefly acknowledge and ask them kindly to repeat ONCE ("ಒಂದು ಸಲ ಮತ್ತೆ ಹೇಳಿ"); if a nudge says they are waiting for your reply, speak now. The caller must never need to shout or repeat themselves twice.
 
 CURRENT DATE: ${currentDateStr}
 `;
@@ -1493,6 +1523,10 @@ CURRENT DATE: ${currentDateStr}
             config: {
               responseModalities: [Modality.AUDIO],
               thinkingConfig: { thinkingLevel: "minimal" } as any,
+              // Behavioural "sounds like a person" flags — affective dialog lets
+              // the model read the caller's mood and adapt; temperature buys
+              // wording variety so lines are never identical call to call.
+              ...buildLiveVoiceBehaviorConfig(ttsSettings),
               realtimeInputConfig: {
                 automaticActivityDetection: {
                   disabled: false,
@@ -1506,7 +1540,7 @@ CURRENT DATE: ${currentDateStr}
               systemInstruction: geminiSystemInstruction,
               tools: [
                 {
-                  functionDeclarations: [OUTBOUND_END_CALL_TOOL, NOT_INTERESTED_TOOL],
+                  functionDeclarations: [OUTBOUND_END_CALL_TOOL, NOT_INTERESTED_TOOL, SET_CALLBACK_TIME_TOOL],
                 },
               ],
               inputAudioTranscription: {},
@@ -1622,12 +1656,13 @@ CURRENT DATE: ${currentDateStr}
                       // hard-mute the agent and schedule the hangup.
                       activateOutboundPostThanksMute();
                     } else if (isOutboundCall && looksLikeHandoffLine(completedAiText)) {
-                      // Handoff/transfer line delivered — start the sales-team
-                      // transfer but do NOT mute or hang up: the call stays open
-                      // while the caller is bridged to the sales number.
+                      // Sales-team closing line delivered — the call ENDS after
+                      // playback (no live transfer; the team calls the customer back).
                       if (!outboundTransferStarted) {
                         outboundTransferStarted = true;
-                        startSalesTeamTransfer();
+                        outboundBusyCloseSent = true;
+                        clearOutboundSilenceTimer();
+                        activateOutboundPostThanksMute();
                       }
                     }
                   }
@@ -1799,14 +1834,62 @@ CURRENT DATE: ${currentDateStr}
                       } catch (e: any) {
                         console.error('[GEMINI] Repeat nudge failed:', e?.message || e);
                       }
+                    } else if (
+                      // CALLBACK TIME — the caller asked to be called back at a
+                      // specific hour. Handled BEFORE the plain interested branch
+                      // so the agreed time is confirmed and stored rather than
+                      // lost. Routing is decided here, not by the model, so an
+                      // out-of-window request is refused even if the model
+                      // disagrees.
+                      outboundAreasLineDelivered &&
+                      looksLikeCallbackTimeRequest(userText)
+                    ) {
+                      try {
+                        const mins = requestedMinutesOfDay(userText);
+                        const at = new Date();
+                        if (mins != null) at.setHours(0, mins, 0, 0);
+                        const inWindow = mins != null && isWithinCallbackWindow(at);
+
+                        if (outboundThanksSpoken || outboundHardMuteAfterClose) {
+                          forceOutboundHangupIfClosing('callback request after close');
+                        } else if (!inWindow) {
+                          if (!outboundCallbackRefusedNudgeSent) {
+                            outboundCallbackRefusedNudgeSent = true;
+                            console.log(
+                              `[GUARD] Callback time OUTSIDE ${CALLBACK_WINDOW_LABEL} — ` +
+                                `telling the caller it is not possible`,
+                            );
+                            geminiSession?.sendRealtimeInput({
+                              text: buildOutboundCallbackOutsideWindowNudge(),
+                            });
+                          }
+                        } else if (!outboundCallbackTimeNudgeSent) {
+                          outboundCallbackTimeNudgeSent = true;
+                          const spoken = spokenTimeLabel(at, at.getDate() === new Date().getDate() ? 'today' : 'tomorrow');
+                          console.log(`[GUARD] Callback time INSIDE window — confirming ${spoken}`);
+                          geminiSession?.sendRealtimeInput({
+                            text: buildOutboundCallbackTimeNudge(spoken),
+                          });
+                          if (customerPhone) {
+                            void markOutcomeByPhone(customerPhone, STATUS.INTERESTED, {
+                              interested: true,
+                              lastResponse: userText,
+                            })
+                              .then((r) => console.log(`[DB] Callback-request lead marked rows=${r.count}`))
+                              .catch((e) => console.error('[DB Error] Failed to mark interested:', e));
+                          }
+                        }
+                      } catch (e: any) {
+                        console.error('[GEMINI] Callback-time nudge failed:', e?.message || e);
+                      }
                     } else if (looksLikeInterestedYes(userText)) {
                       // FINAL FLOW: yes → locations; interested-in-location → transfer.
                       try {
                         if (outboundTransferStarted) {
-                          // Transfer already in progress — stay silent.
+                          // Closing already delivered — stay silent; hangup is scheduled.
                         } else if (outboundAreasLineDelivered && !outboundHandoffNudgeSent) {
                           outboundHandoffNudgeSent = true;
-                          console.log('[GUARD] Interested in a location — sales-team transfer handoff');
+                          console.log('[GUARD] Interested in a location — sales-team closing + endCall');
                           geminiSession?.sendRealtimeInput({
                             text: buildOutboundHandoffTransferNudge(),
                           });
@@ -1925,21 +2008,9 @@ CURRENT DATE: ${currentDateStr}
                         hasThanksClosing(lastPlayedAiRaw) ||
                         outboundThanksSpoken;
 
-                      // STRICT SCRIPT: after the interested handoff the call is a
-                      // live transfer — endCall is forbidden; the line stays open.
-                      if (outboundTransferStarted) {
-                        console.warn('[GUARD] endCall blocked — call is transferring to sales team');
-                        toolResponses.push({
-                          name: call.name,
-                          response: {
-                            success: false,
-                            message:
-                              'This call is being TRANSFERRED to the sales team. Do NOT call endCall. Stay silent on the line.',
-                          },
-                          id: call.id,
-                        });
-                        continue;
-                      }
+                      // (No transfer block — the interested path is a CLOSING:
+                      // after the sales-team line, endCall in the SAME turn is
+                      // exactly right; closingSpoken below authorizes it.)
 
                       const endGuard = shouldAllowEndCall({
                         callDurationMs: Date.now() - startTime,
@@ -2017,6 +2088,72 @@ CURRENT DATE: ${currentDateStr}
 
                     // (setName handler removed — the final call flow never asks the name.)
 
+                    if (call.name === "setCallbackTime") {
+                      const args = (call.args || {}) as Record<string, unknown>;
+                      const parsed = parseCallbackTime(
+                        args.day as string | undefined,
+                        args.timeOfDay as string | undefined,
+                      );
+                      if (!parsed.ok) {
+                        // The model proposed something outside 10am-7pm. Record
+                        // nothing — a promise the sales team cannot keep is worse
+                        // than no promise — and tell the model to refuse it.
+                        console.warn(`[GUARD] setCallbackTime REJECTED — ${parsed.reason}`);
+                        diagLog(`setCallbackTime rejected: ${parsed.reason}`);
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: false,
+                            error: parsed.reason,
+                            instruction:
+                              `The sales team is available ${CALLBACK_WINDOW_LABEL} only. ` +
+                              `Tell the customer that time is not possible, that the team is ` +
+                              `available ${CALLBACK_WINDOW_LABEL}, and offer another day or a call soon.`,
+                          },
+                          id: call.id,
+                        });
+                        continue;
+                      }
+                      const when = parsed.at.toISOString();
+                      console.log(
+                        `[DB] setCallbackTime ${parsed.day} ${args.timeOfDay} → ${when}`,
+                      );
+                      if (!customerPhone) {
+                        toolResponses.push({
+                          name: call.name,
+                          response: { success: false, error: 'No phone number on file for this call.' },
+                          id: call.id,
+                        });
+                        continue;
+                      }
+                      try {
+                        const r = await transitionLeadsByPhone(customerPhone, STATUS.INTERESTED, {
+                          interested: true,
+                          appointmentTime: parsed.at,
+                          lastResponse: `callback ${parsed.day} ${args.timeOfDay}`,
+                        });
+                        console.log(`[DB] Callback time stored rows=${r.count} at=${when}`);
+                        diagLog(`callback stored ${parsed.day} ${args.timeOfDay} rows=${r.count}`);
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: true,
+                            appointmentTime: when,
+                            spokenAs: spokenTimeLabel(parsed.at, parsed.day),
+                          },
+                          id: call.id,
+                        });
+                      } catch (e: any) {
+                        console.error('[DB Error] Failed to store callback time:', e);
+                        toolResponses.push({
+                          name: call.name,
+                          response: { success: false, error: 'Database error' },
+                          id: call.id,
+                        });
+                      }
+                      continue;
+                    }
+
                     console.warn(`[GEMINI] Unhandled tool call reached fallback: ${call.name}`);
                     toolResponses.push({ name: call.name, response: { success: true }, id: call.id });
                   }
@@ -2033,7 +2170,7 @@ CURRENT DATE: ${currentDateStr}
                   diagLog(`session closed mid-call code=${event?.code} reason=${event?.reason || 'none'} → reconnect`);
                   scheduleGeminiReconnect(`session closed: ${event?.reason || event?.code || 'unknown'}`);
                 } else if (outboundTransferStarted) {
-                  diagLog('session closed during transfer — expected, no reconnect');
+                  diagLog('session closed after closing line — expected, no reconnect');
                 }
                 // Save the summary ONLY when the call itself is over. A mid-call
                 // reconnect keeps the conversation alive — the final close path

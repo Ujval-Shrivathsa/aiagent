@@ -8,7 +8,10 @@ import {
   PDF_OPENING_KN,
   PDF_OPENING,
   PDF_AREAS_LINE_KN,
+  PDF_INTEREST_QUESTION_KN,
   PDF_HANDOFF_LINE_KN,
+  PDF_THANKS_CLOSE_KN,
+  CALLBACK_OUTSIDE_WINDOW_LINE_KN,
   OUTBOUND_NOT_INTERESTED_CLOSE_KN,
   SILENCE_CHECK_LINE_KN,
   SILENCE_TIMEOUT_CLOSE_KN,
@@ -68,15 +71,66 @@ describe('v5 script — spoken lines', () => {
     assert.equal(hasLatin(PDF_AREAS_LINE_KN), false);
   });
 
-  it('transfer line CONTAINS the one ಧನ್ಯವಾದ; not-interested close does NOT', () => {
-    assert.match(PDF_HANDOFF_LINE_KN, /ಧನ್ಯವಾದಗಳು/);
-    assert.match(PDF_HANDOFF_LINE_KN, /ಸೇಲ್ಸ್ ಟೀಮ್|ವರ್ಗಾಯಿಸ/);
-    assert.equal(hasThanksClosing(PDF_HANDOFF_LINE_KN), true);
+  it('interest question asked after the locations line (fresh phrasing each call)', () => {
+    assert.match(PDF_INTEREST_QUESTION_KN, /ಆಸಕ್ತಿ/);
+    assert.match(PDF_INTEREST_QUESTION_KN, /\?/);
+    assert.equal(hasLatin(PDF_INTEREST_QUESTION_KN), false);
+    // The locations line itself stays question-free — the question is spoken
+    // as a follow-up in the same turn, phrased fresh every time.
+    assert.doesNotMatch(PDF_AREAS_LINE_KN, /\?/);
+    const nudge = OUTBOUND_YES_LOCATIONS_NUDGE;
+    assert.match(nudge, /interest question/i);
+    assert.match(nudge, /FRESH/);
+    assert.match(nudge, /ಆಸಕ್ತಿ/);
+    const full = buildOutboundSystemInstruction('30 Sep 2026');
+    assert.match(full, /TWO QUESTIONS MAX/);
+    assert.match(full, /phrase it FRESH/);
+  });
+
+  it('sales-team line carries NO thanks; the ONE ಧನ್ಯವಾದ is the final thank-you line', () => {
+    assert.match(PDF_HANDOFF_LINE_KN, /ಸೇಲ್ಸ್ ಟೀಮ್/);
+    assert.match(PDF_HANDOFF_LINE_KN, /ಕರೆ ಮಾಡುತ್ತಾರೆ/); // the team WILL CALL them
+    assert.doesNotMatch(PDF_HANDOFF_LINE_KN, /ವರ್ಗಾಯಿಸ/); // no live-transfer wording
+    // Thanks moved OUT of the sales-team line so the caller is thanked exactly
+    // once, right before hangup, instead of twice on the same call.
+    assert.doesNotMatch(PDF_HANDOFF_LINE_KN, /ಧನ್ಯವಾದ/);
+    assert.equal(hasThanksClosing(PDF_HANDOFF_LINE_KN), false);
+
+    assert.match(PDF_THANKS_CLOSE_KN, /ಧನ್ಯವಾದಗಳು/);
+    assert.match(PDF_THANKS_CLOSE_KN, /ಸಮಯ/); // "thank you for your TIME"
+    assert.equal(hasThanksClosing(PDF_THANKS_CLOSE_KN), true);
+    assert.equal(hasLatin(PDF_THANKS_CLOSE_KN), false);
+
     assert.equal(hasLatin(PDF_HANDOFF_LINE_KN), false);
+    const full = buildOutboundSystemInstruction('30 Sep 2026');
+    assert.match(full, /ENDS the call|call ENDS|ends the call|call ends/);
+    assert.doesNotMatch(full, /live transfer/i);
     assert.doesNotMatch(OUTBOUND_NOT_INTERESTED_CLOSE_KN, /ಧನ್ಯವಾದ/);
     assert.match(OUTBOUND_NOT_INTERESTED_CLOSE_KN, /ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್/);
     assert.equal(hasLatin(SILENCE_CHECK_LINE_KN), false);
     assert.equal(hasLatin(SILENCE_TIMEOUT_CLOSE_KN), false);
+  });
+
+  it('out-of-window callback line names the window and offers both alternatives', () => {
+    assert.match(CALLBACK_OUTSIDE_WINDOW_LINE_KN, /10/);
+    assert.match(CALLBACK_OUTSIDE_WINDOW_LINE_KN, /7/);
+    assert.match(CALLBACK_OUTSIDE_WINDOW_LINE_KN, /ಬೇರೆ ದಿನ/); // "another day"
+    assert.match(CALLBACK_OUTSIDE_WINDOW_LINE_KN, /ಶೀಘ್ರದಲ್ಲೇ/); // "shortly"
+    assert.equal(hasLatin(CALLBACK_OUTSIDE_WINDOW_LINE_KN), false);
+    assert.equal(hasThanksClosing(CALLBACK_OUTSIDE_WINDOW_LINE_KN), false);
+
+    const full = buildOutboundSystemInstruction('30 Sep 2026');
+    assert.match(full, /10am–7pm/);
+    assert.match(full, /not possible/);
+    const fast = buildOutboundFastConnectInstruction('30 Sep 2026');
+    assert.match(fast, /10am–7pm/);
+  });
+
+  it('close nudges end on the single thank-you, not the sales-team line', () => {
+    const handoff = buildOutboundHandoffTransferNudge();
+    assert.match(handoff, /endCall in the SAME turn/);
+    assert.match(handoff, new RegExp(PDF_THANKS_CLOSE_KN.slice(0, 10)));
+    assert.match(handoff, /EXACTLY ONCE/);
   });
 });
 
@@ -109,8 +163,9 @@ describe('v5 script — system instructions', () => {
     assert.match(OUTBOUND_YES_ASK_NAME_NUDGE, /ಹುಣಸೂರು/); // alias resolves to locations nudge
     const handoff = buildOutboundHandoffTransferNudge();
     assert.match(handoff, /ಧನ್ಯವಾದಗಳು/);
-    assert.match(handoff, /Do NOT call endCall/);
-    assert.match(OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE, /reserved for the transfer line/);
+    assert.match(handoff, /endCall in the SAME turn/);
+    assert.doesNotMatch(handoff, /Do NOT call endCall/);
+    assert.match(OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE, /reserved for the sales-team closing line/);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /ಇನ್ನೂ ಲೈನ್‌ನಲ್ಲಿ ಇದೀರಾ/);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /keep listening/);
     assert.doesNotMatch(OUTBOUND_SILENCE_CHECK_NUDGE, /endCall in the SAME turn/);
@@ -137,7 +192,14 @@ describe('v5 script — detectors', () => {
       looksLikeHandoffLine('Thank you for your interest, sir. I will transfer your call to our sales team.'),
       true,
     );
+    // New closing wording (thanks + "sales team will call you") — any phrasing.
+    assert.equal(
+      looksLikeHandoffLine('Thank you so much, sir! Our sales team will call you very soon.'),
+      true,
+    );
+    assert.equal(looksLikeHandoffLine('Our sales team will call you soon, sir.'), true);
     assert.equal(looksLikeHandoffLine(PDF_AREAS_LINE_KN), false);
+    assert.equal(looksLikeHandoffLine(PDF_INTEREST_QUESTION_KN), false);
     assert.equal(looksLikeNotInterestedCloseLine(OUTBOUND_NOT_INTERESTED_CLOSE_KN), true);
     assert.equal(looksLikeNotInterestedCloseLine(PDF_HANDOFF_LINE_KN), false);
   });
@@ -173,13 +235,13 @@ describe('v5 script — detectors', () => {
     assert.equal(looksLikeContextInterrupt('yes'), false);
   });
 
-  it('conversation memory tracks opening → areas → transfer', () => {
+  it('conversation memory tracks opening → areas → sales-team closing', () => {
     const afterOpening = deriveOutboundConversationMemory(PDF_OPENING_KN);
     assert.match(afterOpening.pendingQuestion, /ಸೈಟ್ ನೋಡ/);
     const afterAreas = deriveOutboundConversationMemory(PDF_AREAS_LINE_KN, afterOpening);
     assert.match(afterAreas.topic, /areas/i);
     const afterHandoff = deriveOutboundConversationMemory(PDF_HANDOFF_LINE_KN, afterAreas);
-    assert.match(afterHandoff.topic, /transfer/i);
+    assert.match(afterHandoff.topic, /sales team/i);
   });
 
   it('forbidden projects caught in Latin and Kannada script', () => {
@@ -207,6 +269,20 @@ describe('silence state machine — NEVER terminates', () => {
     assert.equal(t.state.reason, 'checked', 'state NEVER reaches a terminal closed state');
     assert.ok(t.state.deadline != null, 'deadline always re-armed — infinite listening loop');
     assert.equal(createOutboundSilenceState().reason, 'idle');
+  });
+
+  it('delivery guidance reaches the FAST CONNECT instruction (the one live for the opening)', () => {
+    // Regression guard: the opening line is spoken from FAST CONNECT only, so if
+    // the delivery block is missing there, Priya's first sentence is generated
+    // with zero prosody direction — which is what made her sound like a robot.
+    const fast = buildOutboundFastConnectInstruction('30 Sep 2026');
+    assert.match(fast, /HOW YOU SOUND/);
+    assert.match(fast, /Close to the mic|close to the mic/);
+    assert.match(fast, /audible|smile/i);
+    assert.match(fast, /comma is a breath|A comma is a breath/i);
+    assert.match(fast, /Match the caller/i);
+    // Also present in the full instruction used on reconnect.
+    assert.match(buildOutboundSystemInstruction('30 Sep 2026'), /HOW YOU SOUND/);
   });
 
   it('system prompt forbids any silence-based endCall', () => {

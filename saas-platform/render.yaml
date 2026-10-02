@@ -17,9 +17,15 @@ services:
       - key: VOICE_PROVIDER
         value: plivo
       - key: VOICE_TTS_VOICE_NAME
-        value: Kore
+        value: Despina
+      - key: VOICE_TTS_VOICE_NAME_EN
+        value: Despina
       - key: VOICE_TTS_LANGUAGE_CODE
-        value: kn-IN
+        value: auto
+      - key: VOICE_AFFECTIVE_DIALOG
+        value: 0
+      - key: VOICE_LLM_TEMPERATURE
+        value: 1.0
       - key: VOICE_AAD_SILENCE_MS
         value: "250"
       - key: VOICE_VAD_SILENCE_MS

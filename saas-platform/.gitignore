@@ -54,3 +54,6 @@ next-env.d.ts
 
 .vercel
 .env*
+
+# Voice-lab renders (generated audio, not source)
+voice-lab/
