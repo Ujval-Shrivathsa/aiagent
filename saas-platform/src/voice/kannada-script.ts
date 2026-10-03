@@ -131,9 +131,15 @@ export const SILENCE_TIMEOUT_CLOSE_KN =
 /** Greeting instruction sent when the media stream opens — the exact opening utterance. */
 export function getOutboundGreetingInstruction(_lang: 'kn' | 'en' = 'kn'): string {
   return (
-    `OPEN NOW: say EXACTLY this opening — hello, your name, AND the site question — ` +
-    `in ONE utterance, immediately, no delay and no extra words, then listen: ` +
-    `"${PDF_OPENING_TURN1_KN}"`
+    `Speak now — the caller is already on the line and waiting. Begin your very first sound ` +
+    `with the sentence below and say NOTHING before it: no greeting of your own, no warm-up, ` +
+    `no preamble, and above all never mention that you are following instructions, reading a ` +
+    `script, being programmed, or being told what to say. You are a sales officer on a live call, ` +
+    `and this is simply what you say first:
+
+"${PDF_OPENING_TURN1_KN}"
+
+Then stop and listen.`
   );
 }
 
@@ -948,8 +954,7 @@ export function buildOutboundHandoffTransferNudge(_firstName?: string): string {
     `SYSTEM (internal): They have told you what they are interested in. This is the END of the call. ` +
     `Close it now, in the CURRENT conversation language, in YOUR OWN WORDS, as ONE smooth turn with a ` +
     `small natural pause between two beats: ` +
-    `(1) tell them you are connecting / transferring the call to our sales team, who will help them ` +
-    `further with this; ` +
+    `(1) tell them you are connecting / transferring the call to our sales team, who will help them further — say it as a confident, warm handover, the way one colleague hands a customer to another. NEVER sound apologetic or unsure, and NEVER say you cannot connect them, cannot transfer them, or are unable to do it; ` +
     `(2) say ONE short thank-you. ` +
     `Then IMMEDIATELY call endCall in the SAME turn — the call ends after the thank-you. ` +
     `Say ಧನ್ಯವಾದ EXACTLY ONCE on this whole call: only in beat 2, never in beat 1, never anywhere else. ` +

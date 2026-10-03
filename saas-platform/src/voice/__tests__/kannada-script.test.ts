@@ -92,8 +92,17 @@ describe('v5 script — spoken lines', () => {
     // OWNER-SPECIFIED: the greeting speaks the intro AND the site question in one
     // utterance. The name question is still a later turn.
     const greeting = getOutboundGreetingInstruction();
-    assert.match(greeting, /OPEN NOW/);
-    assert.match(greeting, /no delay/);
+    assert.match(greeting, /Speak now/);
+    // The agent was heard announcing "I will tell what I am programmed to tell"
+    // before the opening, because the instruction was phrased as a meta-command
+    // the model narrated. It must now forbid any such preamble outright.
+    assert.match(greeting, /say NOTHING before it/);
+    assert.match(
+      greeting,
+      /never mention that you are following instructions|never mention that you are following instructions/,
+    );
+    assert.match(greeting, /being programmed/);
+    assert.match(greeting, /Then stop and listen/);
     assert.ok(
       greeting.includes(PDF_OPENING_TURN1_KN),
       'the greeting speaks the intro AND the site question',

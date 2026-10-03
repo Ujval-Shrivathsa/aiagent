@@ -68,6 +68,7 @@ import {
   registerOutboundSpeech,
 } from '../voice/outbound-dedup';
 import { CallCaptureSession } from '../voice/call-capture/session';
+import { forwardFrameToModel } from './noise-duck';
 import { callLog } from '../voice/call-capture/logger';
 import { loadAudioPipelineConfig } from '../voice/audio-pipeline-config';
 import { takeCachedOutboundOpeningInstruction } from '../voice/opening-prewarm-cache';
@@ -1586,6 +1587,14 @@ let plivoCallUuid: string | null = null;
    * single accepted request.
    */
   const hangupCallLegViaPlivoApi = async (reason: string): Promise<boolean> => {
+    // Published to /api/plivo/hangup-status. The host's logs cannot be read from
+    // the outside, and until this existed a call that never ended was
+    // indistinguishable from a hangup that was never even attempted.
+    const noteHangupDiag = (patch: Record<string, unknown>) => {
+      const g = globalThis as any;
+      g.__plivoHangup = { ...(g.__plivoHangup || {}), ...patch, at: new Date().toISOString() };
+    };
+    noteHangupDiag({ triggered: true, reason });
     const authId = process.env.PLIVO_AUTH_ID;
     const authToken = process.env.PLIVO_AUTH_TOKEN || '';
     if (!authId || !authToken) {
@@ -1604,6 +1613,7 @@ let plivoCallUuid: string | null = null;
     const candidates = [plivoCallUuid, streamSid].filter(
       (v, i, a): v is string => Boolean(v) && a.indexOf(v) === i,
     );
+    noteHangupDiag({ alegUrl, candidates: candidates.length });
     if (candidates.length === 0) {
       console.error('[PLIVO] No call identifier captured — cannot hang up');
       return false;
@@ -1633,7 +1643,10 @@ let plivoCallUuid: string | null = null;
           body: mech.body ? JSON.stringify(mech.body) : undefined,
         });
         if (!res.ok) {
+          noteHangupDiag({ lastMechanism: mech.name, lastStatus: res.status });
           console.warn(`[PLIVO] hangup ${mech.name} uuid=${uuid} status=${res.status} (${reason})`);
+        } else {
+          noteHangupDiag({ lastMechanism: mech.name, lastStatus: res.status });
         }
       } catch (e: any) {
         console.error(`[PLIVO] hangup ${mech.name} uuid=${uuid} threw:`, e?.message || e);
@@ -1641,6 +1654,7 @@ let plivoCallUuid: string | null = null;
       // Accepted != ended. Only the CDR proves the leg is gone.
       if (await plivoCallHasEnded(authId, authHeader, uuid)) {
         console.log(`[PLIVO] CALL ENDED uuid=${uuid} via ${mech.name} aleg_url=${alegUrl} (${reason})`);
+        noteHangupDiag({ ended: true, via: mech.name, uuid });
         return true;
       }
     }
@@ -1648,6 +1662,7 @@ let plivoCallUuid: string | null = null;
     console.error(
       `[PLIVO] HANGUP FAILED (${reason}): tried ${plan.length} spellings across ${candidates.length} id(s), aleg_url=${alegUrl}. The caller may be left on an open line.`,
     );
+    noteHangupDiag({ ended: false, attempts: plan.length });
     return false;
   };
 
@@ -3086,20 +3101,18 @@ CURRENT DATE: ${currentDateStr}
             pcmBuffer.writeInt16LE(cur, i * 4 + 2);
             lastUpsampleSample = cur;
         }
-        // ---- BACKGROUND NOISE IS NEVER SENT TO THE MODEL ----
-        // Every caller frame used to be forwarded verbatim, so fan / AC /
-        // traffic / TV noise reached Gemini and could be transcribed as
-        // phantom speech. 'speech' and 'ambiguous' still pass at FULL volume
-        // (ambiguous is what protects very quiet speech starts); only 'noise'
-        // is replaced with digital silence.
-        // The chunk is STILL SENT — audioSentChunkCount must keep incrementing
-        // for the whole call or the reconnect watchdog treats the stream as
-        // broken. Dropping the send entirely would look identical to a dead
-        // session; sending silence removes the noise and looks alive.
-        let forwardedPcm = pcmBuffer;
+        // ---- CALLER AUDIO IS NEVER REPLACED WITH SILENCE ----
+        // 'noise' frames used to be swapped for digital ZEROS, so any frame the
+        // classifier wrongly called noise reached the model as silence. On a
+        // narrowband phone line — precisely where the classifier is least
+        // reliable — that made Priya completely deaf. See noise-duck.ts for why
+        // attenuation is the correct trade. The chunk is always sent either way,
+        // because audioSentChunkCount must keep incrementing or the reconnect
+        // watchdog reads a dead stream.
+        let forwardedPcm: Buffer = pcmBuffer;
         if (frameClass === 'noise') {
-          forwardedPcm = Buffer.alloc(sampleCount * 4);
           duckedNoiseFrames++;
+          forwardedPcm = forwardFrameToModel(pcmBuffer, sampleCount * 2, frameClass);
         }
         try {
             const payloadB64 = forwardedPcm.subarray(0, sampleCount * 4).toString("base64");

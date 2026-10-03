@@ -30,6 +30,9 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET() {
   const stats = alegFetchStats();
+  // What the live agent last did about ending a call. Without this, "the
+  // trigger never fired" and "Plivo refused every spelling" looked identical.
+  const hangup = (globalThis as any).__plivoHangup || null;
   const authId = process.env.PLIVO_AUTH_ID || '';
   const authIdHash = authId
     ? crypto.createHash('sha256').update(authId).digest('hex').slice(0, 12)
@@ -38,6 +41,7 @@ export async function GET() {
     build: 'hangup-status/1',
     now: new Date().toISOString(),
     aleg: stats,
+    hangup,
     plivo: {
       authIdConfigured: Boolean(authId),
       authTokenConfigured: Boolean(process.env.PLIVO_AUTH_TOKEN),

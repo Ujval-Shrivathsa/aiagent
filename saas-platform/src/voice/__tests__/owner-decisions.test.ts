@@ -13,6 +13,9 @@ import {
   looksLikeCannotAnswerLine,
   buildOutboundRepeatQuestionNudge,
   buildOutboundProjectsNudge,
+  buildOutboundHandoffTransferNudge,
+  getOutboundGreetingInstruction,
+  PDF_OPENING_TURN1_KN,
   OUTBOUND_CANNOT_ANSWER_NUDGE,
   OUTBOUND_NAME_QUESTION_NUDGE,
   HONORIFIC_SIR_KN,
@@ -139,5 +142,47 @@ describe('only the opening is scripted', () => {
       const spoken = nudge.replace(/NEVER say[^.]*\./gi, '');
       assert.doesNotMatch(spoken, /ಧನ್ಯವಾದ/, 'no thanks may be spoken mid-flow');
     }
+  });
+});
+
+/**
+ * The transfer line was heard as "I can't connect you with the sales team" —
+ * an apology that handed the caller nothing, immediately before the call died.
+ * It has to sound like a handover one colleague gives another.
+ */
+describe('the sales handover is confident, never apologetic', () => {
+  const handoff = buildOutboundHandoffTransferNudge();
+
+  it('forbids apologising or claiming it cannot connect them', () => {
+    assert.match(handoff, /confident, warm handover/);
+    assert.match(handoff, /NEVER sound apologetic or unsure/);
+    assert.match(handoff, /NEVER say you cannot connect them/);
+  });
+
+  it('still ends on one thank-you and endCall in the same turn', () => {
+    assert.match(handoff, /sales team/i);
+    assert.match(handoff, /ONE short thank-you/);
+    assert.match(handoff, /exactly ONCE/i);
+    assert.match(handoff, /endCall in the SAME turn/);
+  });
+});
+
+/**
+ * The opening was prefaced with "I will tell what I am programmed to tell",
+ * because the greeting instruction was phrased as a meta-command the model
+ * narrated out loud before the real line.
+ */
+describe('the opening is spoken immediately, with no preamble', () => {
+  const greeting = getOutboundGreetingInstruction();
+
+  it('never mentions instructions, a script, or being programmed', () => {
+    assert.match(greeting, /never mention that you are following instructions/);
+    assert.match(greeting, /being programmed/);
+    assert.match(greeting, /say NOTHING before it/);
+  });
+
+  it('still speaks the whole opening in one go', () => {
+    assert.ok(greeting.includes(PDF_OPENING_TURN1_KN));
+    assert.match(greeting, /Then stop and listen/);
   });
 });
