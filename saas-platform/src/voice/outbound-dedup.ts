@@ -14,6 +14,13 @@ const DUPLICATE_OVERLAP_RATIO = 0.55;
  */
 const MIN_TOKEN_SET_SIZE = 4;
 const TOKEN_CONTAINMENT_RATIO = 0.65;
+/**
+ * Lower bar for comparing two sentences INSIDE one turn. Two sentences in a
+ * single short utterance are almost always genuinely different, so only a
+ * majority token overlap means the model stuttered — whereas across separate
+ * turns we must stay strict, because a legitimate reply reuses script wording.
+ */
+const SELF_REPEAT_TOKEN_CONTAINMENT_RATIO = 0.5;
 
 export function normalizeForDedup(text: string): string {
   return String(text || '')
@@ -102,6 +109,36 @@ export function registerOutboundSpeech(text: string, spoken: Set<string>): void 
   for (const chunk of splitSpeakableChunks(text)) {
     spoken.add(chunk);
   }
+}
+
+/**
+ * True when ONE model turn says the same thing twice inside itself — e.g. the
+ * sales line + thank-you, then the whole pair again. The turn-level dedup
+ * guards compare a turn against EARLIER turns, so a self-repeating turn slipped
+ * through and the caller heard the same sentence twice.
+ *
+ * Callers must NOT apply this to a turn carrying a close line: suppressing the
+ * only close would leave the caller on a silent, open call.
+ */
+export function repeatsSentenceWithinTurn(text: string): boolean {
+  // Compare the SENTENCES against each other. The joined whole would be unique
+  // by construction and never match itself.
+  const sentences = String(text || '')
+    .trim()
+    .split(/(?<=[.!?])\s+/)
+    .map((p) => normalizeForDedup(p))
+    .filter((p) => p.length >= MIN_CHUNK_CHARS);
+  if (sentences.length < 2) return false;
+  for (let i = 0; i < sentences.length; i += 1) {
+    for (let j = i + 1; j < sentences.length; j += 1) {
+      const a = sentences[i];
+      const b = sentences[j];
+      if (a === b) return true;
+      if (tokenContainment(a, b) >= SELF_REPEAT_TOKEN_CONTAINMENT_RATIO) return true;
+      if (overlapRatio(a, b) >= DUPLICATE_OVERLAP_RATIO) return true;
+    }
+  }
+  return false;
 }
 
 export function allowsRepeatReplay(

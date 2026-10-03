@@ -24,14 +24,21 @@ describe('audio-pipeline-config', () => {
     const cfg = loadAudioPipelineConfig();
     // Turn-end: 250ms absorbs intra-word Kannada pauses over 8kHz telephony
     // (100ms committed half-spoken turns — the "agent never hears me" bug).
-    assert.equal(cfg.aadSilenceDurationMs, 250);
-    assert.equal(cfg.vadSilenceMs, 250);
-    assert.ok(cfg.vadSilenceMs >= cfg.aadSilenceDurationMs, 'local VAD should outlast AAD');
-    assert.ok(cfg.aadPrefixPaddingMs >= 100, 'prefix padding keeps soft opening syllables');
+assert.equal(cfg.aadSilenceDurationMs, 250);
+assert.equal(cfg.vadSilenceMs, 250);
+assert.ok(cfg.vadSilenceMs >= cfg.aadSilenceDurationMs, 'local VAD should outlast AAD');
+// Turn-end must stay generous. An aggressive value (60ms) REGRESSED on real
+// calls: half-spoken turns produced no transcript, so the agent looped
+// "I couldn't hear you" instead of listening.
+assert.ok(
+  cfg.vadSilenceMs >= 200 && cfg.aadSilenceDurationMs >= 200,
+  'turn-end must not be shortened — it breaks transcription on 8kHz telephony',
+);
+assert.ok(cfg.aadPrefixPaddingMs >= 100, 'prefix padding keeps soft opening syllables');
     // SPEECH-FIRST: a turn starts only after ~60ms of consecutive speech
     // frames — single noisy frames must never fire USER_SPEAKING.
-    assert.ok(cfg.speechGateStartMs >= 40, 'debounce rejects one-frame noise');
-    assert.ok(cfg.speechGateStartMs <= 80, 'debounce stays inside the 120ms prefix padding (no latency)');
+assert.ok(cfg.speechGateStartMs >= 40, 'debounce rejects one-frame noise');
+assert.ok(cfg.speechGateStartMs <= 80, 'debounce stays inside the prefix padding (no latency)');
     assert.ok(cfg.speechGateWindowMs >= cfg.speechGateStartMs, 'candidate window forgives one gap');
     // Sharp hearing: quiet speech still clears every threshold — the caller
     // never needs to shout (the floor itself no longer tracks up on speech).

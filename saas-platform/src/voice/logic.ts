@@ -15,6 +15,7 @@ import {
   buildOutboundCallbackTimeNudge,
   buildOutboundCallbackOutsideWindowNudge,
   PDF_THANKS_CLOSE_KN,
+  HONORIFIC_SIR_KN,
   CALLBACK_OUTSIDE_WINDOW_LINE_KN,
   OUTBOUND_REPEAT_NUDGE,
   OUTBOUND_NO_REPEAT_NUDGE,
@@ -28,6 +29,19 @@ import {
   looksLikeAreasLine,
   looksLikeHandoffLine,
   looksLikeNotInterestedCloseLine,
+  looksLikeEchoConfirmQuestion,
+  looksLikeFutureSitePitch,
+  looksLikeStutteredClose,
+  shouldDropRepeatedThanksInTurn,
+  looksLikeCantHearLine,
+  extractCallerName,
+  honorificForName,
+  looksLikeNameRefusal,
+  OUTBOUND_NAME_QUESTION_NUDGE,
+  buildOutboundSiteQuestionNudge,
+  buildOutboundNameDeclinedNudge,
+  OUTBOUND_THANKS_FALLBACK_NUDGE,
+  OUTBOUND_CLEAN_CLOSE_NUDGE,
   OUTBOUND_NOT_INTERESTED_CLOSE_KN,
   PDF_HANDOFF_LINE_KN,
   OUTBOUND_SILENCE_CHECK_NUDGE,
@@ -46,6 +60,7 @@ import {
 import {
   allowsRepeatReplay,
   isDuplicateOutboundSpeech,
+  repeatsSentenceWithinTurn,
   registerOutboundSpeech,
 } from '../voice/outbound-dedup';
 import { CallCaptureSession } from '../voice/call-capture/session';
@@ -115,6 +130,7 @@ import { isMeaningfulCustomerUtterance, shouldAllowEndCall } from '../voice/end-
 import {
   isCustomerTurnSignal,
   isShortAffirmativeReply,
+  isLikelySttNoise,
   looksLikeOpeningEcho,
 } from '../voice/short-reply';
 
@@ -140,7 +156,9 @@ function parseHeaderBag(raw: any): Record<string, string> {
 }
 
 // --- Normalize Plivo & Twilio WebSocket events to one internal format ---
-function normalizeVoiceEvent(raw: any): any {
+// Exported for tests: the CallUUID capture here is what makes the remote
+// hangup possible, and it silently regressed once already.
+export function normalizeVoiceEvent(raw: any): any {
   const evt: string = raw.event || raw.type || 'media';
   const result: any = { event: evt };
 
@@ -153,6 +171,11 @@ function normalizeVoiceEvent(raw: any): any {
     result.start = {
       streamSid: streamId,
       callSid: start.callSid || start.callId || start.CallUUID || start.callUuid || streamId,
+      // The bare Plivo CallUUID, kept separate from callSid: callSid falls back
+      // to the stream id, and the hangup API needs the real CallUUID.
+      // Plivo's start event names it `callId` — without that key here the UUID
+      // was never captured and the call could never be hung up remotely.
+      callUuid: start.CallUUID || start.callUuid || start.callId || start.callSid || '',
       customParameters: mergedParams,
       isPlivo: Boolean(raw.extra_headers != null || start.streamId || start.callId),
     };
@@ -193,16 +216,19 @@ function normalizeVoiceEvent(raw: any): any {
 const OUTBOUND_END_CALL_TOOL = {
   name: "endCall",
   description:
-    "End the outbound call ONLY when: (1) the caller clearly said goodbye / asked to end, " +
-    "(2) the caller confirmed they are not interested (after the notInterested close line), or " +
+    "YOU END THIS CALL. Call endCall immediately after any closing line, in the SAME turn — " +
+    "the system drops the line the moment you do, so never wait and never speak after it. " +
+    "Call it when: (1) the caller clearly said goodbye / asked to end, " +
+    "(2) the caller confirmed they are not interested (after the notInterested close line), " +
     "(3) the caller is interested in a location and you JUST spoke the sales-team closing line " +
-    "('the sales team will call you') plus the thank-you line — then call endCall in the SAME turn, " +
-    "right after that line. " +
+    "('the sales team will call you') plus the thank-you line, or " +
+    "(4) the caller has not answered your 'are you still there?' check and is still silent. " +
     "'Thank you' is spoken at most ONCE per call, and only in the thank-you line " +
-    "('ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.'). Never add 'thank you' to the not-interested close — " +
-    "a caller who declined must not be thanked. If the closing already thanked them, do NOT say it again. " +
-    "NEVER end the call because of silence, a quiet caller, short pauses, short replies, or a topic change — " +
-    "silence ALWAYS means keep listening. The system will never ask you to end a call due to silence.",
+    "('ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.'). That sentence is the LAST thing you ever say: say it " +
+    "ONCE, then call endCall in that same turn. Never repeat it, never reword it, never " +
+    "start it again, and never speak anything after it. " +
+    "Never add 'thank you' to the not-interested close — a caller who declined must not be thanked. " +
+    "NEVER end the call because of a short pause, a short reply, or a topic change — that is not a close.",
   parameters: {
     type: Type.OBJECT,
     properties: {},
@@ -295,6 +321,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   let audioSink: 'twilio' | 'plivo' = (process.env.VOICE_PROVIDER || 'twilio').toLowerCase() === 'plivo' ? 'plivo' : 'twilio';
   let streamSid: string | null = null;
+/** Real Plivo CallUUID (not the stream id) — required to hang the call up. */
+let plivoCallUuid: string | null = null;
   let capture: CallCaptureSession | null = null;
   let geminiSession: any = null;
   let pendingFullSystemInstruction = '';
@@ -419,6 +447,8 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let sustainedNoiseFrames = 0;
   let lastClassLogAt = 0;
   let lastClassCounts = { speech: 0, ambiguous: 0, noise: 0, silent: 0 };
+  /** Caller frames replaced with digital silence before reaching Gemini. */
+  let duckedNoiseFrames = 0;
   let suppressAiOutput = false;
   let suppressRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   // Speech-recovery ladder — single failsafe for "spoke but nothing happened".
@@ -502,6 +532,42 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   let outboundThanksSpoken = false;
   let outboundNoRepeatNudgeSent = false;
   let outboundThanksHangupTimer: NodeJS.Timeout | null = null;
+  /**
+   * The sales-team line and the thank-you sometimes arrive as TWO model turns.
+   * Muting on the sales line alone swallowed the thank-you, leaving the caller
+   * on a dead-but-open line while the model improvised a sign-off. So when the
+   * close is incomplete we do NOT mute — we FORCE the missing thank-you once and
+   * keep an absolute deadline that ends the call no matter what.
+   */
+  let outboundThanksFallbackSent = false;
+  let outboundThanksFallbackTimer: NodeJS.Timeout | null = null;
+  /** The close was stuttered and replaced with one clean close — only once. */
+  let outboundCleanCloseSent = false;
+  /**
+   * A thank-you has already been SPOKEN inside the CURRENT model turn.
+   *
+   * One Gemini turn streams as SEVERAL `modelTurn` messages and every one of
+   * them plays its audio the moment it arrives, while the mute only arms on
+   * `turnComplete`. So a turn of "ಧನ್ಯವಾದ ... ಧನ್ಯವಾದ ... ಧನ್ಯವಾದ" passed the
+   * per-message stutter detector and the caller heard the thank-you three times.
+   * This flag stops the second one dead.
+   */
+  let outboundThanksPlayedInTurn = false;
+  /** Name flow: asked once, captured once, then addressed by name for the call. */
+  let outboundNameAsked = false;
+  let outboundCallerName: string | null = null;
+  let outboundCallerHonorific = HONORIFIC_SIR_KN;
+  let outboundNamePersisted = false;
+  let outboundNameDeclined = false;
+  /** The ask → capture → site-question sequence has completed (once per call). */
+  let outboundNameStepDone = false;
+  /**
+   * "I couldn't hear you" is said AT MOST ONCE per call. Poor transcription
+   * re-armed the recovery ladder on every speech end, so the agent asked the
+   * caller to repeat over and over and stopped listening. After the one ask we
+   * simply keep listening and never nag again.
+   */
+  let outboundCantHearSaid = false;
   let outboundHardMuteAfterClose = false;
   let outboundRepeatReplayPending = false;
   let lastOutboundTurnSuppressed = false;
@@ -711,6 +777,78 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
   };
 
+  /**
+   * TURN 1B/1C — the caller has said something. Ask for their name, capture it
+   * from the NEXT reply, save it to the lead, then ask the site question while
+   * addressing them correctly. Exactly one pass; never re-asked.
+   */
+  const persistCallerName = async (name: string) => {
+    if (outboundNamePersisted || !customerPhone) return;
+    outboundNamePersisted = true;
+    try {
+      const tail = customerPhone.replace(/\D/g, '').slice(-10);
+      const updated = await prisma.lead.updateMany({
+        where: { phone: { contains: tail } },
+        data: { name },
+      });
+      console.log(`[DB] Saved caller name "${name}" on ${updated.count} lead row(s)`);
+    } catch (e: any) {
+      console.error('[DB Error] Failed to save caller name:', e?.message || e);
+    }
+  };
+
+  /**
+   * TURN 1B/1C — ask for the caller's name, capture it from their next reply,
+   * save it to the lead, then ask the site question addressing them correctly.
+   * Exactly one pass: asked once, captured (or declined) once, never re-asked.
+   */
+  const handleNameStep = (userText: string): boolean => {
+    if (!isOutboundCall || outboundNameStepDone) return false;
+    if (outboundHardMuteAfterClose || outboundTransferStarted) return false;
+    const raw = String(userText || '').trim();
+    if (!raw) return false;
+
+    // First customer speech: ask for the name, once, and consume this turn.
+    if (!outboundNameAsked) {
+      if (isLikelySttNoise(raw)) return false;
+      outboundNameAsked = true;
+      console.log('[GEMINI] First caller speech — asking for their name');
+      diagLog('name step → asking for name');
+      geminiSession?.sendRealtimeInput({ text: OUTBOUND_NAME_QUESTION_NUDGE });
+      return true;
+    }
+
+    // This reply answers our name question. One shot: a name, or a refusal.
+    outboundNameStepDone = true;
+    if (looksLikeNameRefusal(raw)) {
+      outboundNameDeclined = true;
+      outboundCallerHonorific = HONORIFIC_SIR_KN;
+      console.log('[NAME] Caller declined to give a name — moving on');
+      geminiSession?.sendRealtimeInput({
+        text: buildOutboundNameDeclinedNudge(outboundCallerHonorific),
+      });
+      return true;
+    }
+
+    const name = extractCallerName(raw);
+    if (name) {
+      outboundCallerName = name;
+      outboundCallerHonorific = honorificForName(name);
+      console.log(`[NAME] Caller is "${name}" → ${outboundCallerHonorific}`);
+      diagLog(`name captured "${name}" honorific=${outboundCallerHonorific}`);
+      void persistCallerName(name);
+    } else {
+      // Garbled reply: do not stall the call asking again.
+      outboundNameDeclined = true;
+      outboundCallerHonorific = HONORIFIC_SIR_KN;
+      console.log(`[NAME] Could not read a name from "${raw.slice(0, 40)}" — moving on`);
+    }
+    geminiSession?.sendRealtimeInput({
+      text: buildOutboundSiteQuestionNudge(outboundCallerName),
+    });
+    return true;
+  };
+
   const armOpeningWait = () => {
     outboundOpeningRepeatDone = true;
   };
@@ -767,6 +905,51 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     scheduleOutboundHangupAfterThanks();
   };
 
+  // Absolute cap on an incomplete close. If the forced thank-you never comes
+  // back, the call still ends — silence beats an endless "consider us later".
+  const OUTBOUND_THANKS_FALLBACK_DEADLINE_MS = 12_000;
+
+  const armOutboundThanksFallback = () => {
+    if (!isOutboundCall || endCallInvoked || outboundThanksSpoken) return;
+    if (outboundThanksFallbackTimer) return;
+    console.log(
+      '[GUARD] Sales-team close delivered WITHOUT the thank-you — forcing the thank-you line',
+    );
+    if (!outboundThanksFallbackSent) {
+      outboundThanksFallbackSent = true;
+      try {
+        geminiSession?.sendRealtimeInput({ text: OUTBOUND_THANKS_FALLBACK_NUDGE });
+      } catch (e: any) {
+        console.error('[GEMINI] Thanks fallback nudge failed:', e?.message || e);
+      }
+    }
+    outboundThanksFallbackTimer = setTimeout(() => {
+      outboundThanksFallbackTimer = null;
+      if (endCallInvoked || outboundThanksSpoken) return;
+      console.warn('[GUARD] Thanks fallback deadline hit — ending the call anyway');
+      activateOutboundPostThanksMute();
+    }, OUTBOUND_THANKS_FALLBACK_DEADLINE_MS);
+  };
+
+  /**
+   * The sales-team line ENDS the call, but only once the thank-you has actually
+   * been spoken. If both landed in one utterance we mute immediately (as
+   * before); if the model split them we must NOT mute here — that is exactly
+   * what swallowed the thank-you and left the line open and repeating.
+   */
+  const handleSalesTeamCloseSpoken = (turnText: string) => {
+    if (!isOutboundCall || outboundTransferStarted) return;
+    outboundTransferStarted = true;
+    outboundBusyCloseSent = true;
+    clearOutboundSilenceTimer();
+    if (hasThanksClosing(turnText)) {
+      console.log('[GUARD] Sales-team close + thank-you delivered — hangup after playback');
+      activateOutboundPostThanksMute();
+    } else {
+      armOutboundThanksFallback();
+    }
+  };
+
   const shouldSuppressOutboundTurn = (turnText: string): { suppress: boolean; reason?: string } => {
     const trimmed = String(turnText || '').trim();
     if (outboundHardMuteAfterClose) {
@@ -774,6 +957,48 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
     if (!trimmed) {
       return { suppress: false };
+    }
+    // ECHO-CONFIRM: "did you say yes sir?" stalls the flow and reads as a
+    // machine. Drop the audio; the caller advances to the next script step.
+    if (looksLikeEchoConfirmQuestion(trimmed)) {
+      return { suppress: true, reason: 'echo_confirm' };
+    }
+    // INVENTED SIGN-OFF: "if you want a site in the future please consider
+    // Alliance Square" is the DECLINE close only. On the interested path it is
+    // an improvised line that repeated forever, so it is dropped outright.
+    // (looksLikeFutureSitePitch never fires on a turn carrying the sales-team
+    // line, and the decline path keeps its own wording.)
+    if (!outboundNotInterestedNudgeSent && looksLikeFutureSitePitch(trimmed)) {
+      return { suppress: true, reason: 'future_pitch' };
+    }
+    // The forced thank-you is the ONE line this call must never lose to a
+    // dedup guard, or the caller is left on a dead line after the sales pitch.
+    if (outboundThanksFallbackSent && hasThanksClosing(trimmed)) {
+      return { suppress: false };
+    }
+    // NEVER nag: after the single "I couldn't hear you" the agent must stop
+    // asking and just listen, however poor the line is.
+    if (outboundCantHearSaid && looksLikeCantHearLine(trimmed)) {
+      return { suppress: true, reason: 'cant_hear_repeat' };
+    }
+    // A turn that repeats itself ("...same thing. ...same thing.") is dropped so
+    // the caller never hears one sentence twice. NEVER applied to a close: if
+    // that turn carried the only sales-team line or thank-you, muting it would
+    // silence the close and strand the call.
+    if (
+      repeatsSentenceWithinTurn(trimmed) &&
+      !looksLikeHandoffLine(trimmed) &&
+      !hasThanksClosing(trimmed) &&
+      !looksLikeNotInterestedCloseLine(trimmed)
+    ) {
+      return { suppress: true, reason: 'duplicate_within_turn' };
+    }
+    // STUTTERED CLOSE: the caller heard the thank-you repeated several times.
+    // Every audio part of one turn plays before the mute arms, so the only way
+    // to guarantee it is heard ONCE is to drop the turn and re-send a single
+    // clean close.
+    if (!outboundCleanCloseSent && looksLikeStutteredClose(trimmed)) {
+      return { suppress: true, reason: 'stuttered_close' };
     }
     if (outboundThanksSpoken && isRedundantOutboundThanksTurn(trimmed, true)) {
       return { suppress: true, reason: 'redundant_thanks' };
@@ -827,6 +1052,19 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
   };
 
   const playOutboundTurnIfNew = (parts: any[], turnText: string) => {
+    // The thank-you has already been spoken in THIS turn and this message says
+    // it again. That is the "repeats the thank-you a few times" complaint, and
+    // the mute cannot save us here — it arms on turnComplete, long after these
+    // chunks have played. Drop the repeat and cut the call now.
+    if (shouldDropRepeatedThanksInTurn(outboundThanksPlayedInTurn, turnText)) {
+      lastOutboundTurnSuppressed = true;
+      console.warn(
+        `[GUARD] Dropping the thank-you repeated inside one turn: "${turnText.slice(0, 72)}"`,
+      );
+      diagLog('thanks repeated within turn → dropped, ending the call');
+      activateOutboundPostThanksMute();
+      return;
+    }
     const { suppress, reason } = shouldSuppressOutboundTurn(turnText);
     lastOutboundTurnSuppressed = suppress;
     if (suppress) {
@@ -834,6 +1072,32 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
         `[GEMINI] Suppressing outbound repeat (${reason}): "${turnText.slice(0, 72)}..."`,
       );
       forceOutboundHangupIfClosing(`suppressed repeat (${reason})`);
+      // Dropped echo-confirm and invented sign-off turns: do NOT leave the
+      // caller in dead air — push the next real script step instead.
+      if (reason === 'echo_confirm' || reason === 'future_pitch') {
+        console.log('[GUARD] Stalled/improvised turn dropped — advancing the script step');
+        sendOutboundNoRepeatNudgeOnce();
+        if (outboundTransferStarted) {
+          // Mid-close: the sales-team line is out, so only the thanks is missing.
+          armOutboundThanksFallback();
+        } else if (outboundAreasLineDelivered && !outboundHandoffNudgeSent) {
+          outboundHandoffNudgeSent = true;
+          geminiSession?.sendRealtimeInput({ text: buildOutboundHandoffTransferNudge() });
+        } else if (!outboundAreasLineDelivered && !outboundLocationsNudgeSent) {
+          outboundLocationsNudgeSent = true;
+          geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
+        }
+        return;
+      }
+      // A stuttered close is dropped and replaced by ONE clean close, so the
+      // caller hears the sales line and the thank-you exactly once each.
+      if (reason === 'stuttered_close') {
+        outboundCleanCloseSent = true;
+        console.warn('[GUARD] Stuttered close dropped — re-sending ONE clean close');
+        diagLog('stuttered close → single clean close');
+        geminiSession?.sendRealtimeInput({ text: OUTBOUND_CLEAN_CLOSE_NUDGE });
+        return;
+      }
       // STRICT no-repeat rule: tell the model the line is spent — in any wording.
       if (
         reason === 'duplicate_spoken_line' ||
@@ -847,20 +1111,33 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
     playGeminiAudioParts(parts);
     registerOutboundSpeech(turnText, outboundSpokenChunks);
+    if (hasThanksClosing(turnText)) {
+      // Remember it for the rest of THIS turn so a repeat chunk can be dropped.
+      outboundThanksPlayedInTurn = true;
+    }
+    if (!outboundCantHearSaid && looksLikeCantHearLine(turnText)) {
+      // Our one and only "I couldn't hear you" — after this the agent just
+      // listens, whatever the line quality is.
+      outboundCantHearSaid = true;
+      console.log('[HEARING] Said the one-and-only "couldn\'t hear you" — never again');
+      diagLog('cant-hear line spoken once → recovery now replies instead of asking');
+    }
     if (!outboundAreasLineDelivered && looksLikeAreasLine(turnText)) {
       outboundAreasLineDelivered = true;
       console.log('[GUARD] Areas line delivered — next yes goes to sales-team transfer');
     }
     if (!outboundTransferStarted && looksLikeHandoffLine(turnText)) {
-      // SALES-TEAM CLOSING: the "sales team will call you" line ENDS the call.
-      // No live transfer — hard-mute, let the line play out, then hang up.
-      outboundTransferStarted = true;
-      outboundBusyCloseSent = true;
-      console.log('[GUARD] Sales-team closing line delivered — hangup after playback');
-      activateOutboundPostThanksMute();
+      // SALES-TEAM CLOSING: the "sales team will call you" line ENDS the call,
+      // but the thank-you has to be spoken first — muting here is what used to
+      // swallow it and leave the caller on an open, repeating line.
+      console.log('[GUARD] Sales-team closing line delivered');
+      handleSalesTeamCloseSpoken(turnText);
     }
     if (
       isOutboundCall &&
+      // Excluded once the sales-team close is spoken: its thank-you still owes
+      // the caller a line, so the blanket mute must not fire.
+      !outboundTransferStarted &&
       (outboundBusyCloseSent ||
         hasThanksClosing(turnText) ||
         looksLikeClosingGoodbye(turnText))
@@ -988,10 +1265,16 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   const sendRecoveryNudge = (kind: 'ask_repeat' | 'reply_now', attempt: number) => {
     if (!geminiSession || outboundHardMuteAfterClose || endCallInvoked || outboundTransferStarted) return;
+    // We have already asked the caller to repeat once. From now on the ladder
+    // must NEVER ask again — it just answers, so a poor line can never turn
+    // into "I couldn't hear you" on repeat.
+    const effectiveKind: 'ask_repeat' | 'reply_now' =
+      kind === 'ask_repeat' && outboundCantHearSaid ? 'reply_now' : kind;
     try {
-      geminiSession.sendRealtimeInput({ text: speechRecoveryNudgeText(kind, attempt) });
+      geminiSession.sendRealtimeInput({ text: speechRecoveryNudgeText(effectiveKind, attempt) });
       console.warn(
-        `[RECOVERY] ${kind === 'ask_repeat' ? 'No transcript' : 'No AI reply'} after caller speech — nudge #${attempt} sent`,
+        `[RECOVERY] ${kind === 'ask_repeat' ? 'No transcript' : 'No AI reply'} after caller speech — nudge #${attempt} sent` +
+          (effectiveKind !== kind ? ' (repeat-ask suppressed — already asked once)' : ''),
       );
     } catch (e: any) {
       console.error('[RECOVERY] Nudge failed:', e?.message || e);
@@ -1102,10 +1385,58 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
 
   const hangupStream = () => {
     if (audioSink === "plivo") {
-      ws.send(JSON.stringify({ event: "stop", streamId: streamSid }));
+      // Plivo has NO "stop" output event (its outputs are playAudio, checkpoint,
+      // clearAudio, sendDTMF), so sending one was silently ignored. clearAudio
+      // drops anything still queued for playback; ending the CALL is the REST
+      // hangup below. Twilio does use a "stop" message.
+      ws.send(JSON.stringify({ event: "clearAudio", streamId: streamSid }));
     } else {
       ws.send(JSON.stringify({ event: "stop", streamSid }));
     }
+  };
+
+  /**
+   * Stop the MEDIA STREAM is not the same as hanging up the CALL.
+   * Plivo keeps the call leg connected until the call itself is hung up via the
+   * REST API, so stopping the stream (and closing our websocket) left the caller
+   * on a silent, open line — which is exactly "it doesn't end the call".
+   * The CallUUID arrives in the Plivo start event; without it this is a no-op
+   * and the stream-stop path still runs as before.
+   */
+  const hangupCallLegViaPlivoApi = async (reason: string): Promise<boolean> => {
+    const authId = process.env.PLIVO_AUTH_ID;
+    const authHeader = authId
+      ? `Basic ${Buffer.from(`${authId}:${process.env.PLIVO_AUTH_TOKEN || ''}`).toString('base64')}`
+      : '';
+    // Candidates, in order: the real CallUUID, then the stream id. Some Plivo
+    // setups only carry the identifier on the stream, and without ONE of these
+    // the caller is left on a silent but OPEN line. A wrong id merely 404s, so
+    // trying it costs nothing and rescues the hangup.
+    const candidates = [plivoCallUuid, streamSid].filter(
+      (v, i, a): v is string => Boolean(v) && a.indexOf(v) === i,
+    );
+    if (!authId || candidates.length === 0) {
+      console.warn('[PLIVO] No call identifier captured — relying on the media-stream stop only');
+      return false;
+    }
+    for (const uuid of candidates) {
+      try {
+        const res = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/${uuid}/`, {
+          method: 'POST',
+          headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'hangup' }),
+        });
+        if (res.ok) {
+          console.log(`[PLIVO] Call hangup API accepted uuid=${uuid} (${reason})`);
+          return true;
+        }
+        console.warn(`[PLIVO] Call hangup API FAILED uuid=${uuid} status=${res.status} (${reason})`);
+      } catch (e: any) {
+        console.error(`[PLIVO] Call hangup API error uuid=${uuid}:`, e?.message || e);
+      }
+    }
+    console.error('[PLIVO] Every hangup candidate was rejected — the call leg may stay open');
+    return false;
   };
 
   const completeAndHangupOutboundCall = async (reason: string) => {
@@ -1146,14 +1477,27 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       }
     }
 
+    // Actually terminate the CALL, then tidy the stream up. Without the API
+    // call above this only stopped the audio and the caller stayed connected.
+    await hangupCallLegViaPlivoApi(reason);
     hangupStream();
     geminiSession?.close();
     ws.close();
   };
 
+  /**
+   * STRICT END RULE (owner-specified): the call ends the moment the thank-you
+   * has finished playing. It does NOT wait on the model to remember endCall —
+   * that wait is exactly what let the thank-you be said again and again. The
+   * model's own endCall still ends the call a moment sooner; this is the hard
+   * ceiling, ~1s after the last audio of the close.
+   */
+  const OUTBOUND_END_CALL_BACKSTOP_MS = 1_200;
+
   const scheduleOutboundHangupAfterThanks = () => {
     if (!isOutboundCall || endCallInvoked) return;
     if (outboundThanksHangupTimer) clearTimeout(outboundThanksHangupTimer);
+    if (outboundThanksFallbackTimer) clearTimeout(outboundThanksFallbackTimer);
     const run = () => {
       outboundThanksHangupTimer = null;
       if (endCallInvoked || !outboundThanksSpoken) return;
@@ -1162,7 +1506,14 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
         outboundThanksHangupTimer = setTimeout(run, playLeft + 80);
         return;
       }
-      void completeAndHangupOutboundCall('thanks closing');
+      // The close has finished playing. Give the model a beat to call endCall,
+      // then end the line regardless — exactly one thank-you, then gone.
+      outboundThanksHangupTimer = setTimeout(() => {
+        outboundThanksHangupTimer = null;
+        if (endCallInvoked || !outboundThanksSpoken) return;
+        console.warn('[GUARD] Strict end rule — hanging up right after the thank-you');
+        void completeAndHangupOutboundCall('strict end rule after thank-you');
+      }, OUTBOUND_END_CALL_BACKSTOP_MS);
     };
     outboundThanksHangupTimer = setTimeout(run, 40);
   };
@@ -1314,9 +1665,7 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     }
   };
 
-  // SILENCE = KEEP LISTENING (permanent stability rule). The tick only ever
-  // produces a soft availability-check line; the cycle re-arms forever. There
-  // is NO close step and NO hangup on any amount of silence.
+  // SILENCE = one check line, then end the call if nobody answers it.
   const runOutboundSilenceTick = () => {
     outboundSilenceTimer = null;
     if (!geminiSession || endCallInvoked || outboundTransferStarted) return;
@@ -1329,11 +1678,19 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
     outboundSilence = tick.state;
     if (tick.action === 'speak_check') {
       const quietSecs = Math.round((now - lastCustomerTranscriptAt) / 1000);
-      console.log(`[SILENCE] ${quietSecs}s quiet — soft availability-check reprompt (call stays open)`);
-      diagLog(`silence reprompt quiet=${quietSecs}s → LISTENING (no hangup ever)`);
+      console.log(`[SILENCE] ${quietSecs}s quiet — availability check ONCE, then 10s to answer`);
+      diagLog(`silence check quiet=${quietSecs}s → LISTENING (hangs up if unanswered)`);
       sendOutboundSilenceNudge(OUTBOUND_SILENCE_CHECK_NUDGE);
-      // Re-arm the next quiet window — the loop NEVER terminates the call.
       scheduleOutboundSilenceTick();
+    } else if (tick.action === 'close_silence') {
+      // The check line went unanswered. Mute and drop the line — talking again
+      // here is exactly what produced the endless repeat.
+      const quietSecs = Math.round((now - lastCustomerTranscriptAt) / 1000);
+      console.log(`[SILENCE] ${quietSecs}s quiet after the check line — ending the call`);
+      diagLog(`silence close quiet=${quietSecs}s → ENDING`);
+      // Flag first: if the model emits its own endCall here it is authorised.
+      outboundBusyCloseSent = true;
+      activateOutboundPostThanksMute();
     } else {
       scheduleOutboundSilenceTick();
     }
@@ -1399,8 +1756,14 @@ export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams)
       const msg = normalizeVoiceEvent(rawMsg);
 
       if (msg.event === 'start') {
-        streamSid = msg.start.streamSid;
-        outboundCallUuid = msg.start.callSid || streamSid;
+    streamSid = msg.start.streamSid;
+    outboundCallUuid = msg.start.callSid || streamSid;
+    // Only trust a real Plivo CallUUID — a stream id would make the hangup API
+    // 404 and silently leave the caller connected.
+    if (msg.start.isPlivo && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\$/i.test(String(msg.start.callUuid || ''))) {
+      plivoCallUuid = msg.start.callUuid;
+      console.log('[PLIVO] CallUUID captured — the call leg can be hung up via the API');
+    }
         if (msg.start.isPlivo) audioSink = 'plivo';
         const fromUrl: Record<string, string> = {};
         streamParams?.forEach((v, k) => {
@@ -1634,6 +1997,17 @@ CURRENT DATE: ${currentDateStr}
                   capture?.onAiSpeakEnd();
                   resetSpeakNudge();
                   diagLog('tts turn_complete (AI turn fully delivered)');
+                  if (isOutboundCall && outboundThanksPlayedInTurn) {
+                    // The thank-you was spoken EARLIER in this turn (the close
+                    // streams across several messages), so relying on the last
+                    // message alone would miss it and the call would never end.
+                    if (!outboundThanksSpoken) {
+                      console.log('[GUARD] Turn ended after the thank-you — ending the call');
+                      diagLog('turn_complete after thanks → mute + hangup');
+                      activateOutboundPostThanksMute();
+                    }
+                    outboundThanksPlayedInTurn = false;
+                  }
                   const completedAiText = response.serverContent?.modelTurn?.parts
                     ?.map((p: any) => p.text || '')
                     .join('')
@@ -1653,17 +2027,13 @@ CURRENT DATE: ${currentDateStr}
                     }
                     if (isOutboundCall && hasThanksClosing(completedAiText)) {
                       // Not-interested thanks close (or goodbye close) delivered —
-                      // hard-mute the agent and schedule the hangup.
+                      // hard-mute the agent and schedule the hangup. This is also
+                      // where the FORCED thank-you lands, ending the sales-team close.
                       activateOutboundPostThanksMute();
                     } else if (isOutboundCall && looksLikeHandoffLine(completedAiText)) {
                       // Sales-team closing line delivered — the call ENDS after
-                      // playback (no live transfer; the team calls the customer back).
-                      if (!outboundTransferStarted) {
-                        outboundTransferStarted = true;
-                        outboundBusyCloseSent = true;
-                        clearOutboundSilenceTimer();
-                        activateOutboundPostThanksMute();
-                      }
+                      // the thank-you (no live transfer; the team calls back).
+                      handleSalesTeamCloseSpoken(completedAiText);
                     }
                   }
                   lastOutboundTurnSuppressed = false;
@@ -1690,7 +2060,7 @@ CURRENT DATE: ${currentDateStr}
                     }
                     armOpeningWait();
                   }
-                  if (isOutboundCall && !outboundThanksSpoken) {
+                  if (isOutboundCall && !outboundThanksSpoken && !outboundTransferStarted) {
                     armOutboundSilenceAfterTurn();
                   }
                   // LANGUAGE FOLLOW: deliver a queued language-switch prompt once AI audio ends.
@@ -1794,7 +2164,12 @@ CURRENT DATE: ${currentDateStr}
 
                   fullTranscription += `User: ${userText}\n`;
                   capture?.onCustomerTranscript(userText);
-                  if (isMeaningfulCustomerUtterance(userText, looksLikeOpeningEcho)) {
+                  if (handleNameStep(userText)) {
+            // The name step owns this turn: we already sent either the name
+            // question or the site question. Never fall through and answer it
+            // twice, which is what produced doubled sentences.
+            customerUtteranceCount++;
+          } else if (isMeaningfulCustomerUtterance(userText, looksLikeOpeningEcho)) {
                     customerUtteranceCount++;
                     injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
                     injectDeferredContextAfterOpening();
@@ -1997,11 +2372,15 @@ CURRENT DATE: ${currentDateStr}
                         ?.map((p: any) => p.text || '')
                         .join(' ')
                         .trim() || '';
-                      // FLOWCHART: a close line (the ONE close or a thank-you transfer
-                      // line) must have been delivered before hangup. NOTE: there is NO
-                      // silence close any more — silence can never satisfy this guard.
+                      // FLOWCHART: a close line (the ONE close or the sales-team
+                      // line + thank-you) must have been delivered before hangup.
+                      // The sales-team handoff is read off the model's own turn
+                      // text because the model calls endCall in that same turn —
+                      // before the engine has set outboundBusyCloseSent.
                       const closingSpoken =
                         outboundBusyCloseSent ||
+                        looksLikeHandoffLine(currentTurnAiText) ||
+                        looksLikeHandoffLine(lastPlayedAiRaw) ||
                         looksLikeNotInterestedCloseLine(currentTurnAiText) ||
                         looksLikeNotInterestedCloseLine(lastPlayedAiRaw) ||
                         hasThanksClosing(currentTurnAiText) ||
@@ -2024,6 +2403,14 @@ CURRENT DATE: ${currentDateStr}
                           (outboundBusyCloseSent ||
                             looksLikeNotInterestedCloseLine(currentTurnAiText) ||
                             looksLikeNotInterestedCloseLine(lastPlayedAiRaw)),
+                        // The model calls endCall in the SAME turn as the close
+                        // line, which lands BEFORE outboundBusyCloseSent is set —
+                        // so read the handoff straight off its own turn text.
+                        salesTeamClose:
+                          isOutboundCall &&
+                          (looksLikeHandoffLine(currentTurnAiText) ||
+                            looksLikeHandoffLine(lastPlayedAiRaw) ||
+                            outboundTransferStarted),
                       });
                       if (!endGuard.allow) {
                         console.warn(
@@ -2373,7 +2760,8 @@ CURRENT DATE: ${currentDateStr}
             if (now - lastClassLogAt >= 10_000) {
               diagLog(
                 `classify 10s: speech=${lastClassCounts.speech} amb=${lastClassCounts.ambiguous} ` +
-                  `noise=${lastClassCounts.noise} silent=${lastClassCounts.silent} floor=${noiseFloorRms.toFixed(0)}`,
+                  `noise=${lastClassCounts.noise} silent=${lastClassCounts.silent} ` +
+                  `duckedTotal=${duckedNoiseFrames} floor=${noiseFloorRms.toFixed(0)}`,
               );
               lastClassCounts = { speech: 0, ambiguous: 0, noise: 0, silent: 0 };
               lastClassLogAt = now;
@@ -2437,8 +2825,23 @@ CURRENT DATE: ${currentDateStr}
             pcmBuffer.writeInt16LE(cur, i * 4 + 2);
             lastUpsampleSample = cur;
         }
+        // ---- BACKGROUND NOISE IS NEVER SENT TO THE MODEL ----
+        // Every caller frame used to be forwarded verbatim, so fan / AC /
+        // traffic / TV noise reached Gemini and could be transcribed as
+        // phantom speech. 'speech' and 'ambiguous' still pass at FULL volume
+        // (ambiguous is what protects very quiet speech starts); only 'noise'
+        // is replaced with digital silence.
+        // The chunk is STILL SENT — audioSentChunkCount must keep incrementing
+        // for the whole call or the reconnect watchdog treats the stream as
+        // broken. Dropping the send entirely would look identical to a dead
+        // session; sending silence removes the noise and looks alive.
+        let forwardedPcm = pcmBuffer;
+        if (frameClass === 'noise') {
+          forwardedPcm = Buffer.alloc(sampleCount * 4);
+          duckedNoiseFrames++;
+        }
         try {
-            const payloadB64 = pcmBuffer.subarray(0, sampleCount * 4).toString("base64");
+            const payloadB64 = forwardedPcm.subarray(0, sampleCount * 4).toString("base64");
             geminiSession.sendRealtimeInput({
               audio: {
                 data: payloadB64,
@@ -2622,6 +3025,7 @@ CURRENT DATE: ${currentDateStr}
     clearOutboundSilenceTimer();
     if (outboundOpeningWaitTimer) clearTimeout(outboundOpeningWaitTimer);
     if (outboundThanksHangupTimer) clearTimeout(outboundThanksHangupTimer);
+    if (outboundThanksFallbackTimer) clearTimeout(outboundThanksFallbackTimer);
     if (openingGraceTimer) clearTimeout(openingGraceTimer);
     void capture?.finalize();
     capture = null;

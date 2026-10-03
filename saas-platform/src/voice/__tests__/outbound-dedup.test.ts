@@ -4,6 +4,7 @@ import {
   isDuplicateOutboundSpeech,
   registerOutboundSpeech,
   allowsRepeatReplay,
+  repeatsSentenceWithinTurn,
 } from '../outbound-dedup';
 
 describe('outbound-dedup', () => {
@@ -63,5 +64,45 @@ describe('outbound-dedup', () => {
     const prev = 'Is this for investment, or are you looking to build a house immediately?';
     assert.equal(allowsRepeatReplay(prev, prev, true), true);
     assert.equal(allowsRepeatReplay(prev, prev, false), false);
+  });
+});
+
+/**
+ * A model turn that says the same thing twice INSIDE itself. The turn-level
+ * guards compare against EARLIER turns, so these slipped through and the
+ * caller heard the same sentence twice on one call.
+ */
+describe('self-repeating turns', () => {
+  it('catches a verbatim sentence repeated inside one turn', () => {
+    assert.equal(
+      repeatsSentenceWithinTurn('One is on Hunsur Road. One is on Hunsur Road.'),
+      true,
+    );
+    assert.equal(
+      repeatsSentenceWithinTurn(
+        'We have sites near Hunsur Road. We have sites near Hunsur Road.',
+      ),
+      true,
+    );
+  });
+
+  it('catches a reworded sentence repeated inside one turn', () => {
+    assert.equal(
+      repeatsSentenceWithinTurn(
+        'Our sales team will call you shortly. The sales team is going to call you right away.',
+      ),
+      true,
+    );
+  });
+
+  it('leaves genuinely different turns alone', () => {
+    assert.equal(
+      repeatsSentenceWithinTurn('One is on Hunsur Road. The other is near T. Narasipura.'),
+      false,
+    );
+    assert.equal(repeatsSentenceWithinTurn('A single sentence with no full stop.'), false);
+    assert.equal(repeatsSentenceWithinTurn(''), false);
+    // Two short fragments are too small to compare on.
+    assert.equal(repeatsSentenceWithinTurn('Yes sir. Ok.'), false);
   });
 });

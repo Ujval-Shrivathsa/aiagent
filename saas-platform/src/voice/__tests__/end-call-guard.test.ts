@@ -133,4 +133,36 @@ describe('end-call-guard', () => {
     assert.equal(isMeaningfulCustomerUtterance('hello', noEcho), true);
     assert.equal(isMeaningfulCustomerUtterance('ಹೌದು site ಬೇಕು', noEcho), true);
   });
+
+  /**
+   * The model owns ending the call after the sales-team close. Its endCall
+   * arrives in the SAME turn as that close — before the engine has set
+   * outboundBusyCloseSent — so it must be authorised off the turn text alone,
+   * even on a call too short to satisfy the duration floor.
+   */
+  it('always allows endCall after the sales-team close', () => {
+    assert.equal(
+      shouldAllowEndCall({
+        callDurationMs: 4_000,
+        customerClearGoodbye: false,
+        customerUtteranceCount: 1,
+        batchHasNotInterested: false,
+        isOutbound: true,
+        salesTeamClose: true,
+      }).allow,
+      true,
+    );
+    // …and the same call WITHOUT that close is still blocked, so the guard is
+    // not simply disabled.
+    assert.equal(
+      shouldAllowEndCall({
+        callDurationMs: 4_000,
+        customerClearGoodbye: false,
+        customerUtteranceCount: 1,
+        batchHasNotInterested: false,
+        isOutbound: true,
+      }).allow,
+      false,
+    );
+  });
 });

@@ -21,14 +21,18 @@
  *     speech; the classification-driven floor now NEVER tracks up on
  *     speech-class frames.
  *   - RELIABLE turn-end over 8kHz telephony: ~250ms local VAD + ~250ms AAD
- *     commit (100ms committed half-spoken turns — the old bug).
+ *     commit. Do NOT shorten these for latency: an aggressive value commits
+ *     half-spoken turns, the audio never transcribes, and the agent loops
+ *     "I couldn't hear you" instead of listening.
  *   - Fast interruption: barge-in arms in ~150ms and only for speech-class
  *     frames, so room noise still cannot clear the agent's audio.
- *   - STABILITY: silence NEVER ends a call. The quiet-caller reprompt cycle
- *     loops forever (see kannada-script.ts); recovery ends in resume-and-
- *     listen, never in a hangup.
- *   - ALWAYS FORWARD: every caller frame reaches Gemini (classification
- *     shapes only VAD/barge-in/floor — it never gates the audio stream).
+ *   - SILENCE: one availability-check line, then if the caller is still quiet
+ *     10s later the call ends. Never an endless "are you still there?" loop.
+ *   - NOISE NEVER REACHES THE MODEL: 'speech' and 'ambiguous' frames are
+ *     forwarded at full volume (ambiguous is what protects very quiet speech
+ *     starts); 'noise' frames are replaced with digital silence before they
+ *     reach Gemini. The chunk is still SENT so the stream never looks stalled
+ *     to the reconnect watchdog.
  *
  * All values are overridable via env so we can tune without code changes.
  */
@@ -142,7 +146,7 @@ export function loadAudioPipelineConfig(): AudioPipelineConfig {
     // Debounced gate: ~3 consecutive speech frames (60ms) start a turn; the
     // candidate window forgives one diphthong gap; inside a turn, ≤140ms of
     // ambiguous frames never splits the turn. Onset cost is hidden inside
-    // the 120ms AAD prefix padding — no perceived latency.
+    // the AAD prefix padding — no perceived latency.
     speechGateStartMs: num(process.env.VOICE_SPEECH_GATE_START_MS, 60),
     speechGateWindowMs: num(process.env.VOICE_SPEECH_GATE_WINDOW_MS, 90),
     speechGateSpeakingToleranceMs: num(process.env.VOICE_SPEECH_GATE_TOLERANCE_MS, 140),
@@ -150,14 +154,17 @@ export function loadAudioPipelineConfig(): AudioPipelineConfig {
     // END-side only now: the START side is owned by the debounced gate.
     vadEnergyMinRms: num(process.env.VOICE_VAD_ENERGY_MIN_RMS, 85),
     vadEnergyFloorMult: num(process.env.VOICE_VAD_ENERGY_FLOOR_MULT, 1.45),
-    // Turn-end: ~250ms local VAD + ~250ms AAD. 100ms was TOO aggressive on
-    // 8kHz telephony: intra-word pauses committed half-spoken turns, and the
-    // fragmented audio never produced a transcript ("agent ignores speech").
-    // 250ms absorbs Kannada word gaps and still commits a short "ಹೌದು" fast.
+    // Turn-end budget — RESTORED to the proven-safe value.
+    // 250ms local VAD + 250ms AAD. An aggressive 60ms version was tried for
+    // latency and REGRESSED: on 8kHz telephony it committed half-spoken turns,
+    // the fragmented audio never produced a transcript, and the agent looped
+    // "I couldn't hear you" instead of listening. Correctness wins over ~130ms;
+    // if this is ever retuned, watch the "couldn't hear" counter, not latency.
     vadSilenceMs: silenceMs(process.env.VOICE_VAD_SILENCE_MS, 250),
     aadSilenceDurationMs: silenceMs(process.env.VOICE_AAD_SILENCE_MS, 250),
-    // Padding PRECEDES detected speech: 120ms keeps opening syllables of soft
-    // Kannada replies inside the turn instead of clipped as pre-turn noise.
+    // Padding PRECEDES detected speech, so it is pre-roll, NOT added latency:
+    // 120ms keeps the opening syllables of a soft Kannada reply inside the turn
+    // instead of clipping them as pre-turn noise.
     aadPrefixPaddingMs: num(process.env.VOICE_AAD_PREFIX_PADDING_MS, 120),
     // HIGH end sensitivity = Gemini commits the turn promptly; start stays
     // HIGH so the very first syllable of a soft reply is picked up.

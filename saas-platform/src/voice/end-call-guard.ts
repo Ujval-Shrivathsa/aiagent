@@ -17,6 +17,14 @@ export type EndCallGuardInput = {
   // (silenceTimeoutClose REMOVED — silence never authorizes ending a call.)
   /** Busy / call-back-later close line spoken (cold-call spec trigger 4). */
   busyCallbackClose?: boolean;
+  /**
+   * The sales-team close ("I'll forward you to the sales team") plus the
+   * thank-you was spoken. The model has FULL authority to end the call here —
+   * it calls endCall in the very same turn as that close line, which arrives
+   * BEFORE the engine has flagged outboundBusyCloseSent, so this is checked
+   * straight off the model's own turn text.
+   */
+  salesTeamClose?: boolean;
 };
 
 export type EndCallGuardResult = {
@@ -42,6 +50,13 @@ export function shouldAllowEndCall(input: EndCallGuardInput): EndCallGuardResult
   // Cold-call spec trigger 4: busy / call-back-later close — always allowed.
   if (input.busyCallbackClose) {
     return { allow: true, reason: 'busy_callback_close' };
+  }
+
+  // Sales-team close + thank-you spoken. The model owns ending the call after
+  // this, so it is ALWAYS allowed here — including a short call, where the
+  // duration floor below would otherwise reject it.
+  if (input.salesTeamClose) {
+    return { allow: true, reason: 'sales_team_close' };
   }
 
   if (batchHasNotInterested && customerUtteranceCount >= 1) {

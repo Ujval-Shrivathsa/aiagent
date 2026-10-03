@@ -33,12 +33,28 @@
 // SPOKEN SCRIPT LINES — exact, word for word.
 // ---------------------------------------------------------------------------
 
-/** TURN 1 — opening: intro + the site question, ONE utterance, spoken immediately. */
+/** TURN 1 — the intro ONLY, spoken immediately on answer. The question is TURN 2. */
+export const PDF_OPENING_INTRO_KN = 'ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ.';
+
+/** TURN 2 — ask the caller's name. Spoken only after they say anything at all. */
+export const PDF_NAME_QUESTION_KN = 'ನಿಮ್ಗೆ ಹೆಸರು ಏನು ಸರ್?';
+
+/** TURN 3 — the site question, spoken after we have their name. */
+export const PDF_SITE_QUESTION_KN = 'ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಸರ್?';
+
+/**
+ * The full opening as ONE utterance. Kept for reference and for callers that
+ * genuinely do not want to give a name — never the default path.
+ */
 export const PDF_OPENING_KN =
   'ಹಲೋ ಸರ್, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಸರ್?';
 
 /** Compatibility alias — there is no separate English constant. */
 export const PDF_OPENING = PDF_OPENING_KN;
+
+/** Honorifics, chosen from the caller's given name. */
+export const HONORIFIC_SIR_KN = 'ಸರ್';
+export const HONORIFIC_MAAM_KN = 'ಮಾಮ್';
 
 /** TURN 2 — locations line. Concise INFORMATION ONLY; the caller then responds naturally. */
 export const PDF_AREAS_LINE_KN =
@@ -108,8 +124,8 @@ export const SILENCE_TIMEOUT_CLOSE_KN =
 /** Greeting instruction sent when the media stream opens — the exact opening utterance. */
 export function getOutboundGreetingInstruction(_lang: 'kn' | 'en' = 'kn'): string {
   return (
-    `OPEN NOW: say EXACTLY this opening, in ONE utterance, immediately — no delay, ` +
-    `no extra words, no other questions — then listen: "${PDF_OPENING_KN}"`
+    `OPEN NOW: say EXACTLY this intro, in ONE utterance, immediately — no delay, ` +
+    `no extra words, NO question yet — then listen: "${PDF_OPENING_INTRO_KN}"`
   );
 }
 
@@ -152,19 +168,18 @@ export function detectForbiddenLayoutMention(text: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// SILENCE PROTOCOL STATE MACHINE — 5s check, 10s close. (Pure helpers.)
+// SILENCE PROTOCOL STATE MACHINE — one check line, then close. (Pure helpers.)
 // ---------------------------------------------------------------------------
 
 /**
- * STABILITY RULE (permanent): silence NEVER terminates the call. The silence
- * protocol is an infinite soft-reprompt loop: every SILENCE_CHECK_AFTER_MS of
- * quiet the agent says the availability-check line ONCE, then returns to
- * LISTENING. There is no close step, no endCall, no timeout — the loop only
- * resets when the caller speaks. The call ends ONLY on: caller no/goodbye
- * (explicit decline), a completed sales transfer, or a real telephony hangup.
+ * SILENCE RULE (owner-specified): Priya asks "are you still there?" ONCE, and
+ * if the caller is still quiet SILENCE_CLOSE_AFTER_CHECK_MS later the call
+ * ENDS. There is no endless reprompt loop and the check line is never
+ * repeated — that loop is what made a quiet call talk over itself.
+ * Any caller speech resets the cycle back to 'listening'.
  */
 export const SILENCE_CHECK_AFTER_MS = 9_000;
-/** Re-reprompt interval — the SAME soft check line repeats at this cadence forever. */
+/** How long the caller may stay quiet AFTER the check line before we hang up. */
 export const SILENCE_CLOSE_AFTER_CHECK_MS = 10_000;
 
 export type OutboundSilenceReason = 'idle' | 'listening' | 'checked' | 'closed';
@@ -188,23 +203,25 @@ export function resetOutboundSilence(): OutboundSilenceState {
 }
 
 /**
- * Silence reprompt (soft, non-terminating). Every quiet window produces the
- * SAME gentle availability check — never a close line, never an endCall.
+ * Quiet window 1 → speak the availability-check line ONCE. Quiet window 2
+ * (the caller never answered it) → 'close_silence', the terminal action.
  */
 export function tickOutboundSilence(
   state: OutboundSilenceState,
   now: number,
-): { action: 'none' | 'speak_check'; state: OutboundSilenceState } {
+): { action: 'none' | 'speak_check' | 'close_silence'; state: OutboundSilenceState } {
   if ((state.reason !== 'listening' && state.reason !== 'checked') || state.deadline == null) {
     return { action: 'none', state };
   }
   if (now < state.deadline) return { action: 'none', state };
-  // Forever loop: after the deadline, speak the check line and arm the next
-  // window. The state machine has NO terminal 'closed' state.
-  return {
-    action: 'speak_check',
-    state: { reason: 'checked', deadline: now + SILENCE_CLOSE_AFTER_CHECK_MS, checkSpoken: true },
-  };
+  if (state.reason === 'listening') {
+    return {
+      action: 'speak_check',
+      state: { reason: 'checked', deadline: now + SILENCE_CLOSE_AFTER_CHECK_MS, checkSpoken: true },
+    };
+  }
+  // The check line went unanswered — end the call instead of talking again.
+  return { action: 'close_silence', state: { reason: 'closed', deadline: null, checkSpoken: true } };
 }
 
 export function nextOutboundSilenceDeadline(state: OutboundSilenceState): number | null {
@@ -343,11 +360,35 @@ export function buildOutboundResumeNudge(memory: OutboundConversationMemory): st
 // DETECTORS (internal — classify AI/caller turns; never produce speech).
 // ---------------------------------------------------------------------------
 
+/**
+ * Strip ALL whitespace. The Live output transcriber inserts stray spaces INSIDE
+ * words ("ಸೇ ಲ್ಸ್", "ಕ ರೆ ಮಾ ಡು ತ್ತಾ ರೆ", "ಧನ್ಯವಾ ದ"), so every script-line
+ * identity check has to be compared with whitespace removed on BOTH sides.
+ * Without this the close-line detectors silently failed to match the spoken
+ * Kannada, the agent was never muted, and an improvised sign-off looped on the
+ * call instead of ending it.
+ */
+export function squashScriptText(text: string): string {
+  return String(text || '').replace(/\s+/gu, '');
+}
+
+/**
+ * Test patterns against the raw text AND its space-squashed form. Pass a
+ * space-free regex alongside the readable one so a split word still matches.
+ */
+function matchesSpaced(text: string, squashed: string, ...res: RegExp[]): boolean {
+  return res.some((re) => re.test(text) || re.test(squashed));
+}
+
 /** True when spoken text includes a thanks-style closing (Kannada-safe). */
 export function hasThanksClosing(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return false;
-  return /(^|[^\p{L}])(thanks?|thank\s+you|ಧನ್ಯವಾದ|धन्यवाद)/iu.test(t);
+  if (/(^|[^\p{L}])(thanks?|thank\s+you|ಧನ್ಯವಾದ|धन्यवाद)/iu.test(t)) return true;
+  // The transcriber can split ಧನ್ಯವಾದ into "ಧನ್ಯವಾ ದ" — compare squashed so the
+  // ONE thank-you on the call is never missed (a miss means no hangup).
+  const sq = squashScriptText(t);
+  return sq.includes('ಧನ್ಯವಾದ') || sq.includes('धन्यवाद');
 }
 
 export function looksLikeThanksOnlyLine(text: string): boolean {
@@ -398,9 +439,278 @@ export function looksLikeRepeatRequest(text: string): boolean {
 export function looksLikeNotInterestedCloseLine(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return false;
-  if (t.includes(OUTBOUND_NOT_INTERESTED_CLOSE_KN)) return true;
+  const sq = squashScriptText(t);
+  if (sq.includes(squashScriptText(OUTBOUND_NOT_INTERESTED_CLOSE_KN))) return true;
+  // Kannada fallback (space-free variants included) OR the English rendering the
+  // model reaches for: "if you want a site in the future please consider
+  // Alliance Square". Both ARE this close — it must mute and hang up.
   return (
-    /(ಭವಿಷ್ಯ|ನೆನಪಿಸಿಕೊಳ್ಳಿ)/.test(t) && /ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್/.test(t)
+    matchesSpaced(
+      t,
+      sq,
+      /(ಭವಿಷ್ಯ|ನೆನಪಿಸಿಕೊಳ್ಳಿ)/,
+      /ಭವಿಷ್ಯ/,
+      /ನೆನಪಿಸಿಕೊಳ್ಳಿ/,
+      /(?:in the future|at some time|someday|one day)/i,
+      /(?:consider|remember|keep us in mind)/i,
+    ) &&
+    matchesSpaced(
+      t,
+      sq,
+      /ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್/,
+      /ಅಲೈಯನ್ಸ್ಸ್ಕ್ವೇರ್/,
+      /ಅಲೈಯನ್ಸ್ಸ್ಕವೇರ್/,
+      /(?:alliance\s*square)/i,
+    )
+  );
+}
+
+/**
+ * An INVENTED "keep us in mind" sign-off — the model improvising this after the
+ * sales-team line is what made the call repeat itself forever instead of
+ * closing. It is banned on the interested path; the exact script decline close
+ * above is the only place this wording is ever allowed.
+ *
+ * Never fires on a turn that also carries the sales-team line (that turn's
+ * content is legitimate — only the missing thank-you needs handling).
+ */
+export function looksLikeFutureSitePitch(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const sq = squashScriptText(t);
+  // Only the EXACT script close owns this wording. A reworded or improvised
+  // variant is still a pitch the caller never agreed to hear on an interested
+  // call, so the engine bans it and closes properly instead.
+  if (sq.includes(squashScriptText(OUTBOUND_NOT_INTERESTED_CLOSE_KN))) return false;
+  // A turn that ALSO carries the sales-team line is never an improvised pitch:
+  // that content is legitimate, and only its missing thank-you needs handling.
+  // Callers must not suppress it, or the caller hears nothing at all.
+  if (looksLikeHandoffLine(t)) return false;
+  const future = matchesSpaced(
+    t,
+    sq,
+    /(?:in the future|at some time|someday|one day|some other day|later)/i,
+    /ಭವಿಷ್ಯ/,
+    /(?:consider|remember|keep us in mind|think of us)/i,
+    /ನೆನಪಿಸಿಕೊಳ್ಳಿ/,
+    /ಮನೆಮಾಡಿ/,
+  );
+  if (!future) return false;
+  return matchesSpaced(
+    t,
+    sq,
+    /(?:site|plot|land|property|project)/i,
+    /ಸೈಟ್/,
+    /ಪ್ಲಾಟ್/,
+    /ಸರ್?ಕೃಮಿ/,
+    /(?:alliance\s*square)/i,
+    /ಅಲೈಯನ್ಸ್/,
+    /ಅಲೈಯನ್ಸ್ಸ್ಕ್ವೇರ್/,
+    /ಅಲೈಯನ್ಸ್ಸ್ಕವೇರ್/,
+  );
+}
+
+/**
+ * Pull the caller's given name out of their reply.
+ *
+ * Handles the shapes a person actually says: a bare "Ravi", "my name is Ravi",
+ * "I am Ravi", "Ravi here", "Ravi k", and the Kannada equivalents. Returns null
+ * when nothing usable is present, so the caller can be addressed as sir/ma'am
+ * without inventing a name.
+ */
+export function extractCallerName(text: string): string | null {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const t = raw.replace(/[.!?]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // Explicit introductions win over any other word in the sentence.
+  const explicit = [
+    /\bmy name is\s+([A-Za-z\u0C80-\u0CFF][\w\u0C80-\u0CFF'-]{1,20})/i,
+    /\b(?:i am|i'm|im)\s+([A-Za-z\u0C80-\u0CFF][\w\u0C80-\u0CFF'-]{1,20})/i,
+    /\bthis is\s+([A-Za-z\u0C80-\u0CFF][\w\u0C80-\u0CFF'-]{1,20})/i,
+    /\bnaanu\s+([A-Za-z\u0C80-\u0CFF][\w\u0C80-\u0CFF'-]{1,20})/i,
+    /\benu\s+naanu\s+([A-Za-z\u0C80-\u0CFF][\w\u0C80-\u0CFF'-]{1,20})/i,
+    /\bnaa\s+peru\s+([A-Za-z\u0C80-\u0CFF][\w\u0C80-\u0CFF'-]{1,20})/i,
+    /\bnaanu\s+peru\s+([A-Za-z\u0C80-\u0CFF][\w\u0C80-\u0CFF'-]{1,20})/i,
+  ];
+  for (const re of explicit) {
+    const m = t.match(re);
+    if (m && !isAgentName(m[1])) return m[1].replace(/[^A-Za-z\u0C80-\u0CFF'-]/g, '');
+  }
+
+  // Otherwise a bare name: one or two capitalised words, optionally "here"/"k".
+  const bare = t.match(/\b([A-Z][a-z]{1,20})(?:\s+([A-Z][a-z]{1,20}))?\b/);
+  if (bare) {
+    const first = bare[1];
+    if (!isAgentName(first) && !isNoiseWord(first)) return first;
+  }
+  return null;
+}
+
+/** Priya must never capture herself as the caller's name. */
+function isAgentName(word: string): boolean {
+  return /^priya$/i.test(String(word || '').trim());
+}
+
+const NAME_NOISE_WORDS = new Set([
+  'yes', 'no', 'hello', 'hi', 'hey', 'ok', 'okay', 'sure', 'right', 'wrong',
+  'good', 'fine', 'thanks', 'thank', 'bye', 'hmm', 'umm', 'yep', 'nope',
+  'sir', 'maam', 'mam', 'madam', 'here', 'and', 'the', 'this', 'that',
+  'ಹೌದು', 'ಇಲ್ಲ', 'ಸರಿ', 'ಹಲೋ', 'ಧನ್ಯವಾದ', 'ಸ್ವಾಗತ', 'ನಮಸ್ಕಾರ',
+]);
+
+function isNoiseWord(word: string): boolean {
+  return NAME_NOISE_WORDS.has(String(word || '').trim().toLowerCase());
+}
+
+/**
+ * Feminine given names common in Mysuru/Kannada households. This list is
+ * deliberately conservative: a name that is not clearly feminine gets sir.
+ * Misgendering a caller is far worse than addressing everyone as sir.
+ */
+const FEMININE_NAMES = new Set([
+  'anitha', 'anjali', 'asha', 'bhavani', 'deepa', 'divya', 'geetha', 'geetha',
+  'kavitha', 'laksmi', 'lakshmi', 'laxmi', 'manjula', 'meena', 'nirmala',
+  'padma', 'pooja', 'priyanka', 'radha', 'rekha', 'sangeetha', 'savitha',
+  'seema', 'shanthi', 'shubha', 'sunitha', 'suresha', 'swathi', 'uma',
+  'vasudha', 'vidya', 'anjali', 'ayesha', 'ayesha', 'chitra', 'darshana',
+  'gayathri', 'jyothi', 'kalpana', 'kavya', 'keerthi', 'kirthi', 'mallika',
+  'mahalakshmi', 'nandini', 'priya', 'roja', 'sandhya', 'sarala', 'shruti',
+  'siri', 'smitha', 'spandana', 'spandhana', 'sujatha', 'sumitra', 'sunanda',
+  'thulasi', 'uma', 'varalakshmi', 'yashodha', 'anjaneya', 'bindu', 'chaithra',
+]);
+
+/**
+ * Address the caller from their name: ma'am only for a clearly feminine given
+ * name, sir for everything else (including an unknown or odd name).
+ */
+export function honorificForName(name: string | null | undefined): string {
+  const n = String(name || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  if (!n) return HONORIFIC_SIR_KN;
+  return FEMININE_NAMES.has(n) ? HONORIFIC_MAAM_KN : HONORIFIC_SIR_KN;
+}
+
+/** "Ravi sir" / "Lakshmi ma'am" — empty when we never got a usable name. */
+export function nameWithHonorific(name: string | null | undefined): string {
+  const n = String(name || '').trim();
+  if (!n) return '';
+  return `${n} ${honorificForName(n)}`;
+}
+
+/** True when the reply looks like the caller declining to give a name. */
+export function looksLikeNameRefusal(text: string): boolean {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+  return (
+    /\b(?:don'?t|dont|do not|won'?t|will not)\s+(?:want to\s+)?(?:give|tell|share)\b/i.test(t) ||
+    /\bno need\b|\bnot needed\b|\bskip (?:it|that)\b/i.test(t) ||
+    /ಹೆಸರು\s*(?:ಕೊಡ್ಬೇಡ|ಬೇಡ|ಕೊಡಬೇಕು\s*ಇಲ್ಲ)/.test(t) ||
+    /ಹೆಸರು\s*ಕೊಡ್ಬೇಡ/.test(t)
+  );
+}
+
+/**
+ * True when the AGENT is the one saying it could not hear the caller.
+ *
+ * This used to loop: poor transcription re-armed the recovery ladder on every
+ * speech end, so Priya said "I couldn't hear you" over and over and stopped
+ * listening. The engine now allows exactly ONE such line per call, so a bad
+ * connection can never turn into a loop.
+ */
+export function looksLikeCantHearLine(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const sq = squashScriptText(t);
+  return matchesSpaced(
+    t,
+    sq,
+    /(?:could ?n[o']t|cannot|can ?not|unable to|did ?n[o']t|not able to)\s+(?:hear|catch|understand|make out)/i,
+    /(?:hear|understand) you/i,
+    /ಕೇಳಿಸುವುದಿಲ್ಲ/,
+    /ಕೇಳಿಸಲಿಲ್ಲ/,
+    /ಕೇಳ್ ಗಾಡಿಯಾಗಲ್ಲ/,
+    /ಅರ್ಥವಾಗಲಿಲ್ಲ/,
+    /ಅರ್ಥವಾಗಿಲ್ಲ/,
+    /ಸ್ಪಷ್ಟವಾಗಿಲ್ಲ/,
+    /ಸ್ಪಷ್ಟವಾಗುತ್ತಿಲ್ಲ/,
+  );
+}
+
+/**
+ * True when a turn carries a CLOSE line and then repeats itself — either the
+ * same sentence twice, or the thank-you more than once. This is the stuttered
+ * close ("thank you sir for your time" over and over) that callers reported.
+ *
+ * The caller must suppress the turn and re-send ONE clean close: the audio parts
+ * of a single turn are all played before the mute arms, so the stutter is
+ * already audible by the time anything else could stop it.
+ */
+export function looksLikeStutteredClose(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const isClose = looksLikeHandoffLine(t) || hasThanksClosing(t);
+  if (!isClose) return false;
+  const sq = squashScriptText(t);
+  const thanksCount = (sq.match(/ಧನ್ಯವಾದ/gu) || []).length;
+  if (thanksCount >= 2) return true;
+  return repeatsCloseSentenceWithinTurn(t);
+}
+
+/**
+ * True when a streamed message repeats the thank-you that was ALREADY spoken in
+ * the current model turn.
+ *
+ * One Gemini turn arrives as several `modelTurn` messages and each one plays
+ * immediately, while the mute only arms on `turnComplete`. A turn of
+ * "ಧನ್ಯವಾದ ... ಧನ್ಯವಾದ ... ಧನ್ಯವಾದ" therefore slips past the per-message
+ * stutter detector and the caller hears the thank-you three times. A plain
+ * continuation of the sentence carries no second thank-you, so it is never
+ * dropped and the close is never truncated.
+ */
+export function shouldDropRepeatedThanksInTurn(thanksPlayedInTurn: boolean, text: string): boolean {
+  if (!thanksPlayedInTurn) return false;
+  return hasThanksClosing(String(text || ''));
+}
+
+/** Sentence-level self-repeat check local to close turns (no dedup-module import). */
+function repeatsCloseSentenceWithinTurn(text: string): boolean {
+  const sentences = String(text || '')
+    .trim()
+    .split(/(?<=[.!?])\s+/u)
+    .map((p) => p.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase())
+    .filter((p) => p.length >= 12);
+  for (let i = 0; i < sentences.length; i += 1) {
+    for (let j = i + 1; j < sentences.length; j += 1) {
+      if (sentences[i] === sentences[j]) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the AI turn only echoes the caller's words back AS A QUESTION —
+ * "did you say yes sir?", "you said yes, right?", "ಹೌದು ಎಂದು ಹೇಳಿದೆಯಾ?".
+ * These stall the flow and made Priya sound mechanical, so the engine drops the
+ * audio entirely and moves to the next script step instead. If you are unsure
+ * what the caller said, you are supposed to assume you heard it.
+ */
+export function looksLikeEchoConfirmQuestion(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t || t.length > 160) return false;
+  const sq = squashScriptText(t);
+  return matchesSpaced(
+    t,
+    sq,
+    /(?:did you say|did i say|you said|you are saying|am i hearing|did i hear)/i,
+    /(?:is that right|so right|right\?|correct\?)/i,
+    /ಹೇಳಿದೆಯೇ/,
+    /ಹೇಳಿದೆಯಾ/,
+    /ಎಂದು ಹೇಳಿದೆಯೇ/,
+    /ಎಂದು ಹೇಳಿದೆಯಾ/,
+    /ಎಂದುಹೇಳಿದೆಯಾ/,
+    /ಸರಿಯೇ/,
+    /ಸರಿಯೇಯೇ/,
+    /ಅರ್ಥವಾಗಿದೆಯೇ/,
   );
 }
 
@@ -452,10 +762,22 @@ export function looksLikeOpeningRestate(text: string): boolean {
 export function looksLikeAreasLine(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return false;
-  if (t.includes(PDF_AREAS_LINE_KN)) return true;
+  const sq = squashScriptText(t);
+  if (sq.includes(squashScriptText(PDF_AREAS_LINE_KN))) return true;
   return (
-    /(?:ನಮ್ಮ ಹತ್ತಿರ|we have sites near|ಸೈಟ್‌?ಗಳಿವೆ)/i.test(t) &&
-    /(ಹುಣಸೂರು|ನರಸೀಪುರ|ಶ್ರೀರಾಂಪುರ|ಕೆ\.? ?ಆರ್\.? ?ನಗರ|hunsur|t\.?\s*narasipura|srirampura|k\.?\s*r\.?\s*nagar)/i.test(t)
+    matchesSpaced(t, sq, /(?:ನಮ್ಮ ಹತ್ತಿರ|we have sites near|ಸೈಟ್‌?ಗಳಿವೆ)/i, /ನಮ್ಮಹತ್ತಿರ/, /ಸೈಟ್ಗಳಿವೆ/) &&
+    matchesSpaced(
+      t,
+      sq,
+      /(ಹುಣಸೂರು|ನರಸೀಪುರ|ಶ್ರೀರಾಂಪುರ|ಕೆ\.? ?ಆರ್\.? ?ನಗರ|hunsur|t\.?\s*narasipura|srirampura|k\.?\s*r\.?\s*nagar)/i,
+      /ಕೆ\.?ಆರ್\.?ನಗರ/,
+      /ಹುಣಸೂರು/,
+      /ನರಸೀಪುರ/,
+      /ಶ್ರೀರಾಂಪುರ/,
+      /hunsur/,
+      /narasipura/,
+      /srirampura/,
+    )
   );
 }
 
@@ -466,19 +788,41 @@ export function looksLikeAreasLine(text: string): boolean {
 export function looksLikeHandoffLine(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return false;
-  if (t.includes(PDF_HANDOFF_LINE_KN)) return true;
+  const sq = squashScriptText(t);
+  if (sq.includes(squashScriptText(PDF_HANDOFF_LINE_KN))) return true;
   // Legacy transfer wording (kept for safety on older phrasings).
   if (/\btransfer (?:this |the |your )?call\b/i.test(t)) return true;
+  const salesTeam = () =>
+    matchesSpaced(t, sq, /(sales team|ಸೇಲ್ಸ್|विक्र|सेल्स)/i, /ಸೇಲ್ಸ್/, /ವಿಕ್ರ/);
   if (
-    /(sales team|ಸೇಲ್ಸ್|विक्र|सेल्स)/i.test(t) &&
-    /(guide|assist|ಮಾರ್ಗದರ್ಶನ|ವರ್ಗಾಯಿಸ|transfer|connect|ಸಹಾಯ|वर्गाणे|स्थानांतरित)/i.test(t)
+    salesTeam() &&
+    matchesSpaced(
+      t,
+      sq,
+      /(guide|assist|ಮಾರ್ಗದರ್ಶನ|ವರ್ಗಾಯಿಸ|transfer|connect|ಸಹಾಯ|वर्गाणे|स्थानांतरित)/i,
+      /ಮಾರ್ಗದರ್ಶನ/,
+      /ವರ್ಗಾಯಿಸ/,
+      /ಸಹಾಯ/,
+      /ವರ್ಗಾಣೆ/,
+      /ಸ್ಥಾನಾಂತರಿತ/,
+    )
   )
     return true;
   // New closing wording: sales team will call / reach out — with or without a
   // thanks prefix, since the model may phrase the close freshly.
   return (
-    /(sales team|ಸೇಲ್ಸ್)/i.test(t) &&
-    /(\bwill (?:call|reach|contact|get back)|\bcall(?:ing)? you|ಕರೆ ಮಾಡುತ್ತಾರೆ|ಕರೆ ಮಾಡ್ತಾರೆ|ಕಾಲ್ ಮಾಡ್ತಾರೆ)/i.test(t)
+    salesTeam() &&
+    matchesSpaced(
+      t,
+      sq,
+      /(\bwill (?:call|reach|contact|get back)|\bcall(?:ing)? you)/i,
+      /ಕರೆ ಮಾಡುತ್ತಾರೆ/,
+      /ಕರೆಮಾಡುತ್ತಾರೆ/,
+      /ಕರೆ ಮಾಡ್ತಾರೆ/,
+      /ಕರೆಮಾಡ್ತಾರೆ/,
+      /ಕಾಲ್ ಮಾಡ್ತಾರೆ/,
+      /ಕಾಲ್ಮಾಡ್ತಾರೆ/,
+    )
   );
 }
 
@@ -519,6 +863,42 @@ export const OUTBOUND_YES_LOCATIONS_NUDGE =
 export const OUTBOUND_YES_ASK_NAME_NUDGE = OUTBOUND_YES_LOCATIONS_NUDGE;
 
 /**
+ * TURN 2 — the caller said anything at all, so ask their name. Warm, one short
+ * sentence, then WAIT. This must never be bundled with the site question: the
+ * name is what decides sir vs ma'am for the rest of the call.
+ */
+export const OUTBOUND_NAME_QUESTION_NUDGE =
+  `SYSTEM (internal): The caller has said something. Ask for their NAME first, ` +
+  `in the CURRENT conversation language, warmly and in ONE short sentence: "${PDF_NAME_QUESTION_KN}" ` +
+  `Say nothing else and do NOT ask anything about sites yet. Then STOP and WAIT for their name.`;
+
+/**
+ * TURN 3 — we have their name. Confirm it warmly and ask the site question,
+ * addressing them by name and the correct honorific.
+ */
+export function buildOutboundSiteQuestionNudge(name: string | null | undefined): string {
+  const address = nameWithHonorific(name);
+  const who = address ? `${address}, ` : '';
+  return (
+    `SYSTEM (internal): The caller told you their name${address ? ` — it is "${address}"` : ''}. ` +
+    `Thank them in ONE short clause and ask the site question in the SAME utterance, ` +
+    `in the CURRENT conversation language: say "ಧನ್ಯವಾದ ${who}" (or a warm equivalent), then ask: ` +
+    `"${PDF_SITE_QUESTION_KN}". ` +
+    `Address them as "${address || HONORIFIC_SIR_KN}" from now on. ` +
+    `Nothing else — then STOP and WAIT for their answer.`
+  );
+}
+
+/** They declined to give a name — move on, never press, use the honorific alone. */
+export function buildOutboundNameDeclinedNudge(honorific: string): string {
+  return (
+    `SYSTEM (internal): The caller would not give a name. Do NOT ask again and do NOT press. ` +
+    `Move straight on: ask the site question once, warmly, in the CURRENT conversation ` +
+    `language: "${PDF_SITE_QUESTION_KN}". Address them as "${honorific}". Nothing else, then listen.`
+  );
+}
+
+/**
  * Caller interested in a location → the sales-team closing line, THEN the single
  * thank-you, then endCall in the SAME turn. Both lines ride in ONE utterance with
  * a real pause between them: splitting them into two turns would leave dead air
@@ -532,9 +912,37 @@ export function buildOutboundHandoffTransferNudge(_firstName?: string): string {
     `with a small natural pause between them — no extra words in between: ` +
     `"${PDF_HANDOFF_LINE_KN}" then "${PDF_THANKS_CLOSE_KN}" ` +
     `Then IMMEDIATELY call endCall in the SAME turn — the call ENDS after the thank-you. ` +
-    `The word ಧನ್ಯವಾದ is spoken EXACTLY ONCE per call: only in the second sentence, never in the first.`
+    `The word ಧನ್ಯವಾದ is spoken EXACTLY ONCE per call: only in the second sentence, never in the first. ` +
+    `NEVER add anything after the thank-you — no "if you want a site in the future please consider ` +
+    `Alliance Square", no sign-off, no third sentence. The thank-you is the last thing you say.`
   );
 }
+
+/**
+ * Engine-level fallback. When the sales-team line lands WITHOUT the thank-you —
+ * the model split the close across two turns — this forces the missing line so
+ * the call is never left hanging after "the sales team will call you". Fired at
+ * most once per call.
+ */
+export const OUTBOUND_THANKS_FALLBACK_NUDGE =
+  `SYSTEM (internal): You already said the sales-team line, but the thank-you was missed and ` +
+  `the caller is still on the line. Say ONLY this one sentence now, warmly, in the CURRENT ` +
+  `conversation language, and NOTHING else: "${PDF_THANKS_CLOSE_KN}". ` +
+  `No other words, no sign-off, no "consider us in the future", no extra sentence. ` +
+  `Speak ಧನ್ಯವಾದ exactly ONCE — this is it — then stop talking.`;
+
+/**
+ * The model repeated the closing lines inside one turn ("...thanks. ...thanks.").
+ * Every audio part of a turn is played before the mute is armed, so a stuttered
+ * close reaches the caller in full. This replaces it with ONE clean close, said
+ * exactly once.
+ */
+export const OUTBOUND_CLEAN_CLOSE_NUDGE =
+  `SYSTEM (internal): You just repeated the closing lines. Say the close ONCE, cleanly, ` +
+  `in the CURRENT conversation language, as exactly these TWO sentences and nothing else: ` +
+  `"${PDF_HANDOFF_LINE_KN}" then "${PDF_THANKS_CLOSE_KN}". ` +
+  `Say each sentence EXACTLY ONCE. Do NOT repeat either one, do not say the thank-you ` +
+  `more than once, do not add a sign-off or any other sentence. Then call endCall.`;
 
 /**
  * Caller asked for a callback time that IS inside the 10am–7pm window. Confirm the
@@ -621,9 +1029,14 @@ Use: ಮಾತಾಡ್ತಿದ್ದೀನಿ, ನೋಡ್ತಿದೀರಾ,
 Never: ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ, ವಾಸಿಸುತ್ತೀರಾ, ತಿಳಿದುಕೊಳ್ಳಬೇಕು.
 Real-estate loanwords in Kannada are natural and fine (ಸೈಟ್, ಪ್ಲಾಟ್, ಸೇಲ್ಸ್ ಟೀಮ್).`;
 
-const NO_ECHO_RULES = `NO ECHOING / NO DUPLICATE LINES:
+const NO_ECHO_RULES = `NO ECHOING / NO CONFIRMING / NO DUPLICATE LINES:
 - Never repeat the caller's own words back at them before you respond.
-- Fold the acknowledgment into your next real line instead (ಹಾ ಸರ್ / ಸರಿ ಸರ್ / ಹೌದು ಸರ್ / yes sir / हो).
+- NEVER ask them to confirm what they just said. Banned outright: "did you say yes sir?",
+  "you said yes, right?", "am I hearing you right?", "did I get that right?", "ಹೌದು ಎಂದು ಹೇಳಿದೆಯಾ?",
+  "ಸರಿಯೇ?", "ಅರ್ಥವಾಗಿದೆಯೇ?". If you are unsure what they said, assume you heard it and just answer.
+- A short acknowledgment (ಹಾ ಸರ್ / ಸರಿ ಸರ್ / ಹೌದು ಸರ್ / yes sir / हो) is allowed ONLY as the
+  opening few words of your NEXT real line. It is never a turn by itself, and it is never
+  stretched into a question about what they said.
 - One spoken response per turn, and never the same sentence twice in a row.
 - Never deliver the same INFORMATION twice — reworded counts exactly as much as verbatim, so new words saying the same thing is still a repeat. The fixed opening line is the only exception.`;
 
@@ -636,17 +1049,18 @@ Questions end on a friendly rise; statements settle down warm.`;
 
 const SILENCE_PROTOCOL_RULES = `SILENCE / TURN-TAKING PROTOCOL (the code sends private nudges):
 - Nudges are private directives — act on them silently, never quote them.
-- If a nudge says the caller has been quiet: say the check line once, naturally — "${SILENCE_CHECK_LINE_KN}" — then listen again.
-- SILENCE NEVER ENDS THE CALL. There is no silence close and no silence endCall; keep listening for as long as the line is open.
-- Never reuse a prior line while waiting — each quiet window gets at most one new short line.
-- Any meaningful caller speech resets the cycle.`;
+- If a nudge says the caller has been quiet: say the check line ONCE, naturally — "${SILENCE_CHECK_LINE_KN}" — then listen.
+- Say that check line EXACTLY ONCE per call. Never repeat it, never rephrase it, never say it again.
+- If the caller is STILL silent afterwards, the call is over: call endCall immediately and say nothing more.
+- While waiting, say NOTHING at all. Never fill the silence with another line, never repeat a line you already said.
+- Any meaningful caller speech resets this and you carry on normally.`;
 
 const HEARING_GUARANTEE_RULES = `HEARING GUARANTEE:
 Assume you heard every caller utterance, however soft, short, fast or accented.
 - A short or quiet reply (ಹೌದು / ಇಲ್ಲ / ಸರಿ / ok / हों / a sigh) is a real turn — answer it straight away.
 - Never claim you did not hear. Never ask them to speak louder.
 - Understand short, incomplete or conversational replies without asking them to repeat.
-- If a private nudge says the words were not recognised: one warm acknowledgment plus one kind request to repeat, then listen. That is the only repeat request you ever make.
+- If a private nudge says the words were not recognised: one warm acknowledgment plus one kind request to repeat, then listen. That is the ONLY repeat request you ever make on this call — NEVER ask them to repeat or say you could not hear them a second time. After that, just keep listening and answer what they say next.
 - The caller never has to repeat themselves twice, and never has to raise their voice.
 - You never lose your place: whatever happens, keep the current script step and carry on.`;
 
@@ -663,9 +1077,22 @@ const CALL_FLOW_RULES = `CONVERSATION DRIVE:
 
 const SCRIPT_FLOW = `OUTBOUND CALL SCRIPT — this order, and nothing else, on this call.
 
-STEP 1 — CALL OPENING (speak IMMEDIATELY after the caller answers, ONE utterance):
-- Say EXACTLY: "${PDF_OPENING_KN}"
-- No delay, no framing, no extra sentences. Then WAIT for the caller to reply.
+STEP 1 — INTRO (speak IMMEDIATELY after the caller answers, ONE utterance):
+- Say EXACTLY: "${PDF_OPENING_INTRO_KN}"
+- No question yet. Then WAIT for the caller to say anything.
+- No delay, no framing, no question, no extra sentences.
+
+STEP 1B — ASK THEIR NAME (as soon as the caller says ANYTHING at all):
+- Say once, warmly, in ONE short sentence: "${PDF_NAME_QUESTION_KN}"
+- Then STOP and WAIT for the name. Do NOT ask about sites in this turn.
+
+STEP 1C — NAME RECEIVED → THE SITE QUESTION:
+- Thank them in one short clause, addressing them BY NAME with the right honorific
+- ("${HONORIFIC_SIR_KN}" by default; "${HONORIFIC_MAAM_KN}" only for a clearly feminine
+- given name), then ask the site question in the SAME utterance: "${PDF_SITE_QUESTION_KN}"
+- If they REFUSE to give a name: do not press and do not ask again — just ask the site
+- question once and address them as "${HONORIFIC_SIR_KN}".
+- Use their name naturally from here on ("<name> ${HONORIFIC_SIR_KN}"), at most once per turn.
 
 STEP 2A — CALLER SAYS NO / NOT INTERESTED (ಇಲ್ಲ / ಬೇಡ / not interested / stop calling):
 - Say once, warmly, in ONE utterance: "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}"
@@ -684,6 +1111,8 @@ STEP 3 — CALLER SHOWS INTEREST IN A LOCATION (yes / ಹೌದು / ಆಸಕ�
   between them and nothing in between:
   1. "${PDF_HANDOFF_LINE_KN}"
   2. "${PDF_THANKS_CLOSE_KN}"
+- NOTHING comes after the thank-you. No sign-off, no "if you want a site in the future please
+  consider Alliance Square", no extra sentence — the thank-you IS the end of this call.
 - IMMEDIATELY call endCall in the SAME turn. The call ENDS right after the thank-you.
 
 STEP 3A — CALLER ASKS YOU TO CALL BACK AT A TIME (call at 7pm / ಸಂಜೆ 7 ಗಂಟೆಗೆ ಕರೆ ಮಾಡಿ):
@@ -712,28 +1141,45 @@ SIDE RULES:
 const CALL_CLOSING_RULES = `CALL CLOSING:
 - The word "ಧನ್ಯವಾದ" (thank you) is spoken EXACTLY ONCE per call, and only in this line:
   "${PDF_THANKS_CLOSE_KN}"
+- STRICT RULE: that thank-you sentence is the LAST thing you say. The instant you
+  finish it, call endCall — in the SAME turn. Never say it a second time, never
+  reword it, never start it again, and never continue talking afterwards.
 - The sales-team line ("${PDF_HANDOFF_LINE_KN}") carries NO thanks — you thank them once, at the very end.
 - The not-interested close ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") contains NO ಧನ್ಯವಾದ — and never
   add one afterwards either. Do not tack "ಧನ್ಯವಾದಗಳು" / "thank you" onto a decline. Politeness here comes
   from the warm wording of the line itself, not from thanking someone who just said no.
 - Every closing line ends the call: after the thank-you, or after the not-interested close,
   IMMEDIATELY call endCall in the SAME turn, then stay silent.
+- After the sales-team line, the ONLY thing you may say is the thank-you line
+  "${PDF_THANKS_CLOSE_KN}". Then the call is over.
+- You NEVER add a sign-off on an INTERESTED call — no "if you want a site in the future,
+  please consider Alliance Square", no "ಭವಿಷ್ಯದಲ್ಲಿ ಸೈಟ್ ಬೇಕಾದರೆ ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್
+  ನೆನಪಿಸಿಕೊಳ್ಳಿ", and no paraphrase of it. That wording belongs to the not-interested close
+  above and to nothing else — never after a sales-team line, never twice, never invented.
+- If you have already said the sales-team line, you are mid-close: say the thank-you and stop.
+  There is no third sentence to this call.
 
 THE ONLY TIME YOU MAY PROMISE: ${CALLBACK_WINDOW_LABEL}. The sales team is not reachable outside it.
 - Inside the window → you may agree, and you must call setCallbackTime so sales sees it.
 - Outside it → say the time is not possible, name the window, and offer another day or a call soon.
 - Never agree to an hour outside ${CALLBACK_WINDOW_LABEL}, and never invent a day the caller did not ask for.
 
-SILENCE IS NEVER A CLOSING REASON:
-- There is no silence timeout close. Quiet or silence NEVER produces endCall — keep listening.`;
+SILENCE:
+- If the caller has gone quiet, say the check line ONCE and listen.
+- If they are still silent after that, call endCall immediately — a silent line is a finished call.
+- Never repeat the check line, never talk into the silence, never repeat yourself while waiting.`;
 
-const END_CALL_RULES = `END THE CALL — the only triggers that allow it:
+const END_CALL_RULES = `YOU END THE CALL — call endCall in the SAME turn as the closing line:
 1. The caller says NO / not interested → not-interested close line, call notInterested, then endCall, all in the SAME turn.
-2. The caller explicitly says goodbye / asks to end → one short closing line, then endCall.
+2. The caller explicitly says goodbye / asks to end → one short closing line, then endCall in the SAME turn.
 3. The caller is busy, cannot talk now, or asks for a later call → the SAME not-interested close line, then endCall in the SAME turn.
 4. The caller is interested in a location → the sales-team closing line ("${PDF_HANDOFF_LINE_KN}"),
-   then endCall in the SAME turn — the call ENDS after that line.
-Never call endCall because of silence, quiet, short pauses or short replies — silence always means keep listening.`;
+   then the thank-you ("${PDF_THANKS_CLOSE_KN}"), then endCall in the SAME turn — the call ENDS
+   after the thank-you. You never end on the sales-team line alone, and you never follow it with
+   a "consider us in the future" sign-off.
+5. The caller said your "are you still there?" check line and is STILL silent → endCall, say nothing.
+The system drops the line the instant you call endCall, so never speak anything after that call.
+Never call endCall because of a short pause, a short reply, or a topic change — those are not closes.`;
 
 const COMMUNICATION_GUIDELINES = `COMMUNICATION:
 - If the caller says they could not hear, or asks you to repeat: calmly repeat your PREVIOUS
@@ -764,12 +1210,18 @@ ${LANGUAGE_RULES}
 ${NO_ECHO_RULES}
 
 FAST SCRIPT (the ONLY allowed flow):
-1. OPENING (speak FIRST, word for word, ONE utterance, IMMEDIATELY): "${PDF_OPENING_KN}" — then listen.
+1. INTRO (speak FIRST, word for word, ONE utterance, IMMEDIATELY): "${PDF_OPENING_INTRO_KN}" — then listen.
+1b. As soon as the caller says ANYTHING, ask their NAME once: "${PDF_NAME_QUESTION_KN}" — then WAIT.
+1c. Once you have the NAME, thank them briefly and ask the site question in the SAME turn:
+   "${PDF_SITE_QUESTION_KN}". Address them by name with the right honorific — "${HONORIFIC_SIR_KN}"
+   by default, "${HONORIFIC_MAAM_KN}" only for a clearly feminine given name. If they refuse to
+   give a name, never press: just ask the site question and use "${HONORIFIC_SIR_KN}".
 2. NO → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn.
 3. YES/INTERESTED → locations once ("${PDF_AREAS_LINE_KN}") + ONE cheerful interest question,
    freshly phrased (reference: "${PDF_INTEREST_QUESTION_KN}") — then listen.
 4. INTERESTED IN A LOCATION → sales-team closing line ("${PDF_HANDOFF_LINE_KN}") + ONE thank-you
-   ("${PDF_THANKS_CLOSE_KN}") + endCall SAME turn.
+   ("${PDF_THANKS_CLOSE_KN}") + endCall SAME turn. You NEVER end on the sales-team line alone —
+   the thank-you ALWAYS follows it — and NOTHING comes after the thank-you.
 5. CALLER ASKS FOR A CALLBACK TIME → the sales team is available ${CALLBACK_WINDOW_LABEL} ONLY.
    Inside the window: confirm the time, call setCallbackTime, then close as in step 4.
    Outside it: say once that the time is not possible — "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}"
@@ -777,9 +1229,21 @@ FAST SCRIPT (the ONLY allowed flow):
    Never agree to a time outside ${CALLBACK_WINDOW_LABEL}.
 NOT INTERESTED / busy at any point → close once + endCall SAME turn.
 Thank the caller EXACTLY ONCE per call, only in "${PDF_THANKS_CLOSE_KN}", right before hanging up.
-Silence never ends the call — keep listening. Never say you are an AI.
+STRICT: that sentence is the last thing you say. Say it ONCE, then immediately call endCall in the
+same turn. Never repeat it, never reword it, never keep talking after it.
+If you did not catch the caller's words: say ONE short warm line asking them to say it once more, then LISTEN.
+That is the ONLY repeat request on this call — NEVER ask them to repeat a second time, and NEVER say you could
+not hear them again. After that, just keep listening and answer whatever they say next.
+NEVER ask the caller to confirm what they just said — no "did you say yes sir?", no "right?", no
+"ಸರಿಯೇ?". If you are unsure, assume you heard them and just answer.
+NEVER add an improvised sign-off on an interested call — no "if you want a site in the future, please
+consider Alliance Square", no "ಭವಿಷ್ಯದಲ್ಲೇ ಸೈಟ್ ಬೇಕಾದರೆ ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನೆನಪಿಸಿಕೊಳ್ಳಿ", and no paraphrase of it.
+That wording is the DECLINE close in step 2 and belongs nowhere else.
+Silence: if the caller goes quiet, ask "are you still there?" ONCE, then listen. If they are still
+silent after that, call endCall and say nothing more. Never repeat that check line, and never talk
+into the silence or repeat yourself while waiting. Never say you are an AI.
 
-FIRST LINE: "${PDF_OPENING_KN}"
+FIRST LINE: "${PDF_OPENING_INTRO_KN}"
 
 Agent: Priya at Alliance Square, Mysuru
 DATE: ${currentDateStr}`;

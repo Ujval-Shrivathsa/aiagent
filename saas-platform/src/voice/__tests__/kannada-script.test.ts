@@ -7,6 +7,18 @@ import assert from 'node:assert/strict';
 import {
   PDF_OPENING_KN,
   PDF_OPENING,
+  PDF_OPENING_INTRO_KN,
+  PDF_NAME_QUESTION_KN,
+  PDF_SITE_QUESTION_KN,
+  HONORIFIC_SIR_KN,
+  HONORIFIC_MAAM_KN,
+  extractCallerName,
+  honorificForName,
+  nameWithHonorific,
+  looksLikeNameRefusal,
+  OUTBOUND_NAME_QUESTION_NUDGE,
+  buildOutboundSiteQuestionNudge,
+  buildOutboundNameDeclinedNudge,
   PDF_AREAS_LINE_KN,
   PDF_INTEREST_QUESTION_KN,
   PDF_HANDOFF_LINE_KN,
@@ -32,6 +44,13 @@ import {
   looksLikeAreasLine,
   looksLikeHandoffLine,
   looksLikeNotInterestedCloseLine,
+  looksLikeEchoConfirmQuestion,
+  looksLikeFutureSitePitch,
+  looksLikeStutteredClose,
+  looksLikeCantHearLine,
+  OUTBOUND_CLEAN_CLOSE_NUDGE,
+  squashScriptText,
+  OUTBOUND_THANKS_FALLBACK_NUDGE,
   looksLikeRepeatRequest,
   looksLikeCustomerBusy,
   looksLikeThanksOnlyLine,
@@ -42,6 +61,7 @@ import {
   createOutboundSilenceState,
   armOutboundSilenceCheck,
   tickOutboundSilence,
+  nextOutboundSilenceDeadline,
   detectForbiddenLayoutMention,
   allowedLayoutsList,
 } from '../kannada-script';
@@ -50,15 +70,29 @@ import {
 const hasLatin = (s: string) => /[A-Za-z]/.test(s.replace(/\{name\}/g, ''));
 
 describe('v5 script — spoken lines', () => {
-  it('opening = intro + site question, ONE Kannada utterance', () => {
+  it('opening = intro, THEN name question, THEN site question (three turns)', () => {
     assert.match(PDF_OPENING_KN, /ಪ್ರಿಯಾ/);
     assert.match(PDF_OPENING_KN, /ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್/);
     assert.match(PDF_OPENING_KN, /ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಸರ್\?/); // the spec question IS present
     assert.equal(PDF_OPENING, PDF_OPENING_KN);
+
+    // TURN 1 — the intro, with NO question in it.
+    assert.match(PDF_OPENING_INTRO_KN, /ಪ್ರಿಯಾ/);
+    assert.doesNotMatch(PDF_OPENING_INTRO_KN, /ಸೈಟ್/, 'the intro must not ask about sites yet');
+    // TURN 2 — the name question.
+    assert.match(PDF_NAME_QUESTION_KN, /ಹೆಸರು/);
+    // TURN 3 — the site question, asked only after the name.
+    assert.match(PDF_SITE_QUESTION_KN, /ಸೈಟ್ ನೋಡ್ತಿದೀರಾ/);
+
     const greeting = getOutboundGreetingInstruction();
     assert.match(greeting, /OPEN NOW/);
     assert.match(greeting, /no delay/);
-    assert.match(greeting, /ಸೈಟ್ ನೋಡ್ತಿದೀರಾ/);
+    assert.ok(greeting.includes(PDF_OPENING_INTRO_KN), 'greeting speaks the intro only');
+    assert.ok(!greeting.includes(PDF_NAME_QUESTION_KN), 'the name question is a LATER turn');
+    assert.ok(
+      !greeting.includes(PDF_SITE_QUESTION_KN),
+      'the site question is asked only AFTER the name — never in the greeting',
+    );
   });
 
   it('locations line = the four areas, no trailing question', () => {
@@ -252,22 +286,31 @@ describe('v5 script — detectors', () => {
   });
 });
 
-describe('silence state machine — NEVER terminates', () => {
-  it('9s quiet → check line, then repeats forever — NO close, NO hangup', () => {
+describe('silence state machine — one check line, then the call ends', () => {
+  it('9s quiet → check line ONCE; still silent 10s later → the call ends', () => {
     let s = armOutboundSilenceCheck(1000);
     let t = tickOutboundSilence(s, 9000);
     assert.equal(t.action, 'none', 'quiet inside the window does nothing');
     t = tickOutboundSilence(s, 11000);
-    assert.equal(t.action, 'speak_check', 'past 9s quiet → soft reprompt');
+    assert.equal(t.action, 'speak_check', 'past 9s quiet → the ONE availability check');
     s = t.state;
     assert.equal(s.reason, 'checked');
-    assert.ok(s.deadline != null, 'a next window is ALWAYS armed');
+    assert.ok(s.deadline != null, 'a final wait window is armed for the answer');
+    // Still silent inside that window → nothing.
     t = tickOutboundSilence(s, 20000);
-    assert.equal(t.action, 'none', 'second window still quiet');
+    assert.equal(t.action, 'none', 'second window still quiet → no talking at all');
+    // The check line went unanswered → terminate, exactly once.
     t = tickOutboundSilence(s, 21001);
-    assert.equal(t.action, 'speak_check', 'reprompt repeats — never a close');
-    assert.equal(t.state.reason, 'checked', 'state NEVER reaches a terminal closed state');
-    assert.ok(t.state.deadline != null, 'deadline always re-armed — infinite listening loop');
+    assert.equal(t.action, 'close_silence', 'unanswered check ends the call');
+    assert.equal(t.state.reason, 'closed');
+    assert.equal(t.state.deadline, null, 'terminal state has no next window');
+    assert.equal(
+      nextOutboundSilenceDeadline(t.state),
+      null,
+      'the loop can never re-arm after closing',
+    );
+    // It stays closed forever — no repeat, no loop.
+    assert.equal(tickOutboundSilence(t.state, 999999).action, 'none');
     assert.equal(createOutboundSilenceState().reason, 'idle');
   });
 
@@ -285,11 +328,330 @@ describe('silence state machine — NEVER terminates', () => {
     assert.match(buildOutboundSystemInstruction('30 Sep 2026'), /HOW YOU SOUND/);
   });
 
-  it('system prompt forbids any silence-based endCall', () => {
-    const full = buildOutboundSystemInstruction('30 Sep 2026');
-    assert.match(full, /SILENCE NEVER ENDS THE CALL/);
-    assert.doesNotMatch(full, /SILENCE TIMEOUT CLOSE/);
+  it('prompt: silence means ask once, then end the call', () => {
+    // Prompts are line-wrapped, so compare against a whitespace-normalised copy.
+    const full = buildOutboundSystemInstruction('30 Sep 2026').replace(/\s+/g, ' ');
+    const fast = buildOutboundFastConnectInstruction('30 Sep 2026').replace(/\s+/g, ' ');
+
+    // Full instruction (Kannada check line): said ONCE, never repeated, then endCall.
+    assert.match(full, /say the check line ONCE/);
+    assert.match(full, /Say that check line EXACTLY ONCE per call/);
+    assert.match(full, /If the caller is STILL silent afterwards, the call is over/);
+    assert.match(full, /While waiting, say NOTHING at all/);
+
+    // Fast-connect instruction (the one live at call start): same rule in English.
+    assert.match(fast, /ask "are you still there\?" ONCE, then listen/);
+    assert.match(fast, /If they are still silent after that, call endCall/);
+    assert.match(fast, /Never repeat that check line/);
+
+    // Neither may still claim silence never ends the call.
+    for (const prompt of [full, fast]) {
+      assert.doesNotMatch(prompt, /SILENCE NEVER ENDS THE CALL/);
+      assert.doesNotMatch(prompt, /silence timeout/i);
+    }
+    assert.match(full, /YOU END THE CALL/);
+  });
+});
+
+/**
+ * The Live output transcriber inserts stray spaces INSIDE Kannada words
+ * ("ಸೇ ಲ್ಸ್", "ಕ ರೆ ಮಾ ಡು ತ್ತಾ ರೆ"). Every script-line identity check used to
+ * compare raw strings, so on a real call NONE of the close lines were ever
+ * recognised: the agent was never muted, the thank-you never landed, and an
+ * improvised sign-off looped instead of ending the call.
+ */
+describe('close-line detection survives the transcriber’s stray spaces', () => {
+  /** Split every word of a script line into single characters, joined by spaces. */
+  const spaceSplit = (line: string) => line.replace(/\s+/g, ' ').split('').join(' ');
+
+  it('squashScriptText removes all whitespace', () => {
+    assert.equal(squashScriptText('ಸರಿ ಸರ್,\tನ\nಮ್ಮ'), 'ಸರಿಸರ್,ನಮ್ಮ');
+  });
+
+  it('recognises the sales-team line with the words split apart', () => {
+    assert.equal(looksLikeHandoffLine(PDF_HANDOFF_LINE_KN), true);
+    assert.equal(looksLikeHandoffLine(spaceSplit(PDF_HANDOFF_LINE_KN)), true);
+    assert.equal(looksLikeHandoffLine('ಸರಿ ಸರ್ ನಮ್ಮ ಸೇ ಲ್ಸ್ ಟೀ ಮ್ ಕರೆ ಮಾ ಡು ತ್ತಾ ರೆ'), true);
+  });
+
+  it('recognises the thank-you with the word split apart', () => {
+    const spoken = PDF_THANKS_CLOSE_KN.replace(/ಧನ್ಯವಾದಗಳು/, 'ಧನ್ಯವಾ ದಗಳು');
+    assert.equal(hasThanksClosing(spoken), true);
+  });
+
+  it('recognises the locations line with the words split apart', () => {
+    assert.equal(looksLikeAreasLine(PDF_AREAS_LINE_KN), true);
+    assert.equal(looksLikeAreasLine(spaceSplit(PDF_AREAS_LINE_KN)), true);
+    assert.equal(looksLikeAreasLine('ನ ಮ್ಮ ಹ ತ್ತಿ ರ ಹುಣ ಸೂ ರು ನ ರ ಸೀ ಪು ರ'), true);
+  });
+
+  it('recognises the not-interested close in Kannada AND its English wording', () => {
+    assert.equal(looksLikeNotInterestedCloseLine(OUTBOUND_NOT_INTERESTED_CLOSE_KN), true);
+    assert.equal(looksLikeNotInterestedCloseLine(spaceSplit(OUTBOUND_NOT_INTERESTED_CLOSE_KN)), true);
+    // The exact wording the caller heard looping on the line.
+    assert.equal(
+      looksLikeNotInterestedCloseLine('if you want a site in the future please consider alliance square'),
+      true,
+    );
+  });
+});
+
+/** The "did you say yes sir?" stall and the improvised "consider us later" sign-off. */
+describe('stalled and improvised turns are detected', () => {
+  it('flags echo/confirm questions in every form', () => {
+    assert.equal(looksLikeEchoConfirmQuestion('Did you say yes sir?'), true);
+    assert.equal(looksLikeEchoConfirmQuestion('You said yes, right?'), true);
+    assert.equal(looksLikeEchoConfirmQuestion('did you say'), true);
+    assert.equal(looksLikeEchoConfirmQuestion('am I hearing you right?'), true);
+    assert.equal(looksLikeEchoConfirmQuestion('ಹೌದು ಎಂದು ಹೇಳಿದೆಯಾ?'), true);
+    assert.equal(looksLikeEchoConfirmQuestion('ಹೌ ದು ಎಂ ದು ಹೇ ಳಿ ದೆ ಯಾ?'), true);
+    assert.equal(looksLikeEchoConfirmQuestion('ಸರಿಯೇ?'), true);
+    assert.equal(looksLikeEchoConfirmQuestion('ಅರ್ಥವಾಗಿದೆಯೇ?'), true);
+  });
+
+  it('does NOT flag real questions or real script lines', () => {
+    assert.equal(looksLikeEchoConfirmQuestion(''), false);
+    assert.equal(looksLikeEchoConfirmQuestion('ನಿಮಗೆ ಹೆಚ್ಚು ವಿವರ ಬೇಕೆ?'), false);
+    assert.equal(looksLikeEchoConfirmQuestion(PDF_AREAS_LINE_KN), false);
+    assert.equal(looksLikeEchoConfirmQuestion(PDF_HANDOFF_LINE_KN), false);
+    assert.equal(looksLikeEchoConfirmQuestion(PDF_OPENING_KN), false);
+  });
+
+  it('flags the improvised future sign-off but NOT the real decline close', () => {
+    assert.equal(
+      looksLikeFutureSitePitch('if you want a site in the future please consider alliance square'),
+      true,
+    );
+    assert.equal(looksLikeFutureSitePitch('ಭವಿಷ್ಯದಲ್ಲೇ ಸೈಟ್ ಬೇಕಾದರೆ ಮನೆಮಾಡಿ.'), true);
+    assert.equal(looksLikeFutureSitePitch('ಭವಿ ಷ್ಯದ ಲ್ಲೇ ಸೈ ಟ್ ಬೇ ಕಾ ದರೆ ಮ ನೆ ಮಾ ಡಿ'), true);
+    // The SCRIPT decline close owns this wording — it is a legitimate close.
+    assert.equal(looksLikeFutureSitePitch(OUTBOUND_NOT_INTERESTED_CLOSE_KN), false);
+  });
+
+  it('classifies a Kannada reword of the decline close as a BANNED pitch on an interested call', () => {
+    // This is the wording the caller heard looping. It also matches the decline
+    // close PATTERN, but the interested path must ban it (the caller never said
+    // no) and close properly with the sales line + thank-you instead.
+    const reworded = 'ಭವಿಷ್ಯದಲ್ಲೇ ಸೈಟ್ ಬೇಕಾದರೆ ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನೆನಪಿಸಿಕೊಳ್ಳಿ ಸರ್.';
+    assert.equal(looksLikeNotInterestedCloseLine(reworded), true);
+    assert.equal(looksLikeFutureSitePitch(reworded), true);
+  });
+
+  it('never flags a turn that also carries the sales-team line', () => {
+    // The whole turn is legitimate; only its missing thank-you needs handling.
+    assert.equal(
+      looksLikeFutureSitePitch(
+        `${PDF_HANDOFF_LINE_KN} ಭವಿಷ್ಯದಲ್ಲೇ ಸೈಟ್ ಬೇಕಾದರೆ ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನೆನಪಿಸಿಕೊಳ್ಳಿ.`,
+      ),
+      false,
+    );
+  });
+});
+
+/** The engine's guaranteed-thanks fallback and the prompt rules behind it. */
+describe('the close always ends in exactly one thank-you', () => {
+  it('the fallback nudge asks for the thanks line and nothing else', () => {
+    assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /ONLY this one sentence/);
+    assert.ok(OUTBOUND_THANKS_FALLBACK_NUDGE.includes(PDF_THANKS_CLOSE_KN));
+    assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /exactly ONCE/);
+    assert.doesNotMatch(OUTBOUND_THANKS_FALLBACK_NUDGE, /endCall/);
+  });
+
+  it('the prompt bans confirm-questions and the future sign-off on both instructions', () => {
     const fast = buildOutboundFastConnectInstruction('30 Sep 2026');
-    assert.doesNotMatch(fast, /silence timeout/i);
+    const full = buildOutboundSystemInstruction('30 Sep 2026');
+    // The FAST CONNECT instruction is the one live for the opening turn, so both
+    // bans have to live there too — not only in the long reconnect prompt.
+    for (const prompt of [fast, full]) {
+      assert.match(prompt, /NEVER ask (?:them|the caller) to confirm what they just said/);
+      assert.match(prompt, /did you say yes sir\?/);
+      assert.match(prompt, /if you want a site in the future/);
+      assert.match(prompt, /consider Alliance Square/);
+    }
+    // The sales-team close is never allowed to end without the thank-you.
+    assert.match(fast, /the thank-you ALWAYS follows it/);
+    assert.match(full, /the ONLY thing you may say is the thank-you line/);
+  });
+
+  it('the handoff nudge forbids any sentence after the thank-you', () => {
+    const nudge = buildOutboundHandoffTransferNudge();
+    assert.match(nudge, /NEVER add anything after the thank-you/);
+    assert.ok(nudge.includes(PDF_THANKS_CLOSE_KN));
+    assert.ok(nudge.includes(PDF_HANDOFF_LINE_KN));
+  });
+});
+
+/**
+ * Priya used to say "I couldn't hear you" over and over instead of listening:
+ * poor transcription re-armed the recovery ladder on every speech end.
+ */
+describe('"I couldn\'t hear you" is said at most once', () => {
+  it('recognises the line in every language it comes out in', () => {
+    assert.equal(looksLikeCantHearLine("I couldn't hear you"), true);
+    assert.equal(looksLikeCantHearLine('I could not hear you clearly'), true);
+    assert.equal(looksLikeCantHearLine("I didn't catch that"), true);
+    assert.equal(looksLikeCantHearLine('I cannot understand'), true);
+    assert.equal(looksLikeCantHearLine('ಸರ್, ಕೇಳಿಸುವುದಿಲ್ಲ'), true);
+    assert.equal(looksLikeCantHearLine('ಅರ್ಥವಾಗಲಿಲ್ಲ'), true);
+    // Transcriber splits words: this still has to be caught.
+    assert.equal(looksLikeCantHearLine('ಸ ರ್ ಕೇ ಳಿ ಸು ವು ದಿ ಲ್ಲ'), true);
+  });
+
+  it('does not flag real replies or real script lines', () => {
+    assert.equal(looksLikeCantHearLine(''), false);
+    assert.equal(looksLikeCantHearLine(PDF_AREAS_LINE_KN), false);
+    assert.equal(looksLikeCantHearLine(PDF_OPENING_INTRO_KN), false);
+    assert.equal(looksLikeCantHearLine('Ravi'), false);
+    // The CALLER asking to repeat is a different thing — never suppressed by us.
+    assert.equal(looksLikeCantHearLine('I could not hear you'), true, 'agent side only');
+  });
+
+  it('the prompt permits exactly one repeat request, never two', () => {
+    for (const prompt of [
+      buildOutboundFastConnectInstruction('30 Sep 2026'),
+      buildOutboundSystemInstruction('30 Sep 2026'),
+    ]) {
+      const flat = prompt.replace(/\s+/g, ' ');
+      assert.match(flat, /ONLY repeat request (?:you ever make|on this call)/i);
+      assert.match(flat, /NEVER ask them to repeat/i);
+    }
+  });
+});
+
+/**
+ * TURN 1B/1C — the caller is asked for their name, then addressed as sir or ma'am.
+ */
+describe('caller name and honorific', () => {
+  it('reads a name out of the ways people actually give one', () => {
+    assert.equal(extractCallerName('Ravi'), 'Ravi');
+    assert.equal(extractCallerName('my name is Ravi'), 'Ravi');
+    assert.equal(extractCallerName("I'm Anitha"), 'Anitha');
+    assert.equal(extractCallerName('I am Lakshmi'), 'Lakshmi');
+    assert.equal(extractCallerName('this is Prakash'), 'Prakash');
+    assert.equal(extractCallerName('Ravi here'), 'Ravi');
+  });
+
+  it('never invents a name, and never captures the agent as the caller', () => {
+    assert.equal(extractCallerName(''), null);
+    assert.equal(extractCallerName('mmhmm'), null);
+    assert.equal(extractCallerName('yes'), null);
+    assert.equal(extractCallerName('ok'), null);
+    assert.equal(extractCallerName('I am Priya'), null, 'Priya is the AGENT');
+  });
+
+  it('ma’am only for a clearly feminine name, sir for everything else', () => {
+    assert.equal(honorificForName('Anitha'), HONORIFIC_MAAM_KN);
+    assert.equal(honorificForName('lakshmi'), HONORIFIC_MAAM_KN);
+    assert.equal(honorificForName('Ravi'), HONORIFIC_SIR_KN);
+    assert.equal(honorificForName('Prakash'), HONORIFIC_SIR_KN);
+    assert.equal(honorificForName(null), HONORIFIC_SIR_KN, 'unknown name → sir, never ma’am');
+    assert.equal(honorificForName(''), HONORIFIC_SIR_KN);
+    assert.equal(honorificForName('Xyzzy'), HONORIFIC_SIR_KN, 'unknown name → sir');
+  });
+
+  it('builds the address the caller actually hears', () => {
+    assert.equal(nameWithHonorific('Ravi'), 'Ravi ಸರ್');
+    assert.equal(nameWithHonorific('Lakshmi'), 'Lakshmi ಮಾಮ್');
+    assert.equal(nameWithHonorific(null), '');
+  });
+
+  it('spots a refusal so the name is never pressed for twice', () => {
+    assert.equal(looksLikeNameRefusal("don't want to give"), true);
+    assert.equal(looksLikeNameRefusal('no need'), true);
+    assert.equal(looksLikeNameRefusal('ಹೆಸರು ಕೊಡ್ಬೇಡ'), true);
+    assert.equal(looksLikeNameRefusal('Ravi'), false);
+  });
+
+  it('the nudges ask once, then move to the site question', () => {
+    assert.ok(OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_NAME_QUESTION_KN));
+    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /do NOT ask anything about sites yet/i);
+    const site = buildOutboundSiteQuestionNudge('Ravi');
+    assert.ok(site.includes(PDF_SITE_QUESTION_KN));
+    assert.ok(site.includes('Ravi ಸರ್'));
+    const siteMaam = buildOutboundSiteQuestionNudge('Lakshmi');
+    assert.ok(siteMaam.includes('Lakshmi ಮಾಮ್'));
+    // No name → still ask the site question, addressed as sir.
+    const anon = buildOutboundSiteQuestionNudge(null);
+    assert.ok(anon.includes(PDF_SITE_QUESTION_KN));
+    const declined = buildOutboundNameDeclinedNudge(HONORIFIC_SIR_KN);
+    assert.ok(declined.includes(PDF_SITE_QUESTION_KN));
+    assert.match(declined, /Do NOT ask again/);
+  });
+
+  it('both prompts describe the three-turn opening', () => {
+    for (const prompt of [
+      buildOutboundFastConnectInstruction('30 Sep 2026'),
+      buildOutboundSystemInstruction('30 Sep 2026'),
+    ]) {
+      const flat = prompt.replace(/\s+/g, ' ');
+      assert.match(flat, /ASK THEIR NAME|ask their NAME once/i);
+      assert.match(flat, /never press|do not press/i);
+      assert.ok(flat.includes(PDF_OPENING_INTRO_KN));
+      assert.ok(flat.includes(PDF_SITE_QUESTION_KN));
+    }
+  });
+});
+
+/**
+ * The caller heard "thank you sir for your time" many times in a row. Every
+ * audio part of ONE model turn is played before the mute arms, so a stuttered
+ * close had to be dropped and replaced with one clean close.
+ */
+describe('the thank-you is said exactly once, then the call ends', () => {
+  it('flags a close that repeats the thank-you', () => {
+    assert.equal(looksLikeStutteredClose(PDF_THANKS_CLOSE_KN), false);
+    assert.equal(
+      looksLikeStutteredClose(`${PDF_HANDOFF_LINE_KN} ${PDF_THANKS_CLOSE_KN}`),
+      false,
+      'a normal, single close is never a stutter',
+    );
+    // The thank-you three times in one turn.
+    assert.equal(
+      looksLikeStutteredClose(
+        `${PDF_HANDOFF_LINE_KN} ${PDF_THANKS_CLOSE_KN} ${PDF_THANKS_CLOSE_KN} ${PDF_THANKS_CLOSE_KN}`,
+      ),
+      true,
+    );
+    // …even when the transcriber splits the word apart.
+    assert.equal(
+      looksLikeStutteredClose(
+        `${PDF_HANDOFF_LINE_KN} ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿ ದಂ ತೆ ಧನ್ಯವಾ ದಗಳು ಸರ್ ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿ ದಂ ತೆ ಧನ್ಯವಾ ದಗಳು ಸರ್`,
+      ),
+      true,
+    );
+    // The whole close pair said twice.
+    assert.equal(
+      looksLikeStutteredClose(
+        `${PDF_HANDOFF_LINE_KN} ${PDF_THANKS_CLOSE_KN} ${PDF_HANDOFF_LINE_KN} ${PDF_THANKS_CLOSE_KN}`,
+      ),
+      true,
+    );
+  });
+
+  it('does not flag an ordinary mid-call turn', () => {
+    assert.equal(looksLikeStutteredClose(PDF_AREAS_LINE_KN), false);
+    assert.equal(looksLikeStutteredClose(PDF_OPENING_KN), false);
+    assert.equal(looksLikeStutteredClose(''), false);
+  });
+
+  it('the replacement close says both lines exactly once and ends the call', () => {
+    assert.ok(OUTBOUND_CLEAN_CLOSE_NUDGE.includes(PDF_HANDOFF_LINE_KN));
+    assert.ok(OUTBOUND_CLEAN_CLOSE_NUDGE.includes(PDF_THANKS_CLOSE_KN));
+    assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /EXACTLY ONCE/);
+    assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /call endCall/);
+    assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /Do NOT repeat either one/);
+  });
+
+  it('the strict end rule is in BOTH instructions the model sees', () => {
+    for (const prompt of [
+      buildOutboundFastConnectInstruction('30 Sep 2026'),
+      buildOutboundSystemInstruction('30 Sep 2026'),
+    ]) {
+      const flat = prompt.replace(/\s+/g, ' ');
+      assert.match(flat, /STRICT/);
+      assert.match(flat, /last thing you say|LAST thing you ever say/i);
+      assert.match(flat, /Never repeat it/);
+      assert.match(flat, /call endCall/i);
+    }
   });
 });
