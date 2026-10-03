@@ -14,8 +14,15 @@
  * background noise cannot dominate the stream.
  */
 
-/** How much of a noise-classified frame is kept. */
-export const NOISE_ATTENUATION = 0.35;
+/**
+ * How much of a noise-classified frame is kept.
+ *
+ * Pushed down from 0.35 to cut steady background harder — fan, traffic, TV.
+ * It stays well above zero on purpose: this is the one number standing between
+ * a noisy line and a totally deaf agent, and silence is the failure that costs
+ * the whole call.
+ */
+export const NOISE_ATTENUATION = 0.18;
 
 /**
  * Attenuate one 16-bit little-endian PCM frame.

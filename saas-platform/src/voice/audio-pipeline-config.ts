@@ -105,7 +105,7 @@ export function loadAudioPipelineConfig(): AudioPipelineConfig {
   return {
     // Sharpest hearing: high fixed gain forwards even a whisper at full
     // strength to Gemini (never duck the caller's own speech).
-    inputGain: num(process.env.VOICE_INPUT_GAIN, 3.1),
+    inputGain: num(process.env.VOICE_INPUT_GAIN, 4.5),
     noiseFloorMin: num(process.env.VOICE_NOISE_FLOOR_MIN, 30),
     noiseFloorMax: num(process.env.VOICE_NOISE_FLOOR_MAX, 750),
     // Floor adaptation: sustained noise (fan/AC) converges at 6%/frame (~1s
@@ -147,7 +147,7 @@ export function loadAudioPipelineConfig(): AudioPipelineConfig {
     // candidate window forgives one diphthong gap; inside a turn, ≤140ms of
     // ambiguous frames never splits the turn. Onset cost is hidden inside
     // the AAD prefix padding — no perceived latency.
-    speechGateStartMs: num(process.env.VOICE_SPEECH_GATE_START_MS, 60),
+    speechGateStartMs: num(process.env.VOICE_SPEECH_GATE_START_MS, 40),
     speechGateWindowMs: num(process.env.VOICE_SPEECH_GATE_WINDOW_MS, 90),
     speechGateSpeakingToleranceMs: num(process.env.VOICE_SPEECH_GATE_TOLERANCE_MS, 140),
     // VAD start threshold ≈ half a quiet "yes" — soft speech still counts.

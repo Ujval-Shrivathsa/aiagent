@@ -14,6 +14,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { forwardFrameToModel, NOISE_ATTENUATION } from '../noise-duck';
+import { loadAudioPipelineConfig } from '../audio-pipeline-config';
 
 /** A 20 ms 8 kHz frame, upsampled to 16 kHz — two Int16 per input sample. */
 function makeFrame(inputSamples = 160): Buffer {
@@ -71,14 +72,26 @@ describe('caller audio is attenuated for noise, never erased', () => {
    * well clear of the digital floor, or the agent is deaf all over again.
    */
   it('keeps a quiet frame far above the digital floor', () => {
+    // Measured through the REAL chain: a quiet caller enters at the pipeline's
+    // input gain and is then attenuated. Testing raw PCM instead would credit
+    // the attenuator with more headroom than the caller actually has.
+    const { inputGain } = loadAudioPipelineConfig();
     const quiet = makeFrame(160);
     for (let i = 0; i < quiet.length / 2; i++) {
-      quiet.writeInt16LE(Math.round(quiet.readInt16LE(i * 2) * 0.05), i * 2);
+      const quietSample = Math.round(quiet.readInt16LE(i * 2) * 0.05);
+      const gained = Math.max(-32768, Math.min(32767, Math.round(quietSample * inputGain)));
+      quiet.writeInt16LE(gained, i * 2);
     }
     const out = forwardFrameToModel(quiet, 320, 'noise');
     assert.ok(
       rms(out) > 100,
       `a misclassified quiet word must survive, got rms=${rms(out).toFixed(0)}`,
+    );
+    // The gain has to more than pay for the harder suppression, or pushing
+    // noise down would quietly undo the "she can hear me" fix.
+    assert.ok(
+      NOISE_ATTENUATION * inputGain > 0.5,
+      `effective speech level after attenuation is too low (${(NOISE_ATTENUATION * inputGain).toFixed(2)})`,
     );
   });
 });
