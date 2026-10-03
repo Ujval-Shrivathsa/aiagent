@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeVoiceEvent } from '../logic';
+import { GET as hangupXml } from '../../app/api/plivo/hangup/route';
 
 const CALL_UUID = '12345678-1234-1234-1234-123456789abc';
 const STREAM_UUID = '87654321-4321-4321-4321-cba987654321';
@@ -64,4 +65,31 @@ test('plivo start event: custom parameters still parse from extra_headers', () =
   });
   assert.equal(msg.start.customParameters.customerPhone, '+919876543210');
   assert.equal(msg.start.customParameters.customerName, 'Ravi');
+});
+
+/**
+ * Plivo's Hangup API does not accept `{status:'hangup'}`. It demands `aleg_url`
+ * and then FETCHES that URL, executing the response as Plivo XML — the only
+ * instruction that ends a call is <Hangup/>. Measured against the live API: the
+ * old body is rejected with 400 "aleg_url must be present", so every hangup
+ * attempt failed silently and the caller stayed on an open line.
+ *
+ * If this endpoint ever stops serving that element the call cannot be ended, so
+ * the contract is pinned here.
+ */
+test('the hangup endpoint serves the <Hangup/> XML Plivo executes', async () => {
+  const res = await hangupXml();
+  assert.equal(res.status, 200);
+  assert.match(String(res.headers.get('content-type')), /text\/xml/);
+  const xml = await res.text();
+  assert.match(xml, /^<\?xml/, 'must be a Plivo XML document');
+  assert.match(xml, /<Response>/);
+  assert.match(xml, /<Hangup\s*\/>/);
+});
+
+test('the hangup endpoint also answers POST, since Plivo may use either verb', async () => {
+  const { POST } = await import('../../app/api/plivo/hangup/route');
+  const res = await POST();
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /<Hangup\s*\/>/);
 });

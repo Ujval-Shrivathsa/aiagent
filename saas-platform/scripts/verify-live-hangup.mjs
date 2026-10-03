@@ -58,10 +58,24 @@ async function api(method, path_, body) {
   return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) };
 }
 
-// Plivo's call detail uses call_state (not call_status) and call_duration
-// (not total_duration). Reading the wrong names made a call that had already
-// ended look like it was still open, so these are taken from a live record.
-const TERMINAL = new Set(['HANGUP', 'COMPLETED', 'BUSY', 'FAILED', 'NO_ANSWER', 'CANCEL']);
+// Plivo's CDR: call_state is LEGACY (docs: "don't use it to determine the call
+// outcome") and it stays ANSWER even after the call is over. The real signals
+// are end_time (the call is over) and hangup_source (who ended it).
+//
+// hangup_source is the whole point of this script:
+//   'API Request' -> OUR Hangup API ended it. That is the pass condition.
+//   'Callee'      -> the person who was called pressed hang up. That is a FAIL:
+//                    the agent went silent and left the line open.
+const TERMINAL_SOURCES = new Set([
+  'API Request',
+  'Callee',
+  'Caller',
+  'Carrier',
+  'Plivo',
+  'Answer XML',
+  'Error',
+  'Unknown',
+]);
 
 const answerUrl =
   `${BASE}/api/plivo/outbound` +
@@ -108,34 +122,40 @@ while ((Date.now() - started) / 1000 < MAX_SECONDS) {
   const detail = await api('GET', `Call/${uuid}/`);
   const c = detail.body || {};
   const state = String(c.call_state ?? '?');
+  const over = Boolean(c.end_time);
   const dur = c.call_duration ?? '-';
-  const line = `${state} dur=${dur}s cause=${c.hangup_cause_name ?? '-'}`;
+  const line = `${state} dur=${dur}s source=${c.hangup_source ?? '-'} cause=${c.hangup_cause_name ?? '-'}${over ? ' ENDED' : ''}`;
   if (line !== last) {
     console.log(`  [${String(Math.round((Date.now() - started) / 1000)).padStart(3)}s] ${line}`);
     last = line;
   }
-  if (TERMINAL.has(state)) {
+  if (over && TERMINAL_SOURCES.has(String(c.hangup_source))) {
+    const src = String(c.hangup_source);
+    const cause = String(c.hangup_cause_name ?? '');
+    const spoke = Number(c.call_duration) > 5;
+    const agentEnded = src === 'API Request';
     console.log('');
     console.log('=== CALL ENDED (per Plivo) ===');
-    console.log(`  call_state         : ${state}`);
     console.log(`  call_duration      : ${dur}s`);
     console.log(`  ring_duration      : ${c.ring_duration ?? '-'}s`);
-    console.log(`  hangup_cause_name  : ${c.hangup_cause_name ?? '(none)'}`);
-    console.log(`  hangup_source      : ${c.hangup_source ?? '(none)'}`);
+    console.log(`  hangup_source      : ${src}`);
+    console.log(`  hangup_cause_name  : ${cause}`);
     console.log(`  billed_duration    : ${c.billed_duration ?? '-'}s`);
-    // "End Of XML Instructions" means the <Stream> never held — the agent
-    // never spoke. Any other cause on a 40-150s call means the agent ended it.
-    const spokeFirst = dur !== 2;
-    const endedItself = spokeFirst && !/End Of XML Instructions/i.test(String(c.hangup_cause_name));
     console.log('');
-    console.log(
-      endedItself
-        ? 'VERDICT: the call ran a real conversation and then ENDED BY ITSELF — the hangup works.'
-        : spokeFirst
-          ? 'VERDICT: the call ran, but ended with "End Of XML Instructions" — the stream was torn down.'
-          : 'VERDICT: FAILED — call lasted 2s, the agent never spoke.',
-    );
-    process.exit(endedItself ? 0 : 1);
+    if (!spoke) {
+      console.log('VERDICT: FAILED — the call was over in seconds; the agent never spoke.');
+      console.log('         If the cause is "End Of XML Instructions", keepCallAlive is wrong.');
+    } else if (agentEnded) {
+      console.log('VERDICT: PASS — the conversation ran and OUR Hangup API ended the call.');
+    } else if (src === 'Callee') {
+      console.log('VERDICT: FAIL — the person who was called hung up.');
+      console.log('         The agent went quiet after the close but did NOT end the leg,');
+      console.log('         so the caller was left on an open line. Check the Render log for:');
+      console.log('           [PLIVO] Call hangup API accepted   <- working');
+      console.log('           [PLIVO] No call identifier captured <- CallUUID missing');
+      console.log('           [PLIVO] Call hangup API FAILED      <- bad creds on Render');
+    }
+    process.exit(agentEnded && spoke ? 0 : 1);
   }
   await new Promise((r) => setTimeout(r, 3000));
 }

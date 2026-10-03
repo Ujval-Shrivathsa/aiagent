@@ -1447,6 +1447,16 @@ let plivoCallUuid: string | null = null;
     const authHeader = authId
       ? `Basic ${Buffer.from(`${authId}:${process.env.PLIVO_AUTH_TOKEN || ''}`).toString('base64')}`
       : '';
+    // Plivo's Hangup API requires `aleg_url` — a URL whose body is executed as
+    // Plivo XML, containing <Hangup/>. The old `{status:'hangup'}` body is
+    // rejected with 400 "aleg_url must be present", which is why every attempt
+    // to end a call silently failed. /api/plivo/hangup serves that XML.
+    const voiceBase = (process.env.VOICE_SERVER_URL || process.env.APP_URL || '').replace(/\/$/, '');
+    const alegUrl = `${voiceBase}/api/plivo/hangup`;
+    if (!/^https:\/\//i.test(alegUrl)) {
+      console.warn(`[PLIVO] VOICE_SERVER_URL is not an https URL ("${alegUrl}") — cannot hang up`);
+      return false;
+    }
     // Candidates, in order: the real CallUUID, then the stream id. Some Plivo
     // setups only carry the identifier on the stream, and without ONE of these
     // the caller is left on a silent but OPEN line. A wrong id merely 404s, so
@@ -1463,10 +1473,10 @@ let plivoCallUuid: string | null = null;
         const res = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/${uuid}/`, {
           method: 'POST',
           headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'hangup' }),
+          body: JSON.stringify({ aleg_url: alegUrl }),
         });
         if (res.ok) {
-          console.log(`[PLIVO] Call hangup API accepted uuid=${uuid} (${reason})`);
+          console.log(`[PLIVO] Call hangup API accepted uuid=${uuid} aleg_url=${alegUrl} (${reason})`);
           return true;
         }
         console.warn(`[PLIVO] Call hangup API FAILED uuid=${uuid} status=${res.status} (${reason})`);
