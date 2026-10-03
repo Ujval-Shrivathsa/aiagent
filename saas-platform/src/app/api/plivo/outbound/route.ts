@@ -83,15 +83,17 @@ export async function POST(req: Request) {
     }
   }
 
-  // keepCallAlive="false" is the SECOND, independent way the call ends.
-  // With "true" Plivo deliberately keeps the call connected after our websocket
-  // closes, so a cold call could never be hung up unless the REST hangup
-  // succeeded — and the caller was left on a silent but OPEN line. Ending the
-  // stream now also ends the call, so a failed REST hangup (bad credentials on
-  // Render, a network blip) can no longer strand the caller.
+  // keepCallAlive MUST stay "true". It means "keep the call alive AFTER the XML
+  // is parsed" — with "false" Plivo hangs up the moment the <Stream> instruction
+  // is consumed, which was measured on a live call at 2 seconds (hangup cause
+  // "End Of XML Instructions"): the agent never got to speak. Verified by
+  // calling in and reading Plivo's own record back.
+  //
+  // Ending the call is therefore the REST hangup (see hangupCallLegViaPlivoApi),
+  // which is why the real CallUUID in the start event matters so much.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream bidirectional="true" keepCallAlive="false" contentType="audio/x-mulaw;rate=8000" extraHeaders="${xmlEscape(headers)}">
+  <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" extraHeaders="${xmlEscape(headers)}">
     ${xmlEscape(streamUrl)}
   </Stream>
 </Response>`;
