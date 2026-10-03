@@ -45,6 +45,7 @@ import {
   OUTBOUND_CLEAN_CLOSE_NUDGE,
   buildOutboundRepeatQuestionNudge,
   OUTBOUND_CANNOT_ANSWER_NUDGE,
+  OUTBOUND_SILENCE_GOODBYE_NUDGE,
   looksLikeCannotAnswerLine,
   OUTBOUND_NOT_INTERESTED_CLOSE_KN,
   PDF_HANDOFF_LINE_KN,
@@ -1728,7 +1729,7 @@ let plivoCallUuid: string | null = null;
    * model's own endCall still ends the call a moment sooner; this is the hard
    * ceiling, ~1s after the last audio of the close.
    */
-  const OUTBOUND_END_CALL_BACKSTOP_MS = 1_200;
+  const OUTBOUND_END_CALL_BACKSTOP_MS = 1_000;
 
   const scheduleOutboundHangupAfterThanks = () => {
     if (!isOutboundCall || endCallInvoked) return;
@@ -1768,18 +1769,18 @@ let plivoCallUuid: string | null = null;
 const OUTBOUND_CLOSE_DEADLINE_MS = 25_000;
 let outboundCloseDeadlineTimer: NodeJS.Timeout | null = null;
 
-const armOutboundCloseDeadline = (reason: string) => {
+const armOutboundCloseDeadline = (reason: string, ms = OUTBOUND_CLOSE_DEADLINE_MS) => {
   if (!isOutboundCall || endCallInvoked) return;
   if (outboundCloseDeadlineTimer) return;
   outboundCloseDeadlineTimer = setTimeout(() => {
     outboundCloseDeadlineTimer = null;
     if (endCallInvoked || !isOutboundCall) return;
     console.warn(
-      `[GUARD] Still connected ${OUTBOUND_CLOSE_DEADLINE_MS / 1000}s after the close (${reason}) — ending the call now`,
+      `[GUARD] Still connected ${Math.round(ms / 1000)}s after the close (${reason}) — ending the call now`,
     );
     diagLog(`close deadline hit after ${reason} → terminating`);
     void completeAndHangupOutboundCall(`close deadline after ${reason}`);
-  }, OUTBOUND_CLOSE_DEADLINE_MS);
+  }, ms);
 };
 
 const forceOutboundHangupIfClosing = (reason: string) => {
@@ -1947,14 +1948,20 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       sendOutboundSilenceNudge(OUTBOUND_SILENCE_CHECK_NUDGE);
       scheduleOutboundSilenceTick();
     } else if (tick.action === 'close_silence') {
-      // The check line went unanswered. Mute and drop the line — talking again
-      // here is exactly what produced the endless repeat.
+      // The check line went unanswered. Say ONE short goodbye, then drop the
+      // line. Cutting someone off in total silence with no word at all is
+      // abrupt; speaking a SECOND time is what produced the endless repeat. So
+      // this is a single exit line — never another question.
       const quietSecs = Math.round((now - lastCustomerTranscriptAt) / 1000);
-      console.log(`[SILENCE] ${quietSecs}s quiet after the check line — ending the call`);
-      diagLog(`silence close quiet=${quietSecs}s → ENDING`);
-      // Flag first: if the model emits its own endCall here it is authorised.
+      console.log(`[SILENCE] ${quietSecs}s quiet after the check line — goodbye, then ending the call`);
+      diagLog(`silence close quiet=${quietSecs}s → goodbye + ENDING`);
       outboundBusyCloseSent = true;
-      activateOutboundPostThanksMute();
+      // Authorises the model's own endCall for this goodbye turn.
+      outboundSpokenCloseText = 'silence goodbye';
+      sendOutboundSilenceNudge(OUTBOUND_SILENCE_GOODBYE_NUDGE);
+      // Independent deadline: if the goodbye is never heard, or the transcript
+      // never confirms its thanks, the call still ends instead of sitting open.
+      armOutboundCloseDeadline('silence goodbye', 9_000);
     } else {
       scheduleOutboundSilenceTick();
     }
@@ -2109,7 +2116,7 @@ OUTBOUND SCRIPT STATE — where the call is right now:
 - Never ask permission to continue — after any reply, move to the next step on your own.
 - Never say you are an AI or language model. You are a sales officer on a live call.
 - "ಧನ್ಯವಾದ" is spoken EXACTLY ONCE per call, and ONLY in this line: "${PDF_THANKS_CLOSE_KN}". The sales-team line carries no thanks. Never add a thank-you to the not-interested close or after it — someone who declined must not be thanked. Every closing line is followed by endCall in the SAME turn.
-- SILENCE = KEEP LISTENING: silence NEVER ends this call. The system may send a private availability-check nudge after a quiet stretch — say the given short line ONCE, then keep listening. Never call endCall because the caller was silent, quiet, or slow to reply.
+- SILENCE: if the caller goes quiet, the system may send a private nudge to check they are still on the line — say that short line ONCE and then keep listening. If they are STILL silent afterwards, the call is over: the system will send a goodbye nudge, and you say ONE short goodbye with a single thank-you for their time and then call endCall in the SAME turn. Never nag, never repeat the check line, and never call endCall merely because the caller is slow to reply.
 - HOW YOU SOUND: keep speaking the way you started — close to the mic, gentle and warm, an audible smile, a real breath before a longer line, commas that are actual pauses. Vary your rhythm instead of delivering every turn at the same speed and shape. If the caller sounds tired, soften; if they sound pleased, brighten. A short line is a fine line — never rush to finish a sentence just to get to the end of it.
 - Reply at a natural human moment after the caller stops — promptly, but not stampeded; a small relaxed beat sounds human.
 - HEARING GUARANTEE: every soft, short or accented caller utterance is a REAL turn — respond immediately, never claim you cannot hear them, never ask them to speak louder. If a private nudge says words were not recognized, briefly acknowledge and ask them kindly to repeat ONCE ("ಒಂದು ಸಲ ಮತ್ತೆ ಹೇಳಿ"); if a nudge says they are waiting for your reply, speak now. The caller must never need to shout or repeat themselves twice.

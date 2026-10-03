@@ -186,15 +186,34 @@ export function detectForbiddenLayoutMention(text: string): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * SILENCE RULE (owner-specified): Priya asks "are you still there?" ONCE, and
- * if the caller is still quiet SILENCE_CLOSE_AFTER_CHECK_MS later the call
- * ENDS. There is no endless reprompt loop and the check line is never
- * repeated — that loop is what made a quiet call talk over itself.
- * Any caller speech resets the cycle back to 'listening'.
+ * SILENCE RULE (owner-specified, retuned): 5 seconds of quiet and Priya asks
+ * "are you still on the line?" ONCE. Ten seconds later — still nothing — she
+ * says one short goodbye and the call ENDS.
+ *
+ * The check is deliberately NOT sooner. Probing at 2s landed while callers were
+ * still finding the phone, so it read as impatience rather than concern. There is
+ * no endless reprompt loop and the check line is never repeated — that loop is what
+ * made a quiet call talk over itself. Any caller speech resets the cycle back to
+ * 'listening'.
  */
-export const SILENCE_CHECK_AFTER_MS = 9_000;
+export const SILENCE_CHECK_AFTER_MS = 5_000;
 /** How long the caller may stay quiet AFTER the check line before we hang up. */
 export const SILENCE_CLOSE_AFTER_CHECK_MS = 10_000;
+
+/**
+ * The last line before an unanswered silence ends the call. Deliberately a
+ * DIFFERENT sentence from the check above: asking the same question twice is what
+ * made quiet calls talk over themselves. This is an exit, not another question.
+ */
+export const SILENCE_GOODBYE_LINE_KN =
+  'ಸರಿ ಸರ್, ನಿಮ್ಗೆ ಮತ್ತೆ ಕರೆ ಮಾಡುತ್ತೇವೆ. ಶುಭದಿನವರಿಗೆ.';
+
+export const OUTBOUND_SILENCE_GOODBYE_NUDGE =
+  `SYSTEM (internal): they did not answer the check line and there has been no sound ` +
+  `for a while. This is the END of the call. Say ONE short goodbye now, in the CURRENT ` +
+  `conversation language and in YOUR OWN WORDS — tell them you will call them back and ` +
+  `wish them well — and add ONE short thank-you for their time. Then IMMEDIATELY call ` +
+  `endCall in the SAME turn. Say ಧನ್ಯವಾದ exactly ONCE, and say nothing after it.`;
 
 export type OutboundSilenceReason = 'idle' | 'listening' | 'checked' | 'closed';
 
@@ -1299,7 +1318,7 @@ Locations line: "${PDF_AREAS_LINE_KN}"
 Not-interested close: "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}"
 Sales-team closing line (ends the call): "${PDF_HANDOFF_LINE_KN}"
 Busy close: same as the not-interested close.
-Quiet-caller check line: "${SILENCE_CHECK_LINE_KN}". Silence NEVER ends the call — keep listening.`;
+Quiet-caller check line: "${SILENCE_CHECK_LINE_KN}" (said ONCE after ${Math.round(SILENCE_CHECK_AFTER_MS / 1000)}s of silence). Silence exit line: "${SILENCE_GOODBYE_LINE_KN}" — if they stay silent after the check, say this once and the call ends.`;
 }
 
 export function buildOutboundSystemInstruction(

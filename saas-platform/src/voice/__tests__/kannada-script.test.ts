@@ -28,6 +28,10 @@ import {
   OUTBOUND_NOT_INTERESTED_CLOSE_KN,
   SILENCE_CHECK_LINE_KN,
   SILENCE_TIMEOUT_CLOSE_KN,
+  SILENCE_CHECK_AFTER_MS,
+  SILENCE_CLOSE_AFTER_CHECK_MS,
+  SILENCE_GOODBYE_LINE_KN,
+  OUTBOUND_SILENCE_GOODBYE_NUDGE,
   getOutboundGreetingInstruction,
   buildOutboundSystemInstruction,
   buildOutboundFastConnectInstruction,
@@ -309,20 +313,28 @@ describe('v5 script — detectors', () => {
 });
 
 describe('silence state machine — one check line, then the call ends', () => {
-  it('9s quiet → check line ONCE; still silent 10s later → the call ends', () => {
-    let s = armOutboundSilenceCheck(1000);
-    let t = tickOutboundSilence(s, 9000);
-    assert.equal(t.action, 'none', 'quiet inside the window does nothing');
-    t = tickOutboundSilence(s, 11000);
-    assert.equal(t.action, 'speak_check', 'past 9s quiet → the ONE availability check');
+  it('5s quiet → check line ONCE; still silent 10s later → the call ends', () => {
+    // OWNER-SPECIFIED LADDER: 5s quiet → "are you still on the line?", then
+    // 10s more silence → a short goodbye and the call ends. Probing at 2s was
+    // tried and rejected: it landed while callers were still finding the phone
+    // and read as impatience.
+    assert.equal(SILENCE_CHECK_AFTER_MS, 5_000);
+    assert.equal(SILENCE_CLOSE_AFTER_CHECK_MS, 10_000);
+
+    const start = 1000;
+    let s = armOutboundSilenceCheck(start);
+    let t = tickOutboundSilence(s, start + 4_900);
+    assert.equal(t.action, 'none', 'quiet inside the 5s window does nothing');
+    t = tickOutboundSilence(s, start + 5_100);
+    assert.equal(t.action, 'speak_check', '5s quiet → the ONE availability check');
     s = t.state;
     assert.equal(s.reason, 'checked');
     assert.ok(s.deadline != null, 'a final wait window is armed for the answer');
-    // Still silent inside that window → nothing.
-    t = tickOutboundSilence(s, 20000);
+    // Still silent inside that window → nothing at all.
+    t = tickOutboundSilence(s, start + 14_900);
     assert.equal(t.action, 'none', 'second window still quiet → no talking at all');
-    // The check line went unanswered → terminate, exactly once.
-    t = tickOutboundSilence(s, 21001);
+    // The check line went unanswered for 10s → terminate, exactly once.
+    t = tickOutboundSilence(s, start + 15_100);
     assert.equal(t.action, 'close_silence', 'unanswered check ends the call');
     assert.equal(t.state.reason, 'closed');
     assert.equal(t.state.deadline, null, 'terminal state has no next window');
@@ -334,6 +346,18 @@ describe('silence state machine — one check line, then the call ends', () => {
     // It stays closed forever — no repeat, no loop.
     assert.equal(tickOutboundSilence(t.state, 999999).action, 'none');
     assert.equal(createOutboundSilenceState().reason, 'idle');
+  });
+
+  it('the exit line is a goodbye, not a second copy of the check', () => {
+    // Asking the same question twice is what made quiet calls talk over
+    // themselves, so the exit must be a different sentence from the check.
+    assert.notEqual(SILENCE_GOODBYE_LINE_KN, SILENCE_CHECK_LINE_KN);
+    assert.ok(SILENCE_GOODBYE_LINE_KN.length > 0);
+    assert.match(OUTBOUND_SILENCE_GOODBYE_NUDGE, /END of the call/);
+    assert.match(OUTBOUND_SILENCE_GOODBYE_NUDGE, /ONE short goodbye/);
+    assert.match(OUTBOUND_SILENCE_GOODBYE_NUDGE, /endCall in the SAME turn/);
+    assert.match(OUTBOUND_SILENCE_GOODBYE_NUDGE, /exactly ONCE/);
+    assert.match(SILENCE_CHECK_LINE_KN, /ಇದೀರಾ/);
   });
 
   it('delivery guidance reaches the FAST CONNECT instruction (the one live for the opening)', () => {
