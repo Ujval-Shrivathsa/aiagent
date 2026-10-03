@@ -16,6 +16,8 @@ import {
   buildOutboundHandoffTransferNudge,
   getOutboundGreetingInstruction,
   PDF_OPENING_TURN1_KN,
+  hasThanksClosing,
+  PDF_THANKS_CLOSE_KN,
   OUTBOUND_CANNOT_ANSWER_NUDGE,
   OUTBOUND_NAME_QUESTION_NUDGE,
   HONORIFIC_SIR_KN,
@@ -150,6 +152,26 @@ describe('only the opening is scripted', () => {
  * an apology that handed the caller nothing, immediately before the call died.
  * It has to sound like a handover one colleague gives another.
  */
+describe('the close is recognised however the agent words it', () => {
+  it('sees a free-form English thank-you as the close', () => {
+    assert.equal(hasThanksClosing('Thank you sir for giving your time'), true);
+    assert.equal(hasThanksClosing('thanks for your time sir'), true);
+    assert.equal(hasThanksClosing('Thank you for your time.'), true);
+  });
+
+  it('still sees the Kannada and Devanagari forms', () => {
+    assert.equal(hasThanksClosing(PDF_THANKS_CLOSE_KN), true);
+    assert.equal(hasThanksClosing('ಧನ್ಯವಾ ದಗಳು'), true); // transcriber split
+    assert.equal(hasThanksClosing('धन्यवाद'), true);
+  });
+
+  it('does not fire on ordinary mid-call talk', () => {
+    assert.equal(hasThanksClosing('we have plots in Hunsur sir'), false);
+    assert.equal(hasThanksClosing('what is your name'), false);
+    assert.equal(hasThanksClosing(''), false);
+  });
+});
+
 describe('the sales handover is confident, never apologetic', () => {
   const handoff = buildOutboundHandoffTransferNudge();
 

@@ -633,6 +633,11 @@ let plivoCallUuid: string | null = null;
   // The last line we actually spoke, so a repeat can quote the SAME question
   // back instead of inventing a new one.
   let outboundLastSpokenLine = '';
+  // The last CLOSE the agent actually spoke, read from the audio transcription.
+  // The session is AUDIO-only, so the model turn carries no text and every
+  // detector built on it saw an empty string — which is why the model's own
+  // endCall was always rejected as "no close line delivered yet".
+  let outboundSpokenCloseText = '';
   let outboundHardMuteAfterClose = false;
   let outboundRepeatReplayPending = false;
   let lastOutboundTurnSuppressed = false;
@@ -1673,6 +1678,10 @@ let plivoCallUuid: string | null = null;
       clearTimeout(outboundThanksHangupTimer);
       outboundThanksHangupTimer = null;
     }
+    if (outboundCloseDeadlineTimer) {
+      clearTimeout(outboundCloseDeadlineTimer);
+      outboundCloseDeadlineTimer = null;
+    }
     console.log(`[GEMINI] Ending outbound call (${reason})`);
     diagLog(`call TERMINATE reason="${reason}"`);
     setCallState('ENDED', reason);
@@ -1745,7 +1754,35 @@ let plivoCallUuid: string | null = null;
     outboundThanksHangupTimer = setTimeout(run, 40);
   };
 
-  const forceOutboundHangupIfClosing = (reason: string) => {
+  /**
+ * A closing line has been SPOKEN. The call is over — it just may not know it
+ * yet.
+ *
+ * The mute and its 1.2s backstop are the normal path, but they both depend on
+ * the same in-memory state, so anything that interrupts them leaves the caller
+ * on a silent but OPEN line with no way out. This is an independent deadline
+ * armed off the fact that a close was spoken, not off the mute: if the call is
+ * somehow still up, it is ended anyway. Silent-but-open is the worst possible
+ * outcome for the person we called.
+ */
+const OUTBOUND_CLOSE_DEADLINE_MS = 25_000;
+let outboundCloseDeadlineTimer: NodeJS.Timeout | null = null;
+
+const armOutboundCloseDeadline = (reason: string) => {
+  if (!isOutboundCall || endCallInvoked) return;
+  if (outboundCloseDeadlineTimer) return;
+  outboundCloseDeadlineTimer = setTimeout(() => {
+    outboundCloseDeadlineTimer = null;
+    if (endCallInvoked || !isOutboundCall) return;
+    console.warn(
+      `[GUARD] Still connected ${OUTBOUND_CLOSE_DEADLINE_MS / 1000}s after the close (${reason}) — ending the call now`,
+    );
+    diagLog(`close deadline hit after ${reason} → terminating`);
+    void completeAndHangupOutboundCall(`close deadline after ${reason}`);
+  }, OUTBOUND_CLOSE_DEADLINE_MS);
+};
+
+const forceOutboundHangupIfClosing = (reason: string) => {
     if (!isOutboundCall || endCallInvoked) return;
     if (outboundThanksSpoken || outboundHardMuteAfterClose) {
       void completeAndHangupOutboundCall(reason);
@@ -2357,6 +2394,47 @@ CURRENT DATE: ${currentDateStr}
                     console.log(`[LANG] AI transcript lang=${lang} tts=${describeSpeechConfig(ttsSettings)} text="${String(outTx).slice(0, 80)}"`);
                   }
                   capture?.onAiTranscriptChunk(outTx);
+
+                  // THE CLOSE IS DETECTED HERE, BECAUSE THERE IS NOWHERE ELSE
+                  // TO DETECT IT. The session is configured
+                  // `responseModalities: [Modality.AUDIO]`, so a model turn
+                  // carries audio and NO text: `turnText` and `completedAiText`
+                  // are both empty strings. Every close detector ran off those
+                  // empty strings, so the spoken thank-you was never recognised,
+                  // the mute never armed, the repeat was never suppressed and the
+                  // hangup never fired — exactly the reported "it keeps saying
+                  // thank you and the call never ends". The words actually reach
+                  // us here, in the transcription of the audio, so this is the
+                  // only place the close can be seen.
+                  if (isOutboundCall && !outboundHardMuteAfterClose) {
+                    const spoken = String(outTx).trim();
+                    if (spoken) {
+                      outboundLastSpokenLine = spoken;
+                      if (
+                        hasThanksClosing(spoken) ||
+                        looksLikeHandoffLine(spoken) ||
+                        looksLikeNotInterestedCloseLine(spoken)
+                      ) {
+                        // Authorises the model's own endCall in this same turn.
+                        outboundSpokenCloseText = spoken;
+                        armOutboundCloseDeadline('close spoken');
+                      }
+                      if (hasThanksClosing(spoken)) {
+                        if (!outboundThanksSpoken) {
+                          console.log('[GUARD] Thank-you spoken — muting and ending the call');
+                          diagLog('spoken thank-you → mute + hangup');
+                          activateOutboundPostThanksMute();
+                        }
+                      } else if (looksLikeNotInterestedCloseLine(spoken)) {
+                        console.log('[GUARD] Not-interested close spoken — ending the call');
+                        outboundBusyCloseSent = true;
+                        clearOutboundSilenceTimer();
+                        activateOutboundPostThanksMute();
+                      } else if (!outboundTransferStarted && looksLikeHandoffLine(spoken)) {
+                        handleSalesTeamCloseSpoken(spoken);
+                      }
+                    }
+                  }
                 }
 
                 if (response.serverContent?.inputTranscription?.text) {
@@ -2639,6 +2717,7 @@ CURRENT DATE: ${currentDateStr}
                       // before the engine has set outboundBusyCloseSent.
                       const closingSpoken =
                         outboundBusyCloseSent ||
+                        Boolean(outboundSpokenCloseText) ||
                         looksLikeHandoffLine(currentTurnAiText) ||
                         looksLikeHandoffLine(lastPlayedAiRaw) ||
                         looksLikeNotInterestedCloseLine(currentTurnAiText) ||
@@ -2699,8 +2778,9 @@ CURRENT DATE: ${currentDateStr}
                           response: {
                             success: false,
                             message:
-                              'Say the not-interested closing line ONCE ("' + OUTBOUND_NOT_INTERESTED_CLOSE_KN +
-                              '") — then call endCall in the same turn.',
+                              'Say your closing line ONCE — the sales-team handover, or the ' +
+                              'thank-you if they are not interested — then call endCall in the ' +
+                              'SAME turn. Do not say anything else.',
                           },
                           id: call.id,
                         });
