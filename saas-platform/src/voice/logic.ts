@@ -525,6 +525,45 @@ let plivoCallUuid: string | null = null;
   /** Callback-time handling: at most one confirm and one refusal per call. */
   let outboundCallbackTimeNudgeSent = false;
   let outboundCallbackRefusedNudgeSent = false;
+  /**
+   * The agreed callback time has already been written to the lead record.
+   *
+   * The model does not reliably emit setCallbackTime even when it agrees to the
+   * time out loud, so the engine — which detected the request and checked the
+   * window itself — writes it directly. Without this the customer hears a
+   * promise ("we'll call at 7") that the sales team never receives.
+   */
+  let outboundCallbackPersisted = false;
+  let outboundCallbackPersistedAt: Date | null = null;
+
+  /**
+   * Write an agreed, window-checked callback time to the lead record. Called
+   * from the code path that CONFIRMS the time, so the promise the customer
+   * hears is always backed by a record — the model's setCallbackTime tool call
+   * is a backstop, not the only way this gets saved.
+   */
+  const persistAgreedCallbackTime = async (at: Date, lastResponse: string) => {
+    if (outboundCallbackPersisted) return;
+    outboundCallbackPersisted = true;
+    outboundCallbackPersistedAt = at;
+    if (!customerPhone) {
+      console.warn('[DB] No phone on file — callback time not stored');
+      return;
+    }
+    try {
+      const r = await transitionLeadsByPhone(customerPhone, STATUS.INTERESTED, {
+        interested: true,
+        appointmentTime: at,
+        lastResponse,
+      });
+      console.log(`[DB] Callback time stored from engine rows=${r.count} at=${at.toISOString()}`);
+      diagLog(`callback stored (engine) rows=${r.count}`);
+    } catch (e: any) {
+      console.error('[DB Error] Failed to store callback time:', e?.message || e);
+      // Allow the model's own tool call to retry rather than leaving it lost.
+      outboundCallbackPersisted = false;
+    }
+  };
   /** First name used to address the caller once they state it ("{name} ಸರ್"). */
   // (outboundCallerFirstName removed — no name step in the final flow.)
   let outboundTransferStarted = false;
@@ -2253,6 +2292,10 @@ CURRENT DATE: ${currentDateStr}
                               .then((r) => console.log(`[DB] Callback-request lead marked rows=${r.count}`))
                               .catch((e) => console.error('[DB Error] Failed to mark interested:', e));
                           }
+                          // The time is agreed, in-window and confirmed in code —
+                          // store it NOW rather than trusting the model to call the
+                          // tool, which it routinely skips while saying the words.
+                          void persistAgreedCallbackTime(at, `callback ${spoken}`);
                         }
                       } catch (e: any) {
                         console.error('[GEMINI] Callback-time nudge failed:', e?.message || e);
@@ -2502,6 +2545,22 @@ CURRENT DATE: ${currentDateStr}
                         continue;
                       }
                       const when = parsed.at.toISOString();
+                      if (outboundCallbackPersisted) {
+                        // The engine already stored the code-verified time. Do NOT
+                        // overwrite it with the model's value — the engine's is the
+                        // one that passed the window check.
+                        console.log(`[DB] setCallbackTime duplicate — engine already stored ${when}`);
+                        toolResponses.push({
+                          name: call.name,
+                          response: {
+                            success: true,
+                            appointmentTime: when,
+                            spokenAs: spokenTimeLabel(parsed.at, parsed.day),
+                          },
+                          id: call.id,
+                        });
+                        continue;
+                      }
                       console.log(
                         `[DB] setCallbackTime ${parsed.day} ${args.timeOfDay} → ${when}`,
                       );

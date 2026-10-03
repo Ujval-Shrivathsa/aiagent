@@ -83,9 +83,15 @@ export async function POST(req: Request) {
     }
   }
 
+  // keepCallAlive="false" is the SECOND, independent way the call ends.
+  // With "true" Plivo deliberately keeps the call connected after our websocket
+  // closes, so a cold call could never be hung up unless the REST hangup
+  // succeeded — and the caller was left on a silent but OPEN line. Ending the
+  // stream now also ends the call, so a failed REST hangup (bad credentials on
+  // Render, a network blip) can no longer strand the caller.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" extraHeaders="${xmlEscape(headers)}">
+  <Stream bidirectional="true" keepCallAlive="false" contentType="audio/x-mulaw;rate=8000" extraHeaders="${xmlEscape(headers)}">
     ${xmlEscape(streamUrl)}
   </Stream>
 </Response>`;

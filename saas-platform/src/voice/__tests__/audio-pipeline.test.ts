@@ -253,9 +253,17 @@ describe('turn-policy', () => {
     const fan = new Int16Array(160);
     for (let i = 0; i < 160; i++) fan[i] = Math.round(2000 * Math.sin(2 * Math.PI * 120 * i / 8000));
     assert.equal(classifyFrame({ metrics: analyzePcmFrame(fan, 160), noiseFloorRms: 200, config: cfg }), 'noise', 'synthetic fan hum');
-    // White-noise burst.
+    // White-noise burst. SEEDED, not Math.random(): 160 samples is a short
+    // window, and an unlucky draw produced a crest/ZCR profile that classified
+    // as speech — failing this test roughly 2 runs in 6 on the unmodified
+    // baseline, for reasons unrelated to whatever was under test.
     const hiss = new Int16Array(160);
-    for (let i = 0; i < 160; i++) hiss[i] = Math.round((Math.random() * 2 - 1) * 9000);
+    let seed = 0x9e3779b9;
+    for (let i = 0; i < 160; i++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const u = (seed >>> 8) / 0x01000000; // 24-bit → [0, 1)
+      hiss[i] = Math.round((u * 2 - 1) * 9000);
+    }
     assert.equal(classifyFrame({ metrics: analyzePcmFrame(hiss, 160), noiseFloorRms: 150, config: cfg }), 'noise', 'synthetic white-noise burst');
     // Synthetic voiced speech: 180Hz glottal harmonics with amplitude flutter
     // and consonant bursts — classic speech shape on telephony.
