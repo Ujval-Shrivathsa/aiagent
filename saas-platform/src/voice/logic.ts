@@ -9,6 +9,7 @@ import {
   PDF_OPENING_KN,
   PDF_AREAS_LINE_KN,
   PDF_INTEREST_QUESTION_KN,
+  PDF_NAME_QUESTION_KN,
   OUTBOUND_YES_LOCATIONS_NUDGE,
   OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE,
   buildOutboundHandoffTransferNudge,
@@ -38,7 +39,7 @@ import {
   honorificForName,
   looksLikeNameRefusal,
   OUTBOUND_NAME_QUESTION_NUDGE,
-  buildOutboundSiteQuestionNudge,
+  buildOutboundProjectsNudge,
   buildOutboundNameDeclinedNudge,
   OUTBOUND_THANKS_FALLBACK_NUDGE,
   OUTBOUND_CLEAN_CLOSE_NUDGE,
@@ -805,9 +806,12 @@ let plivoCallUuid: string | null = null;
   const keepOutboundActiveAfterOpeningYes = (raw: string) => {
     if (!isOutboundCall || outboundStayActiveNudgeSent) return;
     if (!isShortAffirmativeReply(raw) || looksLikeOpeningDecline(raw)) return;
-    if (outboundAreasLineDelivered) return;
+    // The opening now ends with the SITE question, so a yes moves to the NAME
+    // step — not to the projects. Speaking the projects here is exactly what
+    // made the flow jump ahead of the name and sound scrambled.
+    if (outboundAreasLineDelivered || !outboundNameStepDone) return;
     outboundStayActiveNudgeSent = true;
-    console.log('[GEMINI] Opening acknowledgment — locations line now');
+    console.log('[GEMINI] Interested after the projects — interest question now');
     try {
       sendClientTextTurn(OUTBOUND_YES_LOCATIONS_NUDGE);
     } catch (e: any) {
@@ -847,14 +851,22 @@ let plivoCallUuid: string | null = null;
     const raw = String(userText || '').trim();
     if (!raw) return false;
 
-    // First customer speech: ask for the name, once, and consume this turn.
+    // FLOW: the opening already asked "are you looking for a site in Mysuru?".
+    // Only a YES to that moves us on — any other reply is handled normally.
     if (!outboundNameAsked) {
       if (isLikelySttNoise(raw)) return false;
+      if (!isShortAffirmativeReply(raw) || looksLikeOpeningDecline(raw)) return false;
       outboundNameAsked = true;
-      console.log('[GEMINI] First caller speech — asking for their name');
+      console.log('[GEMINI] Yes to the site question — asking for their name');
       diagLog('name step → asking for name');
       geminiSession?.sendRealtimeInput({ text: OUTBOUND_NAME_QUESTION_NUDGE });
       return true;
+    }
+    // A bare "ಹೌದು"/"yes" is an ECHO of our own name question, not an answer to
+    // it. Treating it as a name step answer jumped straight to the projects
+    // without ever asking, which is what made the flow sound scrambled.
+    if (isShortAffirmativeReply(raw) && !outboundNameDeclined && !extractCallerName(raw)) {
+      return false;
     }
 
     // This reply answers our name question. One shot: a name, or a refusal.
@@ -883,8 +895,11 @@ let plivoCallUuid: string | null = null;
       console.log(`[NAME] Could not read a name from "${raw.slice(0, 40)}" — moving on`);
     }
     geminiSession?.sendRealtimeInput({
-      text: buildOutboundSiteQuestionNudge(outboundCallerName),
+      text: buildOutboundProjectsNudge(outboundCallerName, outboundCallerHonorific),
     });
+    // The projects line is delivered here, so the later "interested" step must
+    // go straight to the sales-team close instead of repeating the locations.
+    outboundAreasLineDelivered = true;
     return true;
   };
 
@@ -1119,6 +1134,8 @@ let plivoCallUuid: string | null = null;
         if (outboundTransferStarted) {
           // Mid-close: the sales-team line is out, so only the thanks is missing.
           armOutboundThanksFallback();
+        } else if (!outboundNameStepDone) {
+          // The name step owns this turn — never talk over it.
         } else if (outboundAreasLineDelivered && !outboundHandoffNudgeSent) {
           outboundHandoffNudgeSent = true;
           geminiSession?.sendRealtimeInput({ text: buildOutboundHandoffTransferNudge() });
@@ -1875,12 +1892,14 @@ let plivoCallUuid: string | null = null;
 
         const runtimeInstructionBase = `
 OUTBOUND SCRIPT STATE — where the call is right now:
-- Opening turn (already spoken): "${PDF_OPENING_KN}" — never say it again, and never ask the caller's name (this flow has no name step).
-- ONLY steps allowed now: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn. INTERESTED → locations once ("${PDF_AREAS_LINE_KN}") + the ONE cheerful interest question (freshly phrased, reference: "${PDF_INTEREST_QUESTION_KN}") then listen. INTERESTED IN A LOCATION (after locations) → sales-team closing line ("${PDF_HANDOFF_LINE_KN}") + the ONE thank-you ("${PDF_THANKS_CLOSE_KN}") + endCall SAME turn — the call ENDS after the thank-you.
+- Opening turn (already spoken): "${PDF_OPENING_KN}" — that was the intro AND the site question together. Never say it again.
+- CALL FLOW, in this exact order: (1) they said yes → ask their NAME once ("${PDF_NAME_QUESTION_KN}"); (2) they gave the name → greet them by name + the PROJECTS/AREAS ("${PDF_AREAS_LINE_KN}") + the ONE cheerful interest question ("${PDF_INTEREST_QUESTION_KN}"); (3) they name a project they like → sales-team closing line ("${PDF_HANDOFF_LINE_KN}") + the ONE thank-you ("${PDF_THANKS_CLOSE_KN}") + endCall SAME turn — the call ENDS after the thank-you.
+- Address the caller as "ಸರ್" or "ಮಾಮ್" according to their name, in EVERY line from the projects step onward.
+- ONLY other step allowed: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn.
 - CALLBACK TIME: the sales team is available ${CALLBACK_WINDOW_LABEL}, and that is the ONLY window you may promise. If they ask for a time inside it, confirm that exact time back, call setCallbackTime with it, then close as above. If they ask for a time outside it, say ONCE, warmly and without being defensive, that the time is not possible: "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}" — that line names the window and offers another day or a call soon. Never agree to an hour outside ${CALLBACK_WINDOW_LABEL}; never call setCallbackTime for one.
 - LANGUAGE: Kannada is the default and where you start. Follow the language the CALLER is actually speaking — English, Marathi, Hindi — and stay in it until they switch back. Never switch on a single loanword or filler. Natural conversational speech, never literal translation.
-- NO NAME STEP: this flow never asks the caller's name. Never ask for it, never confirm it.
-- TWO QUESTIONS MAX: (1) the opening question and (2) the ONE cheerful interest question right after the locations line, freshly phrased. Never ask about investment / construction / purpose / budget, and never ask permission to transfer or continue.
+- NAME STEP: this flow DOES ask for the caller's name, exactly once, right after they say yes to the opening question. Ask for it, use it, and address them by name and the right honorific afterwards.
+- TWO QUESTIONS MAX: (1) the opening site question and (2) the ONE cheerful interest question right after the projects line, freshly phrased. Never ask about investment / construction / purpose / budget, and never ask permission to transfer or continue.
 - Never repeat any line, question or closing twice on this call — reworded counts as a repeat. Say each script line in FULL once.
 - Never echo the caller's words back before answering — one response per turn, no duplicate sentences.
 - If the caller asks who you are or asks something unrelated mid-call, answer briefly, then return to the current script step.
@@ -2311,10 +2330,15 @@ CURRENT DATE: ${currentDateStr}
                         console.error('[GEMINI] Callback-time nudge failed:', e?.message || e);
                       }
                     } else if (looksLikeInterestedYes(userText)) {
-                      // FINAL FLOW: yes → locations; interested-in-location → transfer.
+                      // FLOW: yes-to-the-site-question → name; then projects; then
+                      // interested-in-a-project → sales-team close and the call ends.
                       try {
                         if (outboundTransferStarted) {
                           // Closing already delivered — stay silent; hangup is scheduled.
+                        } else if (!outboundNameStepDone) {
+                          // The name step owns this turn. Talking over it with the
+                          // projects line is what made the flow sound scrambled.
+                          console.log('[GUARD] Yes during the name step — staying quiet');
                         } else if (outboundAreasLineDelivered && !outboundHandoffNudgeSent) {
                           outboundHandoffNudgeSent = true;
                           console.log('[GUARD] Interested in a location — sales-team closing + endCall');
@@ -2329,7 +2353,13 @@ CURRENT DATE: ${currentDateStr}
                               .then((r) => console.log(`[DB] Interested lead marked rows=${r.count}`))
                               .catch((e) => console.error('[DB Error] Failed to mark interested:', e));
                           }
-                        } else if (!outboundAreasLineDelivered && !outboundLocationsNudgeSent && !outboundStayActiveNudgeSent) {
+                        } else if (
+                          !outboundAreasLineDelivered &&
+                          !outboundLocationsNudgeSent &&
+                          !outboundStayActiveNudgeSent
+                        ) {
+                          // Only reachable if the name step is done and the
+                          // projects line somehow has not landed yet.
                           outboundLocationsNudgeSent = true;
                           console.log('[GUARD] Caller interested — locations line');
                           geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });

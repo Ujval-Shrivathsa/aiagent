@@ -29,7 +29,8 @@ import {
   looksLikeStutteredClose,
   OUTBOUND_CLEAN_CLOSE_NUDGE,
   OUTBOUND_NAME_QUESTION_NUDGE,
-  buildOutboundSiteQuestionNudge,
+  buildOutboundProjectsNudge,
+  HONORIFIC_SIR_KN,
 } from '../src/voice/kannada-script';
 import { parseCallbackTime, requestedMinutesOfDay, isWithinCallbackWindow } from '../src/voice/callback-time';
 import { buildLiveSpeechConfig, buildLiveVoiceBehaviorConfig, loadLiveSpeechSettings } from '../src/voice/tts/speech-config';
@@ -233,7 +234,7 @@ const flatten = (parts: string[]) => parts.join(' ').replace(/\s+/g, ' ').trim()
 
 const SCENARIOS: Scenario[] = [
   {
-    name: 'caller is interested → locations + ONE interest question, stays on the line',
+    name: 'caller is interested → projects + ONE interest question, stays on the line',
     turns: [{ caller: 'ಹೌದು ಸರ್, ನೋಡ್ತಿದ್ದೀನಿ', nudge: OUTBOUND_YES_LOCATIONS_NUDGE, label: 'yes' }],
     check: (r) => {
       if (!/ಹುಣಸೂರು/.test(r.said)) return 'locations line missing';
@@ -341,7 +342,7 @@ const SCENARIOS: Scenario[] = [
     // BUG 1 on the call: after a bare "ಹೌದು" Priya asked "did you say yes sir?"
     // and exaggerated it instead of moving on. Production sends this exact
     // nudge on a short affirmative, and drops any echo-confirm turn outright.
-    name: 'bare yes → straight to the locations line, NO "did you say yes sir?"',
+    name: 'bare yes → straight to the projects line, NO "did you say yes sir?"',
     turns: [{ caller: 'ಹೌದು', nudge: OUTBOUND_YES_LOCATIONS_NUDGE, label: 'bare yes' }],
     check: (r) => {
       if (!/ಹುಣಸೂರು/.test(r.said)) return 'locations line missing — she stalled instead';
@@ -408,18 +409,20 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
-    // TURN 1B/1C — the caller is asked for their name FIRST, then addressed by
-    // it. Asking about sites before the name was the old behaviour.
-    name: 'name step → asks the name, then the site question addressing them by name',
+    // The opening asks the site question, so the order is: yes → name →
+    // projects, addressed by name and the right honorific.
+    name: 'name step → asks the name, then tells the projects addressing them by name',
     turns: [
-      { caller: 'ಹಲೋ', nudge: OUTBOUND_NAME_QUESTION_NUDGE, label: 'greeting' },
-      { caller: 'Ravi', nudge: buildOutboundSiteQuestionNudge('Ravi'), label: 'gives name' },
+      { caller: 'ಹೌದು ಸರ್', nudge: OUTBOUND_NAME_QUESTION_NUDGE, label: 'yes to the opening' },
+      { caller: 'Ravi', nudge: buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN), label: 'gives name' },
     ],
     check: (r) => {
       if (!/ಹೆಸರು/.test(r.said)) return 'never asked for the name';
-      if (!/ಸೈಟ್\s*ನೋಡ್ತಿದೀರಾ|ಸೈಟ್\s*ನೋಡ್ತಿದ್ರಾ|looking for a site/i.test(r.said)) {
-        return 'never asked the site question after the name';
-      }
+      if (!/ರಾಸ್ತೆ|ಪ್ರದೇಶ|ಸೈಟ್/.test(r.said)) return 'never told them the projects after the name';
+      if (!/ಆಸಕ್ತಿ/.test(r.said)) return 'never asked the interest question';
+      // Kannada TTS transliterates "Ravi" rather than pronouncing it, so match the
+      // honorific it produced with the name ("Ravi ಸರ್" → "ರವಿ ಸರ್").
+      if (!/ರವಿ|Ravi/i.test(r.said)) return 'never addressed them by name';
       return null;
     },
   },

@@ -49,6 +49,13 @@ export const PDF_SITE_QUESTION_KN = 'ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ �
 export const PDF_OPENING_KN =
   'ಹಲೋ ಸರ್, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಸರ್?';
 
+/**
+ * TURN 1, spoken on answer: the intro AND the Mysuru site question in ONE
+ * utterance. The owner asked for exactly this shape — hello, name, "are you
+ * looking for a site in Mysuru?" — before anything else happens.
+ */
+export const PDF_OPENING_TURN1_KN = PDF_OPENING_KN;
+
 /** Compatibility alias — there is no separate English constant. */
 export const PDF_OPENING = PDF_OPENING_KN;
 
@@ -124,8 +131,9 @@ export const SILENCE_TIMEOUT_CLOSE_KN =
 /** Greeting instruction sent when the media stream opens — the exact opening utterance. */
 export function getOutboundGreetingInstruction(_lang: 'kn' | 'en' = 'kn'): string {
   return (
-    `OPEN NOW: say EXACTLY this intro, in ONE utterance, immediately — no delay, ` +
-    `no extra words, NO question yet — then listen: "${PDF_OPENING_INTRO_KN}"`
+    `OPEN NOW: say EXACTLY this opening — hello, your name, AND the site question — ` +
+    `in ONE utterance, immediately, no delay and no extra words, then listen: ` +
+    `"${PDF_OPENING_TURN1_KN}"`
   );
 }
 
@@ -868,23 +876,37 @@ export const OUTBOUND_YES_ASK_NAME_NUDGE = OUTBOUND_YES_LOCATIONS_NUDGE;
  * name is what decides sir vs ma'am for the rest of the call.
  */
 export const OUTBOUND_NAME_QUESTION_NUDGE =
-  `SYSTEM (internal): The caller has said something. Ask for their NAME first, ` +
-  `in the CURRENT conversation language, warmly and in ONE short sentence: "${PDF_NAME_QUESTION_KN}" ` +
-  `Say nothing else and do NOT ask anything about sites yet. Then STOP and WAIT for their name.`;
+  `SYSTEM (internal): You already asked "are you looking for a site in Mysuru?" and they said YES. ` +
+  `Now ask for their NAME, in the CURRENT conversation language, warmly and in ONE short ` +
+  `sentence: "${PDF_NAME_QUESTION_KN}" ` +
+  `Say nothing else. Do NOT list the projects yet and do NOT ask about them yet. ` +
+  `Then STOP and WAIT for their name.`;
 
 /**
- * TURN 3 — we have their name. Confirm it warmly and ask the site question,
- * addressing them by name and the correct honorific.
+ * TURN 3 — we have their name. Tell them about the PROJECTS, addressing them by
+ * name and with the correct honorific, then ask the ONE interest question.
+ *
+ * This replaces the old "ask the site question" step: the site question now
+ * rides in the opening, so after the name the only thing left to say is what we
+ * actually have. Say the thank-you HERE and nowhere else in the flow, because
+ * the engine treats a spoken ಧನ್ಯವಾದ as the signal to end the call.
  */
-export function buildOutboundSiteQuestionNudge(name: string | null | undefined): string {
+export function buildOutboundProjectsNudge(
+  name: string | null | undefined,
+  honorific?: string,
+): string {
+  const hon = honorific || HONORIFIC_SIR_KN;
   const address = nameWithHonorific(name);
-  const who = address ? `${address}, ` : '';
+  const who = address || hon;
   return (
     `SYSTEM (internal): The caller told you their name${address ? ` — it is "${address}"` : ''}. ` +
-    `Thank them in ONE short clause and ask the site question in the SAME utterance, ` +
-    `in the CURRENT conversation language: say "ಧನ್ಯವಾದ ${who}" (or a warm equivalent), then ask: ` +
-    `"${PDF_SITE_QUESTION_KN}". ` +
-    `Address them as "${address || HONORIFIC_SIR_KN}" from now on. ` +
+    `Now tell them what we have and ask if they are interested. In ONE utterance, in the ` +
+    `CURRENT conversation language, say, in this order: ` +
+    `1) greet them by name — "${who}", ` +
+    `2) the PROJECTS/AREAS — "${PDF_AREAS_LINE_KN}", ` +
+    `3) the ONE interest question — "${PDF_INTEREST_QUESTION_KN}". ` +
+    `Address them as "${who}" for the whole call. Do NOT say ಧನ್ಯವಾದ anywhere in this turn — ` +
+    `that word ends the call on this system, and the thank-you belongs to the close. ` +
     `Nothing else — then STOP and WAIT for their answer.`
   );
 }
@@ -893,8 +915,10 @@ export function buildOutboundSiteQuestionNudge(name: string | null | undefined):
 export function buildOutboundNameDeclinedNudge(honorific: string): string {
   return (
     `SYSTEM (internal): The caller would not give a name. Do NOT ask again and do NOT press. ` +
-    `Move straight on: ask the site question once, warmly, in the CURRENT conversation ` +
-    `language: "${PDF_SITE_QUESTION_KN}". Address them as "${honorific}". Nothing else, then listen.`
+    `Move straight on to the PROJECTS, in the CURRENT conversation language, in ONE utterance: ` +
+    `say the areas — "${PDF_AREAS_LINE_KN}" — then the ONE interest question — ` +
+    `"${PDF_INTEREST_QUESTION_KN}". Address them as "${honorific}". ` +
+    `Do NOT say ಧನ್ಯವಾದ anywhere in this turn. Nothing else, then listen.`
   );
 }
 

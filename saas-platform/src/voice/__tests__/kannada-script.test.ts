@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   PDF_OPENING_KN,
   PDF_OPENING,
+  PDF_OPENING_TURN1_KN,
   PDF_OPENING_INTRO_KN,
   PDF_NAME_QUESTION_KN,
   PDF_SITE_QUESTION_KN,
@@ -17,7 +18,7 @@ import {
   nameWithHonorific,
   looksLikeNameRefusal,
   OUTBOUND_NAME_QUESTION_NUDGE,
-  buildOutboundSiteQuestionNudge,
+  buildOutboundProjectsNudge,
   buildOutboundNameDeclinedNudge,
   PDF_AREAS_LINE_KN,
   PDF_INTEREST_QUESTION_KN,
@@ -70,29 +71,38 @@ import {
 const hasLatin = (s: string) => /[A-Za-z]/.test(s.replace(/\{name\}/g, ''));
 
 describe('v5 script — spoken lines', () => {
-  it('opening = intro, THEN name question, THEN site question (three turns)', () => {
+  it('opening = intro AND site question in ONE turn, THEN the name', () => {
+    // OWNER-SPECIFIED ORDER: greet + name + "are you looking for a site in
+    // Mysuru?" is spoken as the opening. The name question comes after the yes,
+    // and the projects come after the name.
     assert.match(PDF_OPENING_KN, /ಪ್ರಿಯಾ/);
     assert.match(PDF_OPENING_KN, /ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್/);
-    assert.match(PDF_OPENING_KN, /ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಸರ್\?/); // the spec question IS present
+    assert.match(PDF_OPENING_KN, /ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಸರ್\?/); // the site question IS in the opening
     assert.equal(PDF_OPENING, PDF_OPENING_KN);
+    assert.equal(PDF_OPENING_TURN1_KN, PDF_OPENING_KN, 'the opening turn speaks the site question');
 
-    // TURN 1 — the intro, with NO question in it.
+    // The intro-only constant is kept for reference but is no longer the opening.
     assert.match(PDF_OPENING_INTRO_KN, /ಪ್ರಿಯಾ/);
-    assert.doesNotMatch(PDF_OPENING_INTRO_KN, /ಸೈಟ್/, 'the intro must not ask about sites yet');
-    // TURN 2 — the name question.
+    // TURN 2 — the name question, after the caller says yes.
     assert.match(PDF_NAME_QUESTION_KN, /ಹೆಸರು/);
-    // TURN 3 — the site question, asked only after the name.
-    assert.match(PDF_SITE_QUESTION_KN, /ಸೈಟ್ ನೋಡ್ತಿದೀರಾ/);
+    // TURN 3 — the projects, not another site question.
+    assert.match(PDF_AREAS_LINE_KN, /ರಸ್ತೆ|ಪ್ರದೇಶ/);
+    assert.match(PDF_INTEREST_QUESTION_KN, /ಆಸಕ್ತಿ/);
 
+    // OWNER-SPECIFIED: the greeting speaks the intro AND the site question in one
+    // utterance. The name question is still a later turn.
     const greeting = getOutboundGreetingInstruction();
     assert.match(greeting, /OPEN NOW/);
     assert.match(greeting, /no delay/);
-    assert.ok(greeting.includes(PDF_OPENING_INTRO_KN), 'greeting speaks the intro only');
-    assert.ok(!greeting.includes(PDF_NAME_QUESTION_KN), 'the name question is a LATER turn');
     assert.ok(
-      !greeting.includes(PDF_SITE_QUESTION_KN),
-      'the site question is asked only AFTER the name — never in the greeting',
+      greeting.includes(PDF_OPENING_TURN1_KN),
+      'the greeting speaks the intro AND the site question',
     );
+    assert.ok(
+      greeting.includes(PDF_SITE_QUESTION_KN),
+      'the site question is part of the opening, not a later turn',
+    );
+    assert.ok(!greeting.includes(PDF_NAME_QUESTION_KN), 'the name question is a LATER turn');
   });
 
   it('locations line = the four areas, no trailing question', () => {
@@ -562,19 +572,49 @@ describe('caller name and honorific', () => {
     assert.equal(looksLikeNameRefusal('Ravi'), false);
   });
 
-  it('the nudges ask once, then move to the site question', () => {
+  it('the projects step speaks the areas and the interest question, addressed by honorific', () => {
+    // OWNER FLOW: greeting (intro + site question) -> yes -> name -> PROJECTS
+    // addressed as sir/ma'am -> interested -> sales team -> agent hangs up.
+    // The old build asked the name on ANY first utterance and then repeated the
+    // site question, so the caller heard the questions out of order.
+    assert.ok(PDF_OPENING_KN.includes(PDF_SITE_QUESTION_KN), 'opening carries the site question');
+    assert.ok(
+      !PDF_NAME_QUESTION_KN.includes(PDF_SITE_QUESTION_KN),
+      'the name question must not re-ask the site question',
+    );
+    const projects = buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN);
+    assert.ok(projects.includes(PDF_AREAS_LINE_KN));
+    assert.ok(projects.includes(PDF_INTEREST_QUESTION_KN));
+    assert.ok(projects.includes('Ravi ಸರ್'));
+    // Feminine names must produce ma'am, not sir.
+    assert.ok(buildOutboundProjectsNudge('Lakshmi', HONORIFIC_MAAM_KN).includes('Lakshmi ಮಾಮ್'));
+    // Never thank them at the projects step — the engine treats ಧನ್ಯವಾದ as
+    // "close the call", so thanking here would hang up before the transfer.
+    assert.ok(!PDF_AREAS_LINE_KN.includes('ಧನ್ಯವಾದ'));
+    assert.ok(!PDF_INTEREST_QUESTION_KN.includes('ಧನ್ಯವಾದ'));
+    // The thank-you belongs to the close, which is what ends the call.
+    assert.match(PDF_THANKS_CLOSE_KN, /ಧನ್ಯವಾದ/);
+    assert.ok(!PDF_HANDOFF_LINE_KN.includes('ಧನ್ಯವಾದ'), 'the sales line carries no thanks');
+  });
+
+  it('the nudges ask for the name, then tell them about the projects', () => {
     assert.ok(OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_NAME_QUESTION_KN));
-    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /do NOT ask anything about sites yet/i);
-    const site = buildOutboundSiteQuestionNudge('Ravi');
-    assert.ok(site.includes(PDF_SITE_QUESTION_KN));
-    assert.ok(site.includes('Ravi ಸರ್'));
-    const siteMaam = buildOutboundSiteQuestionNudge('Lakshmi');
-    assert.ok(siteMaam.includes('Lakshmi ಮಾಮ್'));
-    // No name → still ask the site question, addressed as sir.
-    const anon = buildOutboundSiteQuestionNudge(null);
-    assert.ok(anon.includes(PDF_SITE_QUESTION_KN));
+    // The site question already rode in the opening, so the name nudge must
+    // not re-ask it and must not jump to the projects.
+    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /Do NOT list the projects yet/i);
+    const projects = buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN);
+    assert.ok(projects.includes(PDF_AREAS_LINE_KN), 'must tell them the projects');
+    assert.ok(projects.includes(PDF_INTEREST_QUESTION_KN), 'must ask the one interest question');
+    assert.ok(projects.includes('Ravi ಸರ್'), 'must address them by name');
+    const maam = buildOutboundProjectsNudge('Lakshmi', HONORIFIC_MAAM_KN);
+    assert.ok(maam.includes('Lakshmi ಮಾಮ್'), 'must use maam for a feminine name');
+    // No name → still tell the projects, addressed as sir.
+    const anon = buildOutboundProjectsNudge(null, HONORIFIC_SIR_KN);
+    assert.ok(anon.includes(PDF_AREAS_LINE_KN));
+    // ಧನ್ಯವಾದ in the projects turn would end the call early, so it is banned.
+    assert.doesNotMatch(projects, /ಧನ್ಯವಾದ\s*"?\s*$/);
     const declined = buildOutboundNameDeclinedNudge(HONORIFIC_SIR_KN);
-    assert.ok(declined.includes(PDF_SITE_QUESTION_KN));
+    assert.ok(declined.includes(PDF_AREAS_LINE_KN));
     assert.match(declined, /Do NOT ask again/);
   });
 
