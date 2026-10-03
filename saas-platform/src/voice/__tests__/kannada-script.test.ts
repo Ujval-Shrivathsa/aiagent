@@ -313,13 +313,18 @@ describe('v5 script — detectors', () => {
 });
 
 describe('silence state machine — one check line, then the call ends', () => {
-  it('5s quiet → check line ONCE; still silent 10s later → the call ends', () => {
+  it('5s quiet → check line ONCE; still silent 5s later → the call ends', () => {
     // OWNER-SPECIFIED LADDER: 5s quiet → "are you still on the line?", then
-    // 10s more silence → a short goodbye and the call ends. Probing at 2s was
-    // tried and rejected: it landed while callers were still finding the phone
-    // and read as impatience.
+    // 5s more → a short goodbye and the call ends. The call is therefore over
+    // at 10 SECONDS OF TOTAL SILENCE. Probing at 2s was tried and rejected: it
+    // landed while callers were still finding the phone and read as impatience.
     assert.equal(SILENCE_CHECK_AFTER_MS, 5_000);
-    assert.equal(SILENCE_CLOSE_AFTER_CHECK_MS, 10_000);
+    assert.equal(SILENCE_CLOSE_AFTER_CHECK_MS, 5_000);
+    assert.equal(
+      SILENCE_CHECK_AFTER_MS + SILENCE_CLOSE_AFTER_CHECK_MS,
+      10_000,
+      'the call must end at 10s of total silence',
+    );
 
     const start = 1000;
     let s = armOutboundSilenceCheck(start);
@@ -331,10 +336,10 @@ describe('silence state machine — one check line, then the call ends', () => {
     assert.equal(s.reason, 'checked');
     assert.ok(s.deadline != null, 'a final wait window is armed for the answer');
     // Still silent inside that window → nothing at all.
-    t = tickOutboundSilence(s, start + 14_900);
+    t = tickOutboundSilence(s, start + 9_900);
     assert.equal(t.action, 'none', 'second window still quiet → no talking at all');
-    // The check line went unanswered for 10s → terminate, exactly once.
-    t = tickOutboundSilence(s, start + 15_100);
+    // The check line went unanswered → terminate at 10s total, exactly once.
+    t = tickOutboundSilence(s, start + 10_100);
     assert.equal(t.action, 'close_silence', 'unanswered check ends the call');
     assert.equal(t.state.reason, 'closed');
     assert.equal(t.state.deadline, null, 'terminal state has no next window');

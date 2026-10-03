@@ -187,8 +187,10 @@ export function detectForbiddenLayoutMention(text: string): string | null {
 
 /**
  * SILENCE RULE (owner-specified, retuned): 5 seconds of quiet and Priya asks
- * "are you still on the line?" ONCE. Ten seconds later — still nothing — she
- * says one short goodbye and the call ENDS.
+ * "are you still on the line?" ONCE. Five seconds later — still nothing — she
+ * says one short goodbye and the call ENDS. The call is therefore over at 10
+ * seconds of silence in total, which is what was asked for: waiting a further 10s
+ * after the check would leave 15s of dead air before the line drops.
  *
  * The check is deliberately NOT sooner. Probing at 2s landed while callers were
  * still finding the phone, so it read as impatience rather than concern. There is
@@ -198,7 +200,7 @@ export function detectForbiddenLayoutMention(text: string): string | null {
  */
 export const SILENCE_CHECK_AFTER_MS = 5_000;
 /** How long the caller may stay quiet AFTER the check line before we hang up. */
-export const SILENCE_CLOSE_AFTER_CHECK_MS = 10_000;
+export const SILENCE_CLOSE_AFTER_CHECK_MS = 5_000;
 
 /**
  * The last line before an unanswered silence ends the call. Deliberately a
