@@ -43,6 +43,9 @@ import {
   buildOutboundNameDeclinedNudge,
   OUTBOUND_THANKS_FALLBACK_NUDGE,
   OUTBOUND_CLEAN_CLOSE_NUDGE,
+  buildOutboundRepeatQuestionNudge,
+  OUTBOUND_CANNOT_ANSWER_NUDGE,
+  looksLikeCannotAnswerLine,
   OUTBOUND_NOT_INTERESTED_CLOSE_KN,
   PDF_HANDOFF_LINE_KN,
   OUTBOUND_SILENCE_CHECK_NUDGE,
@@ -317,10 +320,22 @@ function pcmToMuLaw(sample: number) {
 // Lead call lifecycle — see src/lib/lead-status.ts
 const STATUS = LEAD_STATUS;
 
-export async function setupGemini(ws: WebSocket, streamParams?: URLSearchParams) {
+export async function setupGemini(
+  ws: WebSocket,
+  streamParams?: URLSearchParams,
+  connection?: { publicBaseUrl?: string },
+) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
   let audioSink: 'twilio' | 'plivo' = (process.env.VOICE_PROVIDER || 'twilio').toLowerCase() === 'plivo' ? 'plivo' : 'twilio';
+  // The PUBLIC origin of THIS websocket handshake, e.g. https://priya-voice-agent.onrender.com.
+  // The hangup API hands Plivo a URL (aleg_url) that Plivo then fetches, so it
+  // must be the address Plivo can actually reach. Trusting an env var alone
+  // left the hangup dead whenever VOICE_SERVER_URL was unset or stale in the
+  // Render dashboard, and nothing in the call flow revealed it. The Host /
+  // X-Forwarded-Proto of the handshake are always correct, so the env var is
+  // now only a fallback.
+  let handshakeBase = (connection?.publicBaseUrl || '').replace(/\/$/, '');
   let streamSid: string | null = null;
 /** Real Plivo CallUUID (not the stream id) — required to hang the call up. */
 let plivoCallUuid: string | null = null;
@@ -608,6 +623,15 @@ let plivoCallUuid: string | null = null;
    * simply keep listening and never nag again.
    */
   let outboundCantHearSaid = false;
+  // OWNER DECISION 2: "I can't hear you" repeats the SAME question once, slower.
+  // Sent at most once per call — a bad line must never become a repeat loop.
+  let outboundRepeatAskSent = false;
+  // OWNER DECISION 5: an answer Priya genuinely cannot give ends with the sales
+  // team, offered once.
+  let outboundCannotAnswerNudgeSent = false;
+  // The last line we actually spoke, so a repeat can quote the SAME question
+  // back instead of inventing a new one.
+  let outboundLastSpokenLine = '';
   let outboundHardMuteAfterClose = false;
   let outboundRepeatReplayPending = false;
   let lastOutboundTurnSuppressed = false;
@@ -803,6 +827,41 @@ let plivoCallUuid: string | null = null;
     );
   };
 
+  /**
+   * The CALLER says they cannot hear us. This is a hearing problem, not a new
+   * answer: it must repeat the previous question and must NEVER advance the
+   * flow. Treating it as an ordinary reply is what let "I can't hear" skip the
+   * name step and jump straight to the projects.
+   */
+  const looksLikeCallerCannotHear = (raw: string): boolean =>
+    /(can'?t hear|could ?n'?t hear|couldn'?t hear|cannot hear|not hearing|don'?t hear|not audible|ಕೇಳುತ್ತಿಲ್ಲ|ಅರೆಯುತ್ತಿಲ್ಲ)/i.test(String(raw || ''));
+
+  /** The caller is giving a reason they ARE looking — a plot, site or locality. */
+  const looksLikeCallerStatesInterest = (raw: string): boolean =>
+    /\b(plot|site|land|house|flat|property|investment|looking for|interested in|hunsur|nagar|layout|mysuru|mysore|badami|sayyaji|gudi|road)\b/i.test(
+      String(raw || ''),
+    );
+
+  /**
+   * OWNER DECISION 3: naming a locality or saying what they are looking for IS
+   * interest — "I want a plot in Hunsur" is the clearest interested answer there
+   * is, and it was being read as the DECLINE close. A decline only counts when
+   * it actually contains a refusal.
+   */
+  const callerSoundsInterested = (raw: string): boolean => {
+    const t = String(raw || '');
+    if (looksLikeCallerCannotHear(t)) return false;
+    if (looksLikeOpeningDecline(t)) return false;
+    if (
+      /\b(not interested|no need|stop calling|don'?t call|busy|wrong number|not looking|not want|don'?t want|not now|another number)\b/i.test(
+        t,
+      )
+    ) {
+      return false;
+    }
+    return looksLikeInterestedYes(t) || looksLikeCallerStatesInterest(t);
+  };
+
   const keepOutboundActiveAfterOpeningYes = (raw: string) => {
     if (!isOutboundCall || outboundStayActiveNudgeSent) return;
     if (!isShortAffirmativeReply(raw) || looksLikeOpeningDecline(raw)) return;
@@ -853,6 +912,18 @@ let plivoCallUuid: string | null = null;
 
     // FLOW: the opening already asked "are you looking for a site in Mysuru?".
     // Only a YES to that moves us on — any other reply is handled normally.
+    // A hearing complaint is NOT an answer to the name question. OWNER DECISION
+    // 2: repeat the SAME question once, slower, and stay on this step — reading
+    // it as a reply is what skipped the name and jumped to the projects.
+    if (looksLikeCallerCannotHear(raw)) {
+      if (outboundRepeatAskSent) return false;
+      outboundRepeatAskSent = true;
+      console.log('[HEARING] Caller could not hear — repeating the SAME question, slower');
+      diagLog('caller cannot hear → repeat once, slower');
+      geminiSession?.sendRealtimeInput({ text: buildOutboundRepeatQuestionNudge(outboundLastSpokenLine) });
+      return true;
+    }
+
     if (!outboundNameAsked) {
       if (isLikelySttNoise(raw)) return false;
       if (!isShortAffirmativeReply(raw) || looksLikeOpeningDecline(raw)) return false;
@@ -1025,6 +1096,12 @@ let plivoCallUuid: string | null = null;
     if (!outboundNotInterestedNudgeSent && looksLikeFutureSitePitch(trimmed)) {
       return { suppress: true, reason: 'future_pitch' };
     }
+    // OWNER DECISION 5: the agent hit a wall — it could not hear the caller, or
+    // the answer is outside what it knows. Never let it improvise an answer and
+    // never leave the caller on the line: offer the sales team and end there.
+    if (!outboundCannotAnswerNudgeSent && looksLikeCannotAnswerLine(trimmed)) {
+      return { suppress: true, reason: 'cannot_answer' };
+    }
     // The forced thank-you is the ONE line this call must never lose to a
     // dedup guard, or the caller is left on a dead line after the sales pitch.
     if (outboundThanksFallbackSent && hasThanksClosing(trimmed)) {
@@ -1145,6 +1222,14 @@ let plivoCallUuid: string | null = null;
         }
         return;
       }
+      if (reason === 'cannot_answer') {
+        // OWNER DECISION 5: hand the caller to the sales team, then end.
+        outboundCannotAnswerNudgeSent = true;
+        console.log('[GUARD] Agent cannot answer — offering the sales team, then ending');
+        diagLog('cannot answer → sales-team transfer + endCall');
+        geminiSession?.sendRealtimeInput({ text: OUTBOUND_CANNOT_ANSWER_NUDGE });
+        return;
+      }
       // A stuttered close is dropped and replaced by ONE clean close, so the
       // caller hears the sales line and the thank-you exactly once each.
       if (reason === 'stuttered_close') {
@@ -1166,6 +1251,7 @@ let plivoCallUuid: string | null = null;
       return;
     }
     playGeminiAudioParts(parts);
+    outboundLastSpokenLine = turnText;
     registerOutboundSpeech(turnText, outboundSpokenChunks);
     if (hasThanksClosing(turnText)) {
       // Remember it for the rest of THIS turn so a repeat chunk can be dropped.
@@ -1459,49 +1545,109 @@ let plivoCallUuid: string | null = null;
    * The CallUUID arrives in the Plivo start event; without it this is a no-op
    * and the stream-stop path still runs as before.
    */
-  const hangupCallLegViaPlivoApi = async (reason: string): Promise<boolean> => {
-    const authId = process.env.PLIVO_AUTH_ID;
-    const authHeader = authId
-      ? `Basic ${Buffer.from(`${authId}:${process.env.PLIVO_AUTH_TOKEN || ''}`).toString('base64')}`
-      : '';
-    // Plivo's Hangup API requires `aleg_url` — a URL whose body is executed as
-    // Plivo XML, containing <Hangup/>. The old `{status:'hangup'}` body is
-    // rejected with 400 "aleg_url must be present", which is why every attempt
-    // to end a call silently failed. /api/plivo/hangup serves that XML.
-    const voiceBase = (process.env.VOICE_SERVER_URL || process.env.APP_URL || '').replace(/\/$/, '');
-    const alegUrl = `${voiceBase}/api/plivo/hangup`;
-    if (!/^https:\/\//i.test(alegUrl)) {
-      console.warn(`[PLIVO] VOICE_SERVER_URL is not an https URL ("${alegUrl}") — cannot hang up`);
+  /**
+   * The public origin Plivo can call back on. The websocket handshake we are
+   * literally inside is proof of that address; the env vars are only a
+   * fallback for the case where the handshake carried nothing usable.
+   */
+  const resolvePublicBase = (): string =>
+    handshakeBase ||
+    (process.env.VOICE_SERVER_URL || '').replace(/\/$/, '') ||
+    (process.env.APP_URL || '').replace(/\/$/, '');
+
+  /**
+   * Ask Plivo whether the leg is actually gone. An ACCEPTED hangup request is
+   * NOT proof the call ended: Plivo fetches aleg_url asynchronously and runs
+   * the response as Plivo XML, so a 2xx can still leave the caller on a silent
+   * but OPEN line — which is exactly the reported bug.
+   */
+  const plivoCallHasEnded = async (authId: string, authHeader: string, uuid: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/${uuid}/`, {
+        headers: { Authorization: authHeader },
+      });
+      if (!res.ok) return false;
+      const body: any = await res.json().catch(() => ({}));
+      return Boolean(body?.end_time);
+    } catch {
       return false;
     }
-    // Candidates, in order: the real CallUUID, then the stream id. Some Plivo
-    // setups only carry the identifier on the stream, and without ONE of these
-    // the caller is left on a silent but OPEN line. A wrong id merely 404s, so
-    // trying it costs nothing and rescues the hangup.
+  };
+
+  /**
+   * End the CALL, not just the media stream.
+   *
+   * Measured against the live API (scripts/probe-hangup-api.mjs):
+   *  - `{status:'hangup'}` is rejected 400 "aleg_url must be present".
+   *  - Plivo ends a leg from our XML and records hangup_source "Answer XML"
+   *    with cause 4000 (PROBE A). A leg the handset ends records "Callee".
+   * So each spelling is tried in escalating order and VERIFIED against the
+   * call's own CDR, retrying the primary spelling once, rather than trusting a
+   * single accepted request.
+   */
+  const hangupCallLegViaPlivoApi = async (reason: string): Promise<boolean> => {
+    const authId = process.env.PLIVO_AUTH_ID;
+    const authToken = process.env.PLIVO_AUTH_TOKEN || '';
+    if (!authId || !authToken) {
+      console.error('[PLIVO] PLIVO_AUTH_ID/PLIVO_AUTH_TOKEN missing on this server — cannot hang up');
+      return false;
+    }
+    const authHeader = `Basic ${Buffer.from(`${authId}:${authToken}`).toString('base64')}`;
+
+    const alegUrl = `${resolvePublicBase()}/api/plivo/hangup`;
+    if (!/^https:\/\//i.test(alegUrl)) {
+      console.error(`[PLIVO] No public https base URL for the hangup (resolved "${alegUrl}") — cannot hang up`);
+      return false;
+    }
+
+    // The real CallUUID first, the stream id as a rescue (a wrong id only 404s).
     const candidates = [plivoCallUuid, streamSid].filter(
       (v, i, a): v is string => Boolean(v) && a.indexOf(v) === i,
     );
-    if (!authId || candidates.length === 0) {
-      console.warn('[PLIVO] No call identifier captured — relying on the media-stream stop only');
+    if (candidates.length === 0) {
+      console.error('[PLIVO] No call identifier captured — cannot hang up');
       return false;
     }
-    for (const uuid of candidates) {
+
+    // Escalating spellings of the same goal: hand Plivo the <Hangup/> URL, then
+    // the same with an explicit GET verb, then the bare DELETE as a last resort.
+    const mechanisms = [
+      { name: 'POST {aleg_url}', method: 'POST', body: { aleg_url: alegUrl } as any },
+      { name: 'POST {aleg_url, aleg_method:GET}', method: 'POST', body: { aleg_url: alegUrl, aleg_method: 'GET' } as any },
+      { name: 'DELETE /Call/{uuid}/', method: 'DELETE', body: undefined as any },
+    ];
+
+    const plan: Array<{ uuid: string; mech: (typeof mechanisms)[number] }> = [];
+    for (const uuid of candidates) for (const mech of mechanisms) plan.push({ uuid, mech });
+    // One retry of the primary spelling: a lost aleg_url fetch should not leave
+    // the caller on an open line.
+    plan.push({ uuid: candidates[0], mech: mechanisms[0] });
+
+    for (let i = 0; i < plan.length; i++) {
+      const { uuid, mech } = plan[i];
+      if (i === plan.length - 1) await new Promise((r) => setTimeout(r, 1_500));
       try {
         const res = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/${uuid}/`, {
-          method: 'POST',
+          method: mech.method,
           headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ aleg_url: alegUrl }),
+          body: mech.body ? JSON.stringify(mech.body) : undefined,
         });
-        if (res.ok) {
-          console.log(`[PLIVO] Call hangup API accepted uuid=${uuid} aleg_url=${alegUrl} (${reason})`);
-          return true;
+        if (!res.ok) {
+          console.warn(`[PLIVO] hangup ${mech.name} uuid=${uuid} status=${res.status} (${reason})`);
         }
-        console.warn(`[PLIVO] Call hangup API FAILED uuid=${uuid} status=${res.status} (${reason})`);
       } catch (e: any) {
-        console.error(`[PLIVO] Call hangup API error uuid=${uuid}:`, e?.message || e);
+        console.error(`[PLIVO] hangup ${mech.name} uuid=${uuid} threw:`, e?.message || e);
+      }
+      // Accepted != ended. Only the CDR proves the leg is gone.
+      if (await plivoCallHasEnded(authId, authHeader, uuid)) {
+        console.log(`[PLIVO] CALL ENDED uuid=${uuid} via ${mech.name} aleg_url=${alegUrl} (${reason})`);
+        return true;
       }
     }
-    console.error('[PLIVO] Every hangup candidate was rejected — the call leg may stay open');
+
+    console.error(
+      `[PLIVO] HANGUP FAILED (${reason}): tried ${plan.length} spellings across ${candidates.length} id(s), aleg_url=${alegUrl}. The caller may be left on an open line.`,
+    );
     return false;
   };
 
@@ -1893,12 +2039,16 @@ let plivoCallUuid: string | null = null;
         const runtimeInstructionBase = `
 OUTBOUND SCRIPT STATE — where the call is right now:
 - Opening turn (already spoken): "${PDF_OPENING_KN}" — that was the intro AND the site question together. Never say it again.
-- CALL FLOW, in this exact order: (1) they said yes → ask their NAME once ("${PDF_NAME_QUESTION_KN}"); (2) they gave the name → greet them by name + the PROJECTS/AREAS ("${PDF_AREAS_LINE_KN}") + the ONE cheerful interest question ("${PDF_INTEREST_QUESTION_KN}"); (3) they name a project they like → sales-team closing line ("${PDF_HANDOFF_LINE_KN}") + the ONE thank-you ("${PDF_THANKS_CLOSE_KN}") + endCall SAME turn — the call ENDS after the thank-you.
+- YOUR WORDING IS YOURS. The opening line above was the ONLY scripted line on this call. Everything after it you say in YOUR OWN WORDS, naturally, like a person on a live sales call. Do not recite the sample phrases below — they tell you what to COVER, not what to say.
+- CALL FLOW, in this order: (1) they said yes → ask their NAME once, your own words; (2) they gave the name → greet them by name, tell them what we have (our projects and localities, around "${PDF_AREAS_LINE_KN}"), then ask ONE friendly question about whether they are interested; (3) they are interested or they name a locality they want → tell them you are connecting/transferring the call to our sales team, then ONE thank-you, then call endCall in the SAME turn — the call ENDS after the thank-you.
 - Address the caller as "ಸರ್" or "ಮಾಮ್" according to their name, in EVERY line from the projects step onward.
 - ONLY other step allowed: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn.
 - CALLBACK TIME: the sales team is available ${CALLBACK_WINDOW_LABEL}, and that is the ONLY window you may promise. If they ask for a time inside it, confirm that exact time back, call setCallbackTime with it, then close as above. If they ask for a time outside it, say ONCE, warmly and without being defensive, that the time is not possible: "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}" — that line names the window and offers another day or a call soon. Never agree to an hour outside ${CALLBACK_WINDOW_LABEL}; never call setCallbackTime for one.
 - LANGUAGE: Kannada is the default and where you start. Follow the language the CALLER is actually speaking — English, Marathi, Hindi — and stay in it until they switch back. Never switch on a single loanword or filler. Natural conversational speech, never literal translation.
-- NAME STEP: this flow DOES ask for the caller's name, exactly once, right after they say yes to the opening question. Ask for it, use it, and address them by name and the right honorific afterwards.
+- NAME STEP: this flow DOES ask for the caller's name, exactly once, right after they say yes to the opening question. Ask for it, use it, and address them by name and the right honorific afterwards. If they would rather not give a name, never press — move straight on to what we have.
+- INTEREST IS WHAT THEY ASK FOR: the moment they name a locality or say what they are looking for (a plot, a site, Hunsur, K.R. Nagar, anything in our list) they ARE interested. Close with the sales-team transfer + the thank-you + endCall. That is NOT a refusal — never answer interest with the "keep Alliance Square in mind" decline.
+- IF THEY SAY THEY CANNOT HEAR YOU: do not move on, do not change the subject and do not apologise at length. Ask the SAME question again, a little slower and a little louder, then wait. This happens at most once — after that, carry on normally.
+- IF YOU CANNOT ANSWER (you genuinely could not make it out, or it is outside what you know, and a repeat has already been tried): never guess and never invent an answer. Say warmly that you will connect them with our sales team, who can help properly, add ONE short thank-you, then call endCall in the SAME turn.
 - TWO QUESTIONS MAX: (1) the opening site question and (2) the ONE cheerful interest question right after the projects line, freshly phrased. Never ask about investment / construction / purpose / budget, and never ask permission to transfer or continue.
 - Never repeat any line, question or closing twice on this call — reworded counts as a repeat. Say each script line in FULL once.
 - Never echo the caller's words back before answering — one response per turn, no duplicate sentences.
@@ -2329,7 +2479,19 @@ CURRENT DATE: ${currentDateStr}
                       } catch (e: any) {
                         console.error('[GEMINI] Callback-time nudge failed:', e?.message || e);
                       }
-                    } else if (looksLikeInterestedYes(userText)) {
+                    } else if (looksLikeCallerCannotHear(userText)) {
+                      // OWNER DECISION 2 — repeat the SAME question once, slower.
+                      // A hearing complaint never advances the flow.
+                      if (outboundRepeatAskSent) {
+                        console.log('[HEARING] Repeat already asked once — not asking again');
+                      } else {
+                        outboundRepeatAskSent = true;
+                        console.log('[HEARING] Caller could not hear — repeating the SAME question, slower');
+                        geminiSession?.sendRealtimeInput({
+                          text: buildOutboundRepeatQuestionNudge(outboundLastSpokenLine),
+                        });
+                      }
+                    } else if (callerSoundsInterested(userText)) {
                       // FLOW: yes-to-the-site-question → name; then projects; then
                       // interested-in-a-project → sales-team close and the call ends.
                       try {

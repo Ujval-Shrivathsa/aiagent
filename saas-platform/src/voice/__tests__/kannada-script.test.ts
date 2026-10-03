@@ -124,11 +124,13 @@ describe('v5 script — spoken lines', () => {
     assert.doesNotMatch(PDF_AREAS_LINE_KN, /\?/);
     const nudge = OUTBOUND_YES_LOCATIONS_NUDGE;
     assert.match(nudge, /interest question/i);
-    assert.match(nudge, /FRESH/);
-    assert.match(nudge, /ಆಸಕ್ತಿ/);
+    // Owner decision 1: the nudge is GUIDANCE. It must tell the agent how to
+    // COVER the turn and hand her the wording, never hand her a line to recite.
+    assert.match(nudge, /YOUR OWN WORDS/);
+    assert.match(nudge, /paraphrase/i);
+    assert.match(nudge, /STOP and WAIT/);
     const full = buildOutboundSystemInstruction('30 Sep 2026');
     assert.match(full, /TWO QUESTIONS MAX/);
-    assert.match(full, /phrase it FRESH/);
   });
 
   it('sales-team line carries NO thanks; the ONE ಧನ್ಯವಾದ is the final thank-you line', () => {
@@ -173,7 +175,8 @@ describe('v5 script — spoken lines', () => {
   it('close nudges end on the single thank-you, not the sales-team line', () => {
     const handoff = buildOutboundHandoffTransferNudge();
     assert.match(handoff, /endCall in the SAME turn/);
-    assert.match(handoff, new RegExp(PDF_THANKS_CLOSE_KN.slice(0, 10)));
+    assert.match(handoff, /ONE short thank-you/);
+    assert.match(handoff, /sales team/i);
     assert.match(handoff, /EXACTLY ONCE/);
   });
 });
@@ -202,11 +205,11 @@ describe('v5 script — system instructions', () => {
     const ref = buildOutboundProjectReferenceContext();
     assert.match(ref, /Opening:/);
     assert.match(ref, /Locations line:/);
-    assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /INTERESTED/);
+    assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /interested/i);
     assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /ಹುಣಸೂರು/);
     assert.match(OUTBOUND_YES_ASK_NAME_NUDGE, /ಹುಣಸೂರು/); // alias resolves to locations nudge
     const handoff = buildOutboundHandoffTransferNudge();
-    assert.match(handoff, /ಧನ್ಯವಾದಗಳು/);
+    assert.match(handoff, /thank-you/);
     assert.match(handoff, /endCall in the SAME turn/);
     assert.doesNotMatch(handoff, /Do NOT call endCall/);
     assert.match(OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE, /reserved for the sales-team closing line/);
@@ -461,8 +464,8 @@ describe('stalled and improvised turns are detected', () => {
 /** The engine's guaranteed-thanks fallback and the prompt rules behind it. */
 describe('the close always ends in exactly one thank-you', () => {
   it('the fallback nudge asks for the thanks line and nothing else', () => {
-    assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /ONLY this one sentence/);
-    assert.ok(OUTBOUND_THANKS_FALLBACK_NUDGE.includes(PDF_THANKS_CLOSE_KN));
+    assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /ONE short thank-you/);
+    assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /YOUR OWN WORDS/);
     assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /exactly ONCE/);
     assert.doesNotMatch(OUTBOUND_THANKS_FALLBACK_NUDGE, /endCall/);
   });
@@ -485,9 +488,9 @@ describe('the close always ends in exactly one thank-you', () => {
 
   it('the handoff nudge forbids any sentence after the thank-you', () => {
     const nudge = buildOutboundHandoffTransferNudge();
-    assert.match(nudge, /NEVER add anything after the thank-you/);
-    assert.ok(nudge.includes(PDF_THANKS_CLOSE_KN));
-    assert.ok(nudge.includes(PDF_HANDOFF_LINE_KN));
+    assert.match(nudge, /After the thank-you say NOTHING/);
+    assert.match(nudge, /exactly ONCE/i);
+    assert.match(nudge, /sales team/i);
   });
 });
 
@@ -598,10 +601,17 @@ describe('caller name and honorific', () => {
   });
 
   it('the nudges ask for the name, then tell them about the projects', () => {
-    assert.ok(OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_NAME_QUESTION_KN));
+    // The nudge must NOT quote the line — it must tell the agent to ask the name
+    // in her own words. Quoting it is exactly the robotic recital this replaced.
+    assert.ok(
+      !OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_NAME_QUESTION_KN),
+      'the name nudge is guidance, not a line to recite',
+    );
+    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /YOUR OWN WORDS/);
+    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /STOP and WAIT/);
     // The site question already rode in the opening, so the name nudge must
     // not re-ask it and must not jump to the projects.
-    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /Do NOT list the projects yet/i);
+    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /do not list the projects/i);
     const projects = buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN);
     assert.ok(projects.includes(PDF_AREAS_LINE_KN), 'must tell them the projects');
     assert.ok(projects.includes(PDF_INTEREST_QUESTION_KN), 'must ask the one interest question');
@@ -675,11 +685,12 @@ describe('the thank-you is said exactly once, then the call ends', () => {
   });
 
   it('the replacement close says both lines exactly once and ends the call', () => {
-    assert.ok(OUTBOUND_CLEAN_CLOSE_NUDGE.includes(PDF_HANDOFF_LINE_KN));
-    assert.ok(OUTBOUND_CLEAN_CLOSE_NUDGE.includes(PDF_THANKS_CLOSE_KN));
-    assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /EXACTLY ONCE/);
+    // Guidance again: it describes the close, it does not recite it.
+    assert.ok(!OUTBOUND_CLEAN_CLOSE_NUDGE.includes(PDF_HANDOFF_LINE_KN));
+    assert.ok(!OUTBOUND_CLEAN_CLOSE_NUDGE.includes(PDF_THANKS_CLOSE_KN));
+    assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /exactly ONCE/i);
     assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /call endCall/);
-    assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /Do NOT repeat either one/);
+    assert.match(OUTBOUND_CLEAN_CLOSE_NUDGE, /Do not do that again/);
   });
 
   it('the strict end rule is in BOTH instructions the model sees', () => {

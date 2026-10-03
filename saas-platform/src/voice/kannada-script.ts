@@ -543,7 +543,7 @@ export function extractCallerName(text: string): string | null {
   ];
   for (const re of explicit) {
     const m = t.match(re);
-    if (m && !isAgentName(m[1])) return m[1].replace(/[^A-Za-z\u0C80-\u0CFF'-]/g, '');
+    if (m && !isAgentName(m[1]) && !isNoiseWord(m[1])) return m[1].replace(/[^A-Za-z\u0C80-\u0CFF'-]/g, '');
   }
 
   // Otherwise a bare name: one or two capitalised words, optionally "here"/"k".
@@ -564,6 +564,14 @@ const NAME_NOISE_WORDS = new Set([
   'yes', 'no', 'hello', 'hi', 'hey', 'ok', 'okay', 'sure', 'right', 'wrong',
   'good', 'fine', 'thanks', 'thank', 'bye', 'hmm', 'umm', 'yep', 'nope',
   'sir', 'maam', 'mam', 'madam', 'here', 'and', 'the', 'this', 'that',
+  // "I am LOOKING for a plot in HUNSUR" is an interest answer, not a name. The
+  // "I am ..." rule used to capture the gerund or the locality and then address
+  // the caller by it, which is what made the flow jump the name step and sound
+  // scrambled. These are the words that can never be somebody's given name.
+  'looking', 'interested', 'calling', 'from', 'there', 'not', 'ready', 'just',
+  'plot', 'site', 'house', 'flat', 'land', 'investment', 'property', 'builder',
+  'hunsur', 'mysuru', 'mysore', 'nagar', 'layout', 'road', 'street', 'badami',
+  'sayyaji', 'gudi', 'maragathana', 'vijayanagara', 'gokulam', 'prasanna',
   'ಹೌದು', 'ಇಲ್ಲ', 'ಸರಿ', 'ಹಲೋ', 'ಧನ್ಯವಾದ', 'ಸ್ವಾಗತ', 'ನಮಸ್ಕಾರ',
 ]);
 
@@ -850,22 +858,22 @@ export const OUTBOUND_NO_REPEAT_NUDGE =
 // OUTBOUND_NOT_INTERESTED_CLOSE_KN, sent via OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE.)
 
 export const OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE =
-  `SYSTEM (internal): The caller said NO / not interested. ` +
-  `Say EXACTLY once, warmly, in ONE utterance: "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}" ` +
-  `Then IMMEDIATELY call endCall in the SAME turn. Do NOT add anything else. ` +
-  `NEVER say ಧನ್ಯವಾದ on this close — that word is reserved for the sales-team closing line.`;
+  `SYSTEM (internal): They have said NO, or they are not interested, or they are busy. This is the END ` +
+  `of the call. Close it kindly, ONCE, in the CURRENT conversation language, in YOUR OWN WORDS — a warm, ` +
+  `brief goodbye that leaves the door open without arguing. Then IMMEDIATELY call endCall in the SAME turn. ` +
+  `Do NOT argue, do NOT list the projects, do NOT ask why, do NOT try to change their mind, and do NOT ` +
+  `ask a question. NEVER say ಧನ್ಯವಾದ on this close — that word is reserved for the sales-team closing line.`;
 
 /**
  * Caller said YES / interested → locations line NOW (concise, information
  * only), then stop and let the caller respond naturally.
  */
 export const OUTBOUND_YES_LOCATIONS_NUDGE =
-  `SYSTEM (internal): The caller is INTERESTED. Do NOT hang up. Do NOT repeat the opening. ` +
-  `Say the locations line ONCE, warmly and happily, in the CURRENT conversation language: "${PDF_AREAS_LINE_KN}" ` +
-  `Then, in the SAME utterance, ask the interest question with a FRESH cheerful phrasing ` +
-  `(reference only — rephrase it, never reuse these exact words): "${PDF_INTEREST_QUESTION_KN}" ` +
-  `Unhurried, medium pace — one smooth utterance. Then STOP and WAIT for the caller's reply. ` +
-  `Do NOT dump more information.`;
+  `SYSTEM (internal): They are interested. Do NOT hang up and do NOT repeat the opening. Tell them what ` +
+  `we have and ask whether they are interested, in the CURRENT conversation language, in ONE smooth turn ` +
+  `and in YOUR OWN WORDS — the substance is "${PDF_AREAS_LINE_KN}" (paraphrase it freely and name the ` +
+  `localities naturally), then ONE friendly interest question of your own. Unhurried, not rushed. ` +
+  `Then STOP and WAIT for their answer. Do NOT dump more information and do NOT say ಧನ್ಯವಾದ.`;
 
 /** Compatibility alias. */
 export const OUTBOUND_YES_ASK_NAME_NUDGE = OUTBOUND_YES_LOCATIONS_NUDGE;
@@ -876,11 +884,12 @@ export const OUTBOUND_YES_ASK_NAME_NUDGE = OUTBOUND_YES_LOCATIONS_NUDGE;
  * name is what decides sir vs ma'am for the rest of the call.
  */
 export const OUTBOUND_NAME_QUESTION_NUDGE =
-  `SYSTEM (internal): You already asked "are you looking for a site in Mysuru?" and they said YES. ` +
-  `Now ask for their NAME, in the CURRENT conversation language, warmly and in ONE short ` +
-  `sentence: "${PDF_NAME_QUESTION_KN}" ` +
-  `Say nothing else. Do NOT list the projects yet and do NOT ask about them yet. ` +
-  `Then STOP and WAIT for their name.`;
+  `SYSTEM (internal): You already introduced yourself and asked whether they are looking for a site in ` +
+  `Mysuru, and they said YES. Your job now is ONE thing: ask them their NAME. ` +
+  `Say it in the CURRENT conversation language, in ONE short warm sentence, in YOUR OWN WORDS — ` +
+  `this is a conversation, not a script, so never read out a fixed line. Keep it light and natural, ` +
+  `the way one person asks another caller. Say NOTHING else: do not list the projects, do not ask ` +
+  `about them, do not ask a second question. Then STOP and WAIT for their name.`;
 
 /**
  * TURN 3 — we have their name. Tell them about the PROJECTS, addressing them by
@@ -899,26 +908,31 @@ export function buildOutboundProjectsNudge(
   const address = nameWithHonorific(name);
   const who = address || hon;
   return (
-    `SYSTEM (internal): The caller told you their name${address ? ` — it is "${address}"` : ''}. ` +
-    `Now tell them what we have and ask if they are interested. In ONE utterance, in the ` +
-    `CURRENT conversation language, say, in this order: ` +
-    `1) greet them by name — "${who}", ` +
-    `2) the PROJECTS/AREAS — "${PDF_AREAS_LINE_KN}", ` +
-    `3) the ONE interest question — "${PDF_INTEREST_QUESTION_KN}". ` +
-    `Address them as "${who}" for the whole call. Do NOT say ಧನ್ಯವಾದ anywhere in this turn — ` +
-    `that word ends the call on this system, and the thank-you belongs to the close. ` +
-    `Nothing else — then STOP and WAIT for their answer.`
+    `SYSTEM (internal): They told you their name${address ? ` — call them "${address}"` : ''}, and you must ` +
+    `address them as "${who}" in every line from now on. ` +
+    `Now do ONE job: tell them what we actually have, and find out whether they are interested. ` +
+    `Speak naturally in the CURRENT conversation language, in YOUR OWN WORDS — the sense of this turn is ` +
+    `the substance below, not a script to recite. Three beats, ONE smooth turn, in this order: ` +
+    `(1) greet them by name; ` +
+    `(2) the projects/areas — the substance is "${PDF_AREAS_LINE_KN}"; name the localities naturally and ` +
+    `in your own phrasing; ` +
+    `(3) ONE friendly question about whether they are interested — the sense of "${PDF_INTEREST_QUESTION_KN}", ` +
+    `asked in your own words. ` +
+    `Do NOT ask about price, investment, construction, loan, documents or possession, and do NOT ask ` +
+    `permission to continue. If they mention a specific locality, say something helpful about it. ` +
+    `NEVER say ಧನ್ಯವಾದ in this turn — that word ends the call on this system, and the thank-you belongs ` +
+    `to the closing only. Then STOP and WAIT for their answer.`
   );
 }
 
 /** They declined to give a name — move on, never press, use the honorific alone. */
 export function buildOutboundNameDeclinedNudge(honorific: string): string {
   return (
-    `SYSTEM (internal): The caller would not give a name. Do NOT ask again and do NOT press. ` +
-    `Move straight on to the PROJECTS, in the CURRENT conversation language, in ONE utterance: ` +
-    `say the areas — "${PDF_AREAS_LINE_KN}" — then the ONE interest question — ` +
-    `"${PDF_INTEREST_QUESTION_KN}". Address them as "${honorific}". ` +
-    `Do NOT say ಧನ್ಯವಾದ anywhere in this turn. Nothing else, then listen.`
+    `SYSTEM (internal): They chose not to give a name. Do NOT ask again and do NOT press. Address them ` +
+    `as "${honorific}" from here on. Move straight on: tell them what we have and ask whether they are ` +
+    `interested, in the CURRENT conversation language, in ONE smooth turn and in YOUR OWN WORDS — the ` +
+    `substance is "${PDF_AREAS_LINE_KN}" and then ONE friendly interest question. ` +
+    `NEVER say ಧನ್ಯವಾದ in this turn. Nothing else, then listen.`
   );
 }
 
@@ -931,14 +945,16 @@ export function buildOutboundNameDeclinedNudge(honorific: string): string {
  */
 export function buildOutboundHandoffTransferNudge(_firstName?: string): string {
   return (
-    `SYSTEM (internal): The caller is interested in a location and ready to continue. ` +
-    `Speak these TWO short sentences, warmly and happily, in ONE utterance in the CURRENT conversation language, ` +
-    `with a small natural pause between them — no extra words in between: ` +
-    `"${PDF_HANDOFF_LINE_KN}" then "${PDF_THANKS_CLOSE_KN}" ` +
-    `Then IMMEDIATELY call endCall in the SAME turn — the call ENDS after the thank-you. ` +
-    `The word ಧನ್ಯವಾದ is spoken EXACTLY ONCE per call: only in the second sentence, never in the first. ` +
-    `NEVER add anything after the thank-you — no "if you want a site in the future please consider ` +
-    `Alliance Square", no sign-off, no third sentence. The thank-you is the last thing you say.`
+    `SYSTEM (internal): They have told you what they are interested in. This is the END of the call. ` +
+    `Close it now, in the CURRENT conversation language, in YOUR OWN WORDS, as ONE smooth turn with a ` +
+    `small natural pause between two beats: ` +
+    `(1) tell them you are connecting / transferring the call to our sales team, who will help them ` +
+    `further with this; ` +
+    `(2) say ONE short thank-you. ` +
+    `Then IMMEDIATELY call endCall in the SAME turn — the call ends after the thank-you. ` +
+    `Say ಧನ್ಯವಾದ EXACTLY ONCE on this whole call: only in beat 2, never in beat 1, never anywhere else. ` +
+    `After the thank-you say NOTHING — no sign-off, no "consider us in the future", no third sentence. ` +
+    `The thank-you is the last thing the caller hears.`
   );
 }
 
@@ -949,11 +965,10 @@ export function buildOutboundHandoffTransferNudge(_firstName?: string): string {
  * most once per call.
  */
 export const OUTBOUND_THANKS_FALLBACK_NUDGE =
-  `SYSTEM (internal): You already said the sales-team line, but the thank-you was missed and ` +
-  `the caller is still on the line. Say ONLY this one sentence now, warmly, in the CURRENT ` +
-  `conversation language, and NOTHING else: "${PDF_THANKS_CLOSE_KN}". ` +
-  `No other words, no sign-off, no "consider us in the future", no extra sentence. ` +
-  `Speak ಧನ್ಯವಾದ exactly ONCE — this is it — then stop talking.`;
+  `SYSTEM (internal): You already told them you are connecting them to the sales team, but the ` +
+  `thank-you is still missing and they are still on the line. Say ONE short thank-you now, in the ` +
+  `CURRENT conversation language, in YOUR OWN WORDS, and NOTHING else. No sign-off, no extra sentence, ` +
+  `no "consider us in the future". Speak ಧನ್ಯವಾದ exactly ONCE — this is it — then stop talking.`;
 
 /**
  * The model repeated the closing lines inside one turn ("...thanks. ...thanks.").
@@ -962,11 +977,10 @@ export const OUTBOUND_THANKS_FALLBACK_NUDGE =
  * exactly once.
  */
 export const OUTBOUND_CLEAN_CLOSE_NUDGE =
-  `SYSTEM (internal): You just repeated the closing lines. Say the close ONCE, cleanly, ` +
-  `in the CURRENT conversation language, as exactly these TWO sentences and nothing else: ` +
-  `"${PDF_HANDOFF_LINE_KN}" then "${PDF_THANKS_CLOSE_KN}". ` +
-  `Say each sentence EXACTLY ONCE. Do NOT repeat either one, do not say the thank-you ` +
-  `more than once, do not add a sign-off or any other sentence. Then call endCall.`;
+  `SYSTEM (internal): You repeated yourself as the call was closing. Do not do that again. Close ONCE, ` +
+  `in the CURRENT conversation language, in YOUR OWN WORDS, in ONE smooth turn: tell them you are ` +
+  `connecting them to the sales team, then ONE short thank-you, then IMMEDIATELY call endCall in the ` +
+  `SAME turn. ಧನ್ಯವಾದ exactly ONCE, only in the thank-you. Nothing after it.`;
 
 /**
  * Caller asked for a callback time that IS inside the 10am–7pm window. Confirm the
@@ -1321,3 +1335,49 @@ ${PROJECT_RULES}
 CURRENT DATE: ${currentDateStr}
 `;
 }
+
+/**
+ * The agent has hit a wall — it could not make the caller out, or the answer is
+ * outside what it knows. Owner decision: never guess; offer the sales team.
+ * Kept separate from looksLikeCantHearLine (the ONE "I couldn't hear you") so
+ * the two are never confused: one is the agent's own admission, the other is a
+ * caller-side signal that must only ever repeat a question.
+ */
+export function looksLikeCannotAnswerLine(text: string): boolean {
+  const t = String(text || '').toLowerCase();
+  if (!t) return false;
+  return (
+    /\b(i don'?t know|i do not know|not sure|can'?t answer|cannot answer|unable to|didn'?t catch|did not catch|didn'?t understand|no information|i'?m not (sure|aware)|ask (the )?sales (team|manager))\b/.test(
+      t,
+    ) ||
+    /(ನನಗೆ ತಿಳಿಯುವುದಿಲ್ಲ|ತಿಳಿಯುವುದಿಲ್ಲ|ಅರಿಯುವುದಿಲ್ಲ|ಕೇಳಿದರೂ ಹೇಳಿ|ಕೇಳಿದರೆ ಹೇಳಲಾಗುತ್ತಿದೆ|ಸರಿಯಾಗಿ ಕೇಳಿದ್ದೀರಾ)/.test(t)
+  );
+}
+
+/**
+ * They said they could not hear. Owner decision: repeat the SAME question once,
+ * slower and louder — never move on, never change the subject, never apologise
+ * at length. Sent at most once per call so a bad line cannot loop.
+ */
+export function buildOutboundRepeatQuestionNudge(lastQuestion: string): string {
+  const q = lastQuestion ? `"${lastQuestion}"` : 'the question you just asked';
+  return (
+    `SYSTEM (internal): They said they could not hear you. Do NOT move to the next step, do NOT change the ` +
+    `subject, and do NOT apologise at length. Simply ask the SAME question again — ${q} — in the CURRENT ` +
+    `conversation language, in YOUR OWN WORDS. Speak it a little SLOWER and a little louder than before, ` +
+    `with a clear short opening sound so the very first word is easy to catch. ONE sentence, then STOP ` +
+    `and WAIT for their answer.`
+  );
+}
+
+/**
+ * They asked something Priya genuinely cannot answer. Owner decision: do not
+ * guess — offer the sales team and end the call there.
+ */
+export const OUTBOUND_CANNOT_ANSWER_NUDGE =
+  `SYSTEM (internal): They asked something you cannot answer — it is outside what you know, or you could ` +
+  `not make it out, and asking them to repeat has already been tried once. Do NOT guess and do NOT invent ` +
+  `an answer. Say warmly and briefly, in the CURRENT conversation language and in YOUR OWN WORDS, that you ` +
+  `will connect them with our sales team, who can help with it properly. Add ONE short thank-you. Then ` +
+  `IMMEDIATELY call endCall in the SAME turn — that is the end of this call. Say ಧನ್ಯವಾದ exactly ONCE, ` +
+  `only in the thank-you, and nothing after it.`;

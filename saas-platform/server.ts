@@ -25,7 +25,15 @@ app.prepare().then(() => {
   wss.on('connection', (ws, req) => {
     console.log('[WS] New voice connection received (Gemini Live)');
     const reqUrl = new URL(req.url || '/media-stream', `http://${req.headers.host || 'localhost'}`);
-    setupGemini(ws as any, reqUrl.searchParams);
+    // The origin Plivo actually reached us on. The hangup API has to hand Plivo
+    // a callback URL, so this handshake is the one address we can trust; an env
+    // var can be unset or stale in the dashboard and that silently killed every
+    // remote hangup. Render terminates TLS in front of us, hence the forwarded
+    // proto.
+    const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'http';
+    const host = String(req.headers.host || '').split(',')[0].trim();
+    const publicBaseUrl = host ? `${proto}://${host}` : undefined;
+    setupGemini(ws as any, reqUrl.searchParams, { publicBaseUrl });
   });
 
   server.on('upgrade', (req, socket, head) => {
