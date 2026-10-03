@@ -63,9 +63,16 @@ export const PDF_OPENING = PDF_OPENING_KN;
 export const HONORIFIC_SIR_KN = 'ಸರ್';
 export const HONORIFIC_MAAM_KN = 'ಮಾಮ್';
 
-/** TURN 2 — locations line. Concise INFORMATION ONLY; the caller then responds naturally. */
+/**
+ * TURN 2 — locations line. Concise INFORMATION ONLY; the caller then responds naturally.
+ *
+ * Deliberately MODEST. Priya had been overselling this as "the sites you are looking
+ * for", which flattered a caller who had only said they were looking for a site in
+ * Mysuru — they had named nothing. The honest shape is "we have a few options":
+ * plain, unembellished, and enough for the caller to react to.
+ */
 export const PDF_AREAS_LINE_KN =
-  'ನಮ್ಮ ಹತ್ತಿರ ಹುಣಸೂರು ರಸ್ತೆ, ತಿ. ನರಸೀಪುರ ರಸ್ತೆ, ಶ್ರೀರಾಂಪುರ ಮತ್ತು ಕೆ. ಆರ್. ನಗರ ಪ್ರದೇಶಗಳಲ್ಲಿ ಸೈಟ್‌ಗಳಿವೆ ಸರ್.';
+  'ಸರಿ ಸರ್, ನಮ್ಮಲ್ಲಿ ಕೆಲವು ಆಯ್ಕೆಗಳಿದೆ — ಹುಣಸೂರು ರಸ್ತೆ, ತಿ. ನರಸೀಪುರ ರಸ್ತೆ, ಶ್ರೀರಾಂಪುರ ಮತ್ತು ಕೆ. ಆರ್. ನಗರ ಪ್ರದೇಶಗಳಲ್ಲಿ ಸೈಟ್‌ಗಳಿವೆ ಸರ್.';
 
 /**
  * TURN 2B — the ONE interest question, asked right after the locations line in
@@ -900,6 +907,7 @@ export const OUTBOUND_YES_LOCATIONS_NUDGE =
   `we have and ask whether they are interested, in the CURRENT conversation language, in ONE smooth turn ` +
   `and in YOUR OWN WORDS — the substance is "${PDF_AREAS_LINE_KN}" (paraphrase it freely and name the ` +
   `localities naturally), then ONE friendly interest question of your own. Unhurried, not rushed. ` +
+  `Be MODEST — we have "a few options"; never boast that these are "the sites they are looking for". ` +
   `Then STOP and WAIT for their answer. Do NOT dump more information and do NOT say ಧನ್ಯವಾದ.`;
 
 /** Compatibility alias. */
@@ -942,7 +950,10 @@ export function buildOutboundProjectsNudge(
     `the substance below, not a script to recite. Three beats, ONE smooth turn, in this order: ` +
     `(1) greet them by name; ` +
     `(2) the projects/areas — the substance is "${PDF_AREAS_LINE_KN}"; name the localities naturally and ` +
-    `in your own phrasing; ` +
+    `in your own phrasing. Be MODEST and matter-of-fact: we have "a few options". NEVER boast, ` +
+    `never flatter, and NEVER claim these are "the sites you are looking for" or that we already ` +
+    `have exactly what they want — they have only said they want a site in Mysuru, so name the ` +
+    `areas and let them react; ` +
     `(3) ONE friendly question about whether they are interested — the sense of "${PDF_INTEREST_QUESTION_KN}", ` +
     `asked in your own words. ` +
     `Do NOT ask about price, investment, construction, loan, documents or possession, and do NOT ask ` +

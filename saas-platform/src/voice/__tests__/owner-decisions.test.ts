@@ -18,6 +18,8 @@ import {
   PDF_OPENING_TURN1_KN,
   hasThanksClosing,
   PDF_THANKS_CLOSE_KN,
+  PDF_AREAS_LINE_KN,
+  OUTBOUND_YES_LOCATIONS_NUDGE,
   OUTBOUND_CANNOT_ANSWER_NUDGE,
   OUTBOUND_NAME_QUESTION_NUDGE,
   HONORIFIC_SIR_KN,
@@ -169,6 +171,33 @@ describe('the close is recognised however the agent words it', () => {
     assert.equal(hasThanksClosing('we have plots in Hunsur sir'), false);
     assert.equal(hasThanksClosing('what is your name'), false);
     assert.equal(hasThanksClosing(''), false);
+  });
+});
+
+/**
+ * Priya was overselling the areas as "the sites you are looking for" to a caller
+ * who had only said they wanted a site in Mysuru. The honest shape is "we have
+ * a few options" — modest, and enough for the caller to react to.
+ */
+describe('the areas line is offered modestly', () => {
+  it('says we have a few options, in Kannada', () => {
+    assert.match(PDF_AREAS_LINE_KN, /ಕೆಲವು ಆಯ್ಕೆಗಳಿದೆ/);
+    assert.match(PDF_AREAS_LINE_KN, /ಹುಣಸೂರು/);
+    assert.match(PDF_AREAS_LINE_KN, /ನರಸೀಪುರ/);
+    // Still information only — the interest question is a separate beat.
+    assert.doesNotMatch(PDF_AREAS_LINE_KN, /\?/);
+    assert.doesNotMatch(PDF_AREAS_LINE_KN, /ಧನ್ಯವಾದ/);
+  });
+
+  it('tells the agent not to boast in either nudge that quotes it', () => {
+    for (const nudge of [
+      buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN),
+      OUTBOUND_YES_LOCATIONS_NUDGE,
+    ]) {
+      assert.match(nudge, /MODEST/);
+      assert.match(nudge, /never boast|never boast/i);
+      assert.match(nudge, /the sites (?:you|they) are looking for/);
+    }
   });
 });
 
