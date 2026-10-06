@@ -19,6 +19,8 @@ import {
   hasThanksClosing,
   PDF_THANKS_CLOSE_KN,
   PDF_AREAS_LINE_KN,
+  PDF_HANDOFF_LINE_KN,
+  PDF_NAME_QUESTION_KN,
   OUTBOUND_YES_LOCATIONS_NUDGE,
   OUTBOUND_CANNOT_ANSWER_NUDGE,
   OUTBOUND_NAME_QUESTION_NUDGE,
@@ -63,10 +65,10 @@ describe('a caller answering about a plot is never mistaken for a name', () => {
  * one and the caller falls further behind.
  */
 describe('a hearing complaint repeats the same question, once', () => {
-  const nudge = buildOutboundRepeatQuestionNudge('ನಿಮ್ಗೆ ಹೆಸರು ಏನು ಸರ್?');
+  const nudge = buildOutboundRepeatQuestionNudge('ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?');
 
   it('quotes the question it is repeating', () => {
-    assert.match(nudge, /ನಿಮ್ಗೆ ಹೆಸರು ಏನು ಸರ್\?/);
+    assert.match(nudge, /ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್\?/);
   });
 
   it('says it slower and louder, then waits', () => {
@@ -125,7 +127,7 @@ describe('an unanswerable question is handed to the sales team', () => {
 describe('only the opening is scripted', () => {
   it('never quotes a line the agent must say', () => {
     assert.doesNotMatch(OUTBOUND_NAME_QUESTION_NUDGE, /you already asked "are you looking/);
-    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /YOUR OWN WORDS/);
+    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /Say ONLY this one short question/);
   });
 
   it('still carries the substance the turn must cover', () => {
@@ -208,6 +210,37 @@ describe('the sales handover is confident, never apologetic', () => {
     assert.match(handoff, /confident, warm handover/);
     assert.match(handoff, /NEVER sound apologetic or unsure/);
     assert.match(handoff, /NEVER say you cannot connect them/);
+  });
+
+  it('the name question carries the exact Kannada wording, not an improvised one', () => {
+    // From a real call: Priya asked "ನಮ್ಗೆ ಹೆಸರು ಏನು ಸರ್?" instead of
+    // "ನಿಮ್ಗೆ ಹೆಸರು ಏನು ಸರ್?". The nudge used to say "in YOUR OWN WORDS ...
+    // never read out a fixed line", with no Kannada to anchor it — the same
+    // defect that made the sales-team close come out in English.
+    const nudge = OUTBOUND_NAME_QUESTION_NUDGE;
+    assert.ok(nudge.includes(PDF_NAME_QUESTION_KN), 'the nudge must carry the real sentence');
+    assert.match(nudge, /say ನಿಮ್ಮ, never ನಿಮ್ಗೆ or ನಮ್ಗೆ/);
+    // The old "never read out a fixed line" is what produced the wrong wording.
+    assert.doesNotMatch(nudge, /never read out a fixed line/);
+    // ONE question and nothing else — the verbose nudge made her add chatter.
+    assert.match(nudge, /Say ONLY this one short question/);
+    assert.match(nudge, /nothing before it, nothing after it/);
+    assert.match(nudge, /STOP and WAIT for their name/);
+  });
+
+  it('carries the Kannada line, so the close cannot come out in English', () => {
+    // REGRESSION, from a real call: after a whole conversation in Kannada, the
+    // sales-team close came out in English. This nudge was the only close nudge
+    // that described the sentence purely in English prose with no Kannada to
+    // anchor it, so a long all-English instruction turn primed the model to
+    // answer in English. OUTBOUND_YES_LOCATIONS_NUDGE already embeds its
+    // Kannada line for exactly this reason — this one now matches.
+    assert.ok(
+      handoff.includes(PDF_HANDOFF_LINE_KN),
+      'the handoff nudge must carry the actual Kannada sentence',
+    );
+    assert.match(handoff, /SPEAK it in the SAME language as the rest of this call/);
+    assert.match(handoff, /NEVER answer this close in English when the call has been in Kannada/);
   });
 
   it('still ends on one thank-you and endCall in the same turn', () => {

@@ -35,35 +35,64 @@ describe('language-follow — defaults and switching', () => {
     assert.equal(state.language, 'kn');
   });
 
-  it('switches to English on one clear English sentence', () => {
+  it('does NOT switch on a plain English sentence — only on a request', () => {
+    // OWNER RULE (amended): detection is not consent. A caller who says one
+    // English sentence — or, as seen on a real call, just gives their NAME in
+    // Latin script — must NOT flip the conversation to English.
     const { results, state } = feed(['ಹೌದು ಸರ್', 'Yes, tell me more about the site please.']);
-    assert.equal(results[1].language, 'en');
-    assert.equal(results[1].switched, true);
-    assert.equal(state.language, 'en');
+    assert.equal(results[1].language, 'kn');
+    assert.equal(results[1].switched, false);
+    assert.equal(state.language, 'kn');
   });
 
-  it('stays English until the caller switches back to Kannada', () => {
+  it('does NOT switch on the caller giving their name', () => {
+    // THE REPORTED BUG: "Ramesh" / "my name is Ravi" is a Latin-script
+    // sentence, so the old classifier called it English and the TTS locale
+    // flipped to en-IN mid-Kannada-call.
+    for (const name of ['Ramesh', 'my name is Ravi', 'I am Kumar', 'Ravi Kumar']) {
+      const { results, state } = feed(['ಹೌದು ಸರ್', name]);
+      assert.equal(state.language, 'kn', `"${name}" must not switch the language`);
+      assert.equal(results[1].switched, false);
+    }
+  });
+
+  it('stays in Kannada across English/Marathi turns until asked', () => {
     const { results, state } = feed([
       'Can you give me the location details?',
       'What is the price range there?',
       'ಸರಿ ಸರ್, ಧನ್ಯವಾದಗಳು',
     ]);
-    assert.equal(results[0].language, 'en');
+    assert.ok(results.every((r) => r.language === 'kn' && !r.switched));
+    assert.equal(state.language, 'kn');
+  });
+
+  it('switches when the caller explicitly asks', () => {
+    const { results, state } = feed(['ಹೌದು ಸರ್', 'Please speak in English from now on.']);
     assert.equal(results[1].language, 'en');
+    assert.equal(results[1].switched, true);
+    assert.equal(state.language, 'en');
+  });
+
+  it('stays in the requested language until a DIFFERENT one is asked for', () => {
+    const { results, state } = feed([
+      'Please speak in English.',
+      'Yes, tell me more about the site please.',
+      'Now speak in Kannada please.',
+    ]);
+    assert.equal(results[0].language, 'en');
+    assert.equal(results[1].language, 'en', 'an English sentence does not undo the request');
     assert.equal(results[2].language, 'kn');
     assert.equal(results[2].switched, true);
     assert.equal(state.language, 'kn');
   });
 
-  it('switches to Marathi after two clear Marathi turns (Latin transliteration)', () => {
+  it('does NOT switch on Marathi turns (Latin transliteration)', () => {
     const { results, state } = feed([
       'Malaa kay aahe tar mala site pahije ahe.',
       'Nako sir, udya malaa office jaaychay aahe.',
     ]);
-    assert.equal(results[0].language, 'kn'); // first Marathi turn — not yet
-    assert.equal(results[1].language, 'mr');
-    assert.equal(results[1].switched, true);
-    assert.equal(state.language, 'mr');
+    assert.ok(results.every((r) => r.language === 'kn' && !r.switched));
+    assert.equal(state.language, 'kn');
   });
 
   it('switches to Marathi from Devanagari with Marathi markers', () => {

@@ -38,8 +38,11 @@ import {
   extractCallerName,
   honorificForName,
   looksLikeNameRefusal,
+  looksLikeAnswerToSiteQuestion,
   OUTBOUND_NAME_QUESTION_NUDGE,
+  OUTBOUND_NAME_QUESTION_RETRY_NUDGE,
   buildOutboundProjectsNudge,
+  buildOutboundProjectsRetryNudge,
   buildOutboundNameDeclinedNudge,
   OUTBOUND_THANKS_FALLBACK_NUDGE,
   OUTBOUND_CLEAN_CLOSE_NUDGE,
@@ -51,13 +54,19 @@ import {
   PDF_HANDOFF_LINE_KN,
   OUTBOUND_SILENCE_CHECK_NUDGE,
   OUTBOUND_SILENCE_RESUME_NUDGE,
+  OUTBOUND_SILENCE_CANCELLED_NUDGE,
+  shouldHoldSilenceClose,
+  shouldCancelPendingSilenceClose,
   SILENCE_CHECK_AFTER_MS,
+  SILENCE_CHECKS_MAX,
   SILENCE_CLOSE_AFTER_CHECK_MS,
   createOutboundSilenceState,
   armOutboundSilenceCheck,
   resetOutboundSilence,
   tickOutboundSilence,
   nextOutboundSilenceDeadline,
+  postThanksHangupAction,
+  OUTBOUND_THANKS_AUDIO_WAIT_CAP_MS,
   type OutboundSilenceState,
   allowedLayoutsList,
   detectForbiddenLayoutMention,
@@ -89,6 +98,38 @@ import {
   type FollowLanguage,
 } from '../voice/language/language-follow';
 import { evaluateBargeIn, evaluateLocalSpeech } from '../voice/turn-policy';
+import {
+  buildRecallContext,
+  createCallMemory,
+  rememberAgentLine,
+  rememberCallerLine,
+  setCallStep,
+  setKnownCaller,
+} from './call-memory';
+import {
+  acknowledgementPoolFor,
+  acknowledgementSeed,
+  buildToneDirective,
+  createRecentSpoken,
+  DEFAULT_ACK_WORD_KN as DEFAULT_ACK_WORD,
+  detectCallerSignal,
+  pickUnspoken,
+} from './conversation-naturalness';
+import {
+  createCallTelemetry,
+  opaqueCallId,
+  publishCall,
+  recordAck,
+  recordAgentTurn,
+  recordBargeIn,
+  recordCallerSpeechEnd,
+  recordEnd,
+  recordLanguageSwitch,
+  recordLateReplyRescue,
+  recordRepair,
+  recordSilenceCheck,
+  summarize,
+} from './call-telemetry';
 import {
   parseCallbackTime,
   spokenTimeLabel,
@@ -366,8 +407,37 @@ let plivoCallUuid: string | null = null;
   // Cold-call silence protocol (5s check / 10s close) — see kannada-script.ts.
   let outboundSilence: OutboundSilenceState = createOutboundSilenceState();
   let outboundSilenceTimer: NodeJS.Timeout | null = null;
+  /**
+   * How many times THIS silence cycle has held its window because the caller was
+   * speaking. A count, not a one-shot flag: the tick runs again after every hold,
+   * and the single grace window meant a caller who answered at 3–5s spent it and
+   * was then talked over by the next tick.
+   */
+  let outboundSilenceDefers = 0;
+  /** When the silence goodbye was sent — a late caller reply cancels this close. */
+  let outboundSilenceGoodbyeSentAt = 0;
+  /**
+   * Last time the LOCAL VAD saw the caller produce a turn (start or end). The
+   * transcript lags the audio by a beat, so this is the only signal available
+   * in the gap between "the caller stopped talking" and "their words arrived".
+   */
+  let lastCallerVoiceAt = 0;
+  /** When the caller's current speech span began (for speech-duration telemetry). */
+  let callerVoiceSpanStartedAt = 0;
   /** Timestamp of the caller's last transcript — diagnostics + quiet-window math. */
   let lastCustomerTranscriptAt = Date.now();
+  /**
+   * Per-call telemetry. Counts and millisecond latencies only — no name, no
+   * number, no transcript (see call-telemetry.ts). It exists so "she was silent
+   * after my name" and "she talked over me" stop being opinions: every repair,
+   * barge-in, silence recovery and late-reply rescue is now countable, and the
+   * summary is published on the existing read-only diagnostic endpoint.
+   */
+  let telemetry = createCallTelemetry(opaqueCallId(null), Date.now());
+  /** When the caller's last confirmed speech span ENDED — the latency origin. */
+  let callerSpeechEndedAt = 0;
+  /** When the current agent turn's first audio byte was written to the caller. */
+  let agentTurnFirstAudioAt = 0;
   /** When the CURRENT model turn's audio began — echo-safe interrupt proof window. */
   let currentModelTurnStartedAt = 0;
   // Set once ANY flowchart close line (not-interested / silence timeout) is delivered —
@@ -433,6 +503,10 @@ let plivoCallUuid: string | null = null;
   const scratchPcm16k = Buffer.allocUnsafe(SCRATCH_SAMPLES * 4);
 
   let aiPlaybackEndsAt = 0;
+  // When the LAST piece of agent audio was written to the caller. The
+  // post-thanks hangup needs this to tell "the audio has finished" from "the
+  // transcript got here first and the rest of the sentence is still arriving".
+  let lastAiAudioAt = 0;
   /** Last frame with speech-like energy — stuck-VAD self-heal uses this. */
   let lastSpeechEnergyAt = 0;
   let bargeInStartedAt: number | null = null;
@@ -536,6 +610,13 @@ let plivoCallUuid: string | null = null;
 
   // New strict-script step tracking: areas delivered → interested handoff transfer.
   let outboundAreasLineDelivered = false;
+  /**
+   * True once a PLAYED turn actually carried the projects line. Delivered means
+   * the engine SENT the nudge; heard means the caller got it. The difference is
+   * what keeps a dropped name-step turn from skipping the caller past the
+   * projects and straight into the close.
+   */
+  let outboundAreasLineHeard = false;
   let outboundHandoffNudgeSent = false;
   let outboundNotInterestedNudgeSent = false;
   let outboundYesAskNameNudgeSent = false;
@@ -614,6 +695,41 @@ let plivoCallUuid: string | null = null;
   let outboundNameAsked = false;
   let outboundCallerName: string | null = null;
   let outboundCallerHonorific = HONORIFIC_SIR_KN;
+  /**
+   * ACKNOWLEDGEMENT SELECTOR. The business content of the name step is fixed —
+   * ONE short Kannada word that carries the caller's name, then the areas line.
+   * What was NOT fixed was WHICH word, so every call in every campaign got the
+   * identical beat and that is exactly how a scripted agent sounds. This picks
+   * from a small curated set, deterministically, and never hands back a phrase
+   * already used on this call. If the set ever misbehaves, ACK_LEGACY_ONLY
+   * pins the original single word — that is the rollback, not a code revert.
+   */
+  let outboundAckGuard = createRecentSpoken(4);
+  let outboundAckCount = 0;
+  const ACK_LEGACY_ONLY = /^(1|true|yes|on)$/i.test(
+    String(process.env.OUTBOUND_ACK_LEGACY_ONLY || ''),
+  );
+  const nextAckWord = (): string => {
+    // ROLLBACK SWITCH. If the curated set ever misbehaves on a live campaign,
+    // OUTBOUND_ACK_LEGACY_ONLY=1 pins the owner's original single word on the
+    // very next call — an env change, not a code revert, because this is a
+    // production phone line and the fix has to be faster than a deploy.
+    if (ACK_LEGACY_ONLY) return DEFAULT_ACK_WORD;
+    // Rotated by this call's opaque id, so two different callers do not both
+    // hear the same opening beat — while a single call stays fully
+    // reproducible. See acknowledgementPoolFor: a fresh no-repeat guard alone
+    // always returned the first phrase, which is how every call ended up
+    // sounding templated while the tests stayed green.
+    const chosen = pickUnspoken(
+      outboundAckGuard,
+      (v: string) => v,
+      acknowledgementPoolFor(acknowledgementSeed(telemetry.callId)),
+    );
+    outboundAckGuard = chosen.guard;
+    outboundAckCount += 1;
+    telemetry = recordAck(telemetry, chosen.pick === DEFAULT_ACK_WORD && outboundAckCount > 1);
+    return chosen.pick;
+  };
   let outboundNamePersisted = false;
   let outboundNameDeclined = false;
   /** The ask → capture → site-question sequence has completed (once per call). */
@@ -661,6 +777,8 @@ let plivoCallUuid: string | null = null;
   /** True once ANY Gemini session has opened on this call (initial or reconnect). */
   let geminiEverConnected = false;
   let lastCustomerTranscript = '';
+  /** What the caller has already said and heard — survives a Gemini reconnect. */
+  let callMemory = createCallMemory();
 
   let lastPlayedAiNorm = '';
   let lastPlayedAiRaw = '';
@@ -933,11 +1051,22 @@ let plivoCallUuid: string | null = null;
 
     if (!outboundNameAsked) {
       if (isLikelySttNoise(raw)) return false;
-      if (!isShortAffirmativeReply(raw) || looksLikeOpeningDecline(raw)) return false;
+      if (looksLikeOpeningDecline(raw)) return false;
+      if (looksLikeCustomerBusy(raw)) return false;
+      // NOT just a bare "yes". A caller who said "yes I am looking for a site"
+      // has answered the opening exactly, and used to get dead air: the name step
+      // bailed on the short form, the interested classifier saw the step
+      // unfinished and deliberately stayed quiet. Length is not what makes
+      // something an answer.
+      if (!isShortAffirmativeReply(raw) && !looksLikeAnswerToSiteQuestion(raw)) return false;
       outboundNameAsked = true;
-      console.log('[GEMINI] Yes to the site question — asking for their name');
+      console.log(
+        `[GEMINI] Answered the site question ("${raw.slice(0, 40)}") — asking for their name`,
+      );
       diagLog('name step → asking for name');
       geminiSession?.sendRealtimeInput({ text: OUTBOUND_NAME_QUESTION_NUDGE });
+      // Dead-air guarantee: if that question produces no audio at all, re-issue it.
+      armOutboundStepAudioGuard('the name question', OUTBOUND_NAME_QUESTION_RETRY_NUDGE);
       return true;
     }
     // A bare "ಹೌದು"/"yes" is an ECHO of our own name question, not an answer to
@@ -956,6 +1085,10 @@ let plivoCallUuid: string | null = null;
       geminiSession?.sendRealtimeInput({
         text: buildOutboundNameDeclinedNudge(outboundCallerHonorific),
       });
+      armOutboundStepAudioGuard(
+        'the projects line',
+        buildOutboundProjectsRetryNudge(null, outboundCallerHonorific, nextAckWord()),
+      );
       return true;
     }
 
@@ -963,6 +1096,7 @@ let plivoCallUuid: string | null = null;
     if (name) {
       outboundCallerName = name;
       outboundCallerHonorific = honorificForName(name);
+      callMemory = setKnownCaller(callMemory, { name, honorific: outboundCallerHonorific });
       console.log(`[NAME] Caller is "${name}" → ${outboundCallerHonorific}`);
       diagLog(`name captured "${name}" honorific=${outboundCallerHonorific}`);
       void persistCallerName(name);
@@ -973,11 +1107,28 @@ let plivoCallUuid: string | null = null;
       console.log(`[NAME] Could not read a name from "${raw.slice(0, 40)}" — moving on`);
     }
     geminiSession?.sendRealtimeInput({
-      text: buildOutboundProjectsNudge(outboundCallerName, outboundCallerHonorific),
+      text: buildOutboundProjectsNudge(
+        outboundCallerName,
+        outboundCallerHonorific,
+        nextAckWord(),
+      ),
     });
+    // Dead-air guarantee: the caller gave their name and is now waiting — if this
+    // turn produces no audio, the projects line is re-issued instead of silence.
+    // The retry carries a FRESH acknowledgement: a repair that hands back the
+    // phrase the caller already heard is the most obvious scripted tell there is.
+    armOutboundStepAudioGuard(
+      'the projects line',
+      buildOutboundProjectsRetryNudge(
+        outboundCallerName,
+        outboundCallerHonorific,
+        nextAckWord(),
+      ),
+    );
     // The projects line is delivered here, so the later "interested" step must
     // go straight to the sales-team close instead of repeating the locations.
     outboundAreasLineDelivered = true;
+    callMemory = setCallStep(callMemory, 'projects');
     return true;
   };
 
@@ -1027,6 +1178,13 @@ let plivoCallUuid: string | null = null;
     if (!isOutboundCall || outboundThanksSpoken) return;
     outboundThanksSpoken = true;
     outboundHardMuteAfterClose = true;
+    // The thank-you is the ONLY clean end of this call. Recording it here means
+    // the diagnostics can tell "reached the designed close" from "was cut off",
+    // which is the difference between a good call and a broken one.
+    if (telemetry.endReason === 'none') {
+      telemetry = recordEnd(telemetry, 'thank_you_close', Date.now());
+      publishCall(summarize(telemetry));
+    }
     suppressAiOutput = true;
     if (suppressRecoveryTimer) {
       clearTimeout(suppressRecoveryTimer);
@@ -1072,6 +1230,7 @@ let plivoCallUuid: string | null = null;
   const handleSalesTeamCloseSpoken = (turnText: string) => {
     if (!isOutboundCall || outboundTransferStarted) return;
     outboundTransferStarted = true;
+    callMemory = setCallStep(callMemory, 'closing');
     outboundBusyCloseSent = true;
     clearOutboundSilenceTimer();
     if (hasThanksClosing(turnText)) {
@@ -1189,6 +1348,42 @@ let plivoCallUuid: string | null = null;
     return { suppress: false };
   };
 
+  /**
+   * TONE STRATEGY. The caller's PERSONALITY never changes and their PACE never
+   * changes; what flexes is the length and shape of the reply. A caller pressed
+   * for time gets a shorter sentence, a caller who did not follow gets the same
+   * point in plainer words, a caller who sounds irritated gets one brief line.
+   *
+   * It is attached to the NEXT nudge rather than injected on its own, so it can
+   * never become an extra turn, an extra question, or an interruption of a step
+   * the caller is already answering.
+   */
+  let pendingToneDirective = '';
+  const noteCallerSignal = (raw: string) => {
+    const signal = detectCallerSignal(raw);
+    const directive = buildToneDirective(signal);
+    if (directive) {
+      pendingToneDirective = directive;
+      console.log(`[TONE] caller signal "${signal}" → next reply is length-adapted`);
+    }
+  };
+  /** Consume the pending directive exactly once, so it cannot stack up. */
+  const takeToneDirective = (): string => {
+    const d = pendingToneDirective;
+    pendingToneDirective = '';
+    return d;
+  };
+  /**
+   * Attach the pending tone strategy to a nudge. It is APPENDED, never
+   * substituted, so the business instruction in the nudge is untouched and the
+   * strategy can only make the same reply shorter or plainer.
+   */
+  const withTone = (nudge: string): string => {
+    const directive = takeToneDirective();
+    if (!directive) return nudge;
+    return `${nudge}\n\n${directive}`;
+  };
+
   const playOutboundTurnIfNew = (parts: any[], turnText: string) => {
     // The thank-you has already been spoken in THIS turn and this message says
     // it again. That is the "repeats the thank-you a few times" complaint, and
@@ -1210,16 +1405,43 @@ let plivoCallUuid: string | null = null;
         `[GEMINI] Suppressing outbound repeat (${reason}): "${turnText.slice(0, 72)}..."`,
       );
       forceOutboundHangupIfClosing(`suppressed repeat (${reason})`);
-      // Dropped echo-confirm and invented sign-off turns: do NOT leave the
-      // caller in dead air — push the next real script step instead.
-      if (reason === 'echo_confirm' || reason === 'future_pitch') {
-        console.log('[GUARD] Stalled/improvised turn dropped — advancing the script step');
+      // Dropped echo-confirm, invented sign-off and self-repeating turns: do NOT
+      // leave the caller in dead air — push the next real script step instead.
+      // A repeat the caller can hear is the complaint ("it keeps repeating
+      // itself"), but a dropped turn with nothing after it is WORSE, so every
+      // dropped repeat must be followed by the next real line.
+      if (reason === 'echo_confirm' || reason === 'future_pitch' || reason === 'duplicate_within_turn') {
+        console.log(`[GUARD] Stalled/repeated turn dropped (${reason}) — advancing the script step`);
         sendOutboundNoRepeatNudgeOnce();
         if (outboundTransferStarted) {
           // Mid-close: the sales-team line is out, so only the thanks is missing.
           armOutboundThanksFallback();
         } else if (!outboundNameStepDone) {
           // The name step owns this turn — never talk over it.
+        } else if (
+          outboundAreasLineDelivered &&
+          !outboundAreasLineHeard &&
+          !outboundLocationsNudgeSent
+        ) {
+          // The projects line was sent but the caller never HEARD it (the turn
+          // that carried it was dropped) and the name step is already done: say
+          // it again, by name, instead of jumping ahead to the close.
+          outboundLocationsNudgeSent = true;
+          geminiSession?.sendRealtimeInput({
+            text: buildOutboundProjectsRetryNudge(
+              outboundCallerName,
+              outboundCallerHonorific,
+              nextAckWord(),
+            ),
+          });
+          armOutboundStepAudioGuard(
+            'the projects line',
+            buildOutboundProjectsRetryNudge(
+              outboundCallerName,
+              outboundCallerHonorific,
+              nextAckWord(),
+            ),
+          );
         } else if (outboundAreasLineDelivered && !outboundHandoffNudgeSent) {
           outboundHandoffNudgeSent = true;
           geminiSession?.sendRealtimeInput({ text: buildOutboundHandoffTransferNudge() });
@@ -1273,7 +1495,11 @@ let plivoCallUuid: string | null = null;
     }
     if (!outboundAreasLineDelivered && looksLikeAreasLine(turnText)) {
       outboundAreasLineDelivered = true;
+      callMemory = setCallStep(callMemory, 'projects');
       console.log('[GUARD] Areas line delivered — next yes goes to sales-team transfer');
+    }
+    if (!outboundAreasLineHeard && looksLikeAreasLine(turnText)) {
+      outboundAreasLineHeard = true;
     }
     if (!outboundTransferStarted && looksLikeHandoffLine(turnText)) {
       // SALES-TEAM CLOSING: the "sales team will call you" line ENDS the call,
@@ -1359,6 +1585,22 @@ let plivoCallUuid: string | null = null;
     capture?.onAiSpeakStart();
     capture?.onAiMuLaw(muLawBuffer);
     aiPlaybackEndsAt = Math.max(Date.now(), aiPlaybackEndsAt) + muLawBuffer.length / 8;
+    lastAiAudioAt = Date.now();
+    // The step is on the line — its dead-air guard has nothing left to repair.
+    clearOutboundStepAudioGuard();
+    // Latency evidence: how long after the caller stopped did we first speak.
+    if (!agentTurnFirstAudioAt) {
+      agentTurnFirstAudioAt = Date.now();
+      const waited = callerSpeechEndedAt ? agentTurnFirstAudioAt - callerSpeechEndedAt : 0;
+      telemetry = recordAgentTurn(
+        telemetry,
+        currentModelTurnStartedAt ? agentTurnFirstAudioAt - currentModelTurnStartedAt : 0,
+        0,
+      );
+      if (waited > 0) {
+        console.log(`[LATENCY] caller stopped → first agent audio ${waited}ms`);
+      }
+    }
     if (awaitingFirstAiAudio) {
       awaitingFirstAiAudio = false;
       latLog('PLIVO_AUDIO_SENT (time-to-first-response-audio)');
@@ -1727,20 +1969,35 @@ let plivoCallUuid: string | null = null;
    * has finished playing. It does NOT wait on the model to remember endCall —
    * that wait is exactly what let the thank-you be said again and again. The
    * model's own endCall still ends the call a moment sooner; this is the hard
-   * ceiling, ~1s after the last audio of the close.
+   * ceiling, 1s after the last audio of the close has settled. The value itself
+   * lives in postThanksHangupAction(), which only returns it once the audio of
+   * the thank-you has finished — see OUTBOUND_THANKS_AUDIO_SETTLE_MS for why
+   * waiting for the audio matters.
    */
-  const OUTBOUND_END_CALL_BACKSTOP_MS = 1_000;
 
   const scheduleOutboundHangupAfterThanks = () => {
     if (!isOutboundCall || endCallInvoked) return;
     if (outboundThanksHangupTimer) clearTimeout(outboundThanksHangupTimer);
     if (outboundThanksFallbackTimer) clearTimeout(outboundThanksFallbackTimer);
+    const audioWaitDeadline = Date.now() + OUTBOUND_THANKS_AUDIO_WAIT_CAP_MS;
     const run = () => {
       outboundThanksHangupTimer = null;
       if (endCallInvoked || !outboundThanksSpoken) return;
-      const playLeft = Math.max(0, aiPlaybackEndsAt - Date.now());
-      if (playLeft > 60) {
-        outboundThanksHangupTimer = setTimeout(run, playLeft + 80);
+      // Wait until the thank-you has ACTUALLY finished playing before the 1
+      // second starts. A transcript can arrive before the audio of the same
+      // sentence, so hanging up off the transcript alone cut the caller's
+      // thank-you off mid-word. postThanksHangupAction() holds this until the
+      // audio has drained AND has been quiet for the settle window, then returns
+      // the 1s the owner asked for. The wait is capped, so a stream that never
+      // settles can still never hold the call open.
+      const decision = postThanksHangupAction({
+        playbackEndsAt: aiPlaybackEndsAt,
+        lastAudioAt: lastAiAudioAt,
+        now: Date.now(),
+        waitDeadline: audioWaitDeadline,
+      });
+      if (decision.action === 'wait') {
+        outboundThanksHangupTimer = setTimeout(run, decision.retryInMs);
         return;
       }
       // The close has finished playing. Give the model a beat to call endCall,
@@ -1748,9 +2005,9 @@ let plivoCallUuid: string | null = null;
       outboundThanksHangupTimer = setTimeout(() => {
         outboundThanksHangupTimer = null;
         if (endCallInvoked || !outboundThanksSpoken) return;
-        console.warn('[GUARD] Strict end rule — hanging up right after the thank-you');
+        console.warn('[GUARD] Strict end rule — thank-you fully played, hanging up 1s later');
         void completeAndHangupOutboundCall('strict end rule after thank-you');
-      }, OUTBOUND_END_CALL_BACKSTOP_MS);
+      }, decision.retryInMs);
     };
     outboundThanksHangupTimer = setTimeout(run, 40);
   };
@@ -1781,6 +2038,13 @@ const armOutboundCloseDeadline = (reason: string, ms = OUTBOUND_CLOSE_DEADLINE_M
     diagLog(`close deadline hit after ${reason} → terminating`);
     void completeAndHangupOutboundCall(`close deadline after ${reason}`);
   }, ms);
+};
+
+const clearOutboundCloseDeadline = () => {
+  if (outboundCloseDeadlineTimer) {
+    clearTimeout(outboundCloseDeadlineTimer);
+    outboundCloseDeadlineTimer = null;
+  }
 };
 
 const forceOutboundHangupIfClosing = (reason: string) => {
@@ -1918,6 +2182,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
   const resetOutboundSilenceCycle = () => {
     if (!isOutboundCall) return;
     outboundSilence = resetOutboundSilence();
+    outboundSilenceDefers = 0;
     clearOutboundSilenceTimer();
   };
 
@@ -1931,6 +2196,9 @@ const forceOutboundHangupIfClosing = (reason: string) => {
   };
 
   // SILENCE = one check line, then end the call if nobody answers it.
+  const OUTBOUND_SILENCE_SPEECH_GRACE_MS = 3_000;
+  /** Upper bound on how many times ONE silence cycle may hold for late caller speech. */
+  const OUTBOUND_SILENCE_MAX_DEFERS = 4;
   const runOutboundSilenceTick = () => {
     outboundSilenceTimer = null;
     if (!geminiSession || endCallInvoked || outboundTransferStarted) return;
@@ -1939,12 +2207,47 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       return;
     }
     const now = Date.now();
+    // NEVER cut off a caller who is talking, and never end a call over somebody
+    // who has JUST started talking again. This tick used to run the instant the
+    // VAD turn ENDED — exactly when their transcript is still in flight — so the
+    // goodbye played and hard-muted the agent over somebody who had just spoken,
+    // and they heard nothing back. Caller voice OR speech-class energy inside the
+    // grace window holds the close; the hold is renewable (bounded) rather than a
+    // single shot, so a reply that arrives at 3–5s is still answered.
+    if (
+      shouldHoldSilenceClose({
+        now,
+        lastCallerVoiceAt,
+        lastSpeechEnergyAt,
+        graceMs: OUTBOUND_SILENCE_SPEECH_GRACE_MS,
+        defersUsed: outboundSilenceDefers,
+        maxDefers: OUTBOUND_SILENCE_MAX_DEFERS,
+      })
+    ) {
+      outboundSilenceDefers += 1;
+      console.log(
+        `[SILENCE] Caller voice in the last ${Math.round(OUTBOUND_SILENCE_SPEECH_GRACE_MS / 1000)}s — ` +
+          `holding the close (${outboundSilenceDefers}/${OUTBOUND_SILENCE_MAX_DEFERS})`,
+      );
+      diagLog(`silence close DEFERRED — caller speaking (${outboundSilenceDefers})`);
+      outboundSilence = {
+        reason: outboundSilence.checksSpoken > 0 ? 'checked' : 'listening',
+        deadline: now + SILENCE_CLOSE_AFTER_CHECK_MS,
+        checksSpoken: outboundSilence.checksSpoken,
+      };
+      scheduleOutboundSilenceTick();
+      return;
+    }
     const tick = tickOutboundSilence(outboundSilence, now);
     outboundSilence = tick.state;
     if (tick.action === 'speak_check') {
       const quietSecs = Math.round((now - lastCustomerTranscriptAt) / 1000);
-      console.log(`[SILENCE] ${quietSecs}s quiet — availability check ONCE, then 10s to answer`);
-      diagLog(`silence check quiet=${quietSecs}s → LISTENING (hangs up if unanswered)`);
+      const which = outboundSilence.checksSpoken === 1 ? 'FIRST' : 'SECOND';
+      console.log(
+        `[SILENCE] ${quietSecs}s quiet — availability check ${which} (max ${SILENCE_CHECKS_MAX}, then goodbye + end)`,
+      );
+      diagLog(`silence check #${outboundSilence.checksSpoken} quiet=${quietSecs}s → LISTENING`);
+      telemetry = recordSilenceCheck(telemetry);
       sendOutboundSilenceNudge(OUTBOUND_SILENCE_CHECK_NUDGE);
       scheduleOutboundSilenceTick();
     } else if (tick.action === 'close_silence') {
@@ -1958,6 +2261,16 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       outboundBusyCloseSent = true;
       // Authorises the model's own endCall for this goodbye turn.
       outboundSpokenCloseText = 'silence goodbye';
+      // Marks the close as cancellable — a late caller reply cancels this
+      // hangup. KEEP THIS ADJACENT to the line above: telemetry is best-effort
+      // and must never sit between the close line and the cancellability marker
+      // (verify-late-reply.mjs asserts the two are neighbours).
+      outboundSilenceGoodbyeSentAt = Date.now();
+      if (telemetry.endReason === 'none') {
+        telemetry = recordEnd(telemetry, 'silence_goodbye', now);
+        publishCall(summarize(telemetry));
+      }
+      clearOutboundStepAudioGuard();
       sendOutboundSilenceNudge(OUTBOUND_SILENCE_GOODBYE_NUDGE);
       // Independent deadline: if the goodbye is never heard, or the transcript
       // never confirms its thanks, the call still ends instead of sitting open.
@@ -1979,8 +2292,116 @@ const forceOutboundHangupIfClosing = (reason: string) => {
   /** Agent finished a spoken turn → arm the soft quiet-caller reprompt cycle. */
   const armOutboundSilenceAfterTurn = () => {
     if (!isOutboundCall || outboundHardMuteAfterClose || endCallInvoked || outboundTransferStarted) return;
-    outboundSilence = armOutboundSilenceCheck(Date.now());
+    // This runs after EVERY agent turn, INCLUDING the turns that spoke the check
+    // lines. Carrying `checksSpoken` through is what keeps the SCHEDULE real:
+    // without it that own turn downgraded the state back to 'listening' with a
+    // count of 0, so 5s later the engine asked a caller who had just heard the
+    // question a THIRD time.
+    outboundSilence = armOutboundSilenceCheck(Date.now(), outboundSilence.checksSpoken);
+    outboundSilenceDefers = 0;
     scheduleOutboundSilenceTick();
+  };
+
+  /**
+   * LATE REPLY CANCELLATION — "if we are silent and I speak at 3–5s, before the
+   * call ends, she must still respond".
+   *
+   * Once the silence ladder has sent its goodbye the call is seconds from
+   * dropping, and a caller who speaks at exactly that moment used to be hung up
+   * on mid-sentence. Their voice, or their transcript, now cancels the close:
+   * the close deadline is cleared, the endCall authorisation is withdrawn, the
+   * silence ladder is reset, and the model is told plainly that the call is NOT
+   * over and to answer them.
+   *
+   * Cancellation is refused once the thank-you has been spoken — from that point
+   * the hangup is committed and the agent is hard-muted, so there is nothing left
+   * to answer with.
+   */
+  const cancelSilenceCloseIfCallerSpeaks = (source: string) => {
+    if (!isOutboundCall || endCallInvoked) return;
+    if (
+      !shouldCancelPendingSilenceClose({
+        goodbyeSentAt: outboundSilenceGoodbyeSentAt,
+        thanksSpoken: outboundThanksSpoken,
+        hardMute: outboundHardMuteAfterClose,
+        transferStarted: outboundTransferStarted,
+      })
+    ) {
+      return;
+    }
+    outboundSilenceGoodbyeSentAt = 0;
+    outboundBusyCloseSent = false;
+    outboundSpokenCloseText = '';
+    clearOutboundCloseDeadline();
+    cancelRecovery();
+    console.log(
+      `[SILENCE] Caller spoke again (${source}) — goodbye CANCELLED, answering them now`,
+    );
+    // The single most important conversational save in the engine: a human who
+    // answers late still gets answered. Counted so it can never silently rot.
+    telemetry = recordLateReplyRescue(telemetry);
+    diagLog(`silence goodbye CANCELLED (${source}) → caller gets a reply`);
+    resetOutboundSilenceCycle();
+    armOutboundSilenceAfterTurn();
+    try {
+      geminiSession?.sendRealtimeInput({ text: OUTBOUND_SILENCE_CANCELLED_NUDGE });
+    } catch (e: any) {
+      console.error('[SILENCE] Cancel nudge failed:', e?.message || e);
+    }
+  };
+
+  /**
+   * SPEAK GUARD — every step nudge (the name question, the projects line) is
+   * followed by this guard. If NO agent audio has reached the caller a couple of
+   * seconds later — nothing was generated, the turn was dropped by a dedup guard,
+   * or the audio was muted before a single chunk played — the step is re-issued,
+   * so a step can never end in dead air. That is exactly the failure the owner
+   * heard as "after I said my name, she did not speak at all".
+   *
+   * It is NOT a second recovery ladder: it fires only when the caller has heard
+   * nothing at all for that step, it never speaks a different line, and it gives
+   * up after a small number of attempts.
+   */
+  const OUTBOUND_STEP_AUDIO_GUARD_MS = 2_600;
+  const OUTBOUND_STEP_AUDIO_GUARD_MAX = 2;
+  let outboundStepAudioGuard: NodeJS.Timeout | null = null;
+
+  const clearOutboundStepAudioGuard = () => {
+    if (outboundStepAudioGuard) {
+      clearTimeout(outboundStepAudioGuard);
+      outboundStepAudioGuard = null;
+    }
+  };
+
+  const armOutboundStepAudioGuard = (label: string, retryText: string, attempt = 1) => {
+    clearOutboundStepAudioGuard();
+    const armedAt = Date.now();
+    outboundStepAudioGuard = setTimeout(() => {
+      outboundStepAudioGuard = null;
+      if (!isOutboundCall || endCallInvoked) return;
+      if (outboundHardMuteAfterClose || outboundThanksSpoken || outboundTransferStarted) return;
+      if (!geminiSession) return;
+      // A dropped turn never reaches the caller, so it does not count as her
+      // having spoken — the step is still unanswered.
+      if (lastAiAudioAt > armedAt && !lastOutboundTurnSuppressed) return;
+      // The caller is mid-sentence: their turn owns the reply, not this guard.
+      if (vadIsSpeaking) return;
+      console.warn(
+        `[SPEAK-GUARD] No agent audio ${OUTBOUND_STEP_AUDIO_GUARD_MS}ms after ${label} — ` +
+          `re-issuing it (attempt ${attempt}/${OUTBOUND_STEP_AUDIO_GUARD_MAX})`,
+      );
+      diagLog(`speak-guard ${label} → dead air, re-issuing step (attempt ${attempt})`);
+      telemetry = recordRepair(telemetry);
+      try {
+        geminiSession.sendRealtimeInput({ text: retryText });
+      } catch (e: any) {
+        console.error('[SPEAK-GUARD] Retry nudge failed:', e?.message || e);
+        return;
+      }
+      if (attempt < OUTBOUND_STEP_AUDIO_GUARD_MAX) {
+        armOutboundStepAudioGuard(label, retryText, attempt + 1);
+      }
+    }, OUTBOUND_STEP_AUDIO_GUARD_MS);
   };
 
   const playGeminiAudioParts = (parts: any[] | undefined) => {
@@ -2031,8 +2452,8 @@ const forceOutboundHangupIfClosing = (reason: string) => {
     outboundCallUuid = msg.start.callSid || streamSid;
     // Only trust a real Plivo CallUUID — a stream id would make the hangup API
     // 404 and silently leave the caller connected.
-    if (msg.start.isPlivo && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\$/i.test(String(msg.start.callUuid || ''))) {
-      plivoCallUuid = msg.start.callUuid;
+    if (msg.start.isPlivo && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\$/i.test(String(msg.start.callUuid || ''))) {        plivoCallUuid = msg.start.callUuid;
+        telemetry = { ...telemetry, callId: opaqueCallId(plivoCallUuid) };
       console.log('[PLIVO] CallUUID captured — the call leg can be hung up via the API');
     }
         if (msg.start.isPlivo) audioSink = 'plivo';
@@ -2098,12 +2519,12 @@ const forceOutboundHangupIfClosing = (reason: string) => {
         const runtimeInstructionBase = `
 OUTBOUND SCRIPT STATE — where the call is right now:
 - Opening turn (already spoken): "${PDF_OPENING_KN}" — that was the intro AND the site question together. Never say it again.
-- YOUR WORDING IS YOURS. The opening line above was the ONLY scripted line on this call. Everything after it you say in YOUR OWN WORDS, naturally, like a person on a live sales call. Do not recite the sample phrases below — they tell you what to COVER, not what to say.
+- YOUR WORDING IS YOURS, EXCEPT WHERE A LINE IS ANCHORED. Four things are said word for word: this opening, the name question, the acknowledgement that carries their name, and the one thank-you at the close. Everything in between you say in YOUR OWN WORDS, naturally, like a person on a live sales call. Do not recite the sample phrases below — they tell you what to COVER, not what to say.
 - CALL FLOW, in this order: (1) they said yes → ask their NAME once, your own words; (2) they gave the name → greet them by name, tell them what we have (our projects and localities, around "${PDF_AREAS_LINE_KN}"), then ask ONE friendly question about whether they are interested; (3) they are interested or they name a locality they want → tell them you are connecting/transferring the call to our sales team, then ONE thank-you, then call endCall in the SAME turn — the call ENDS after the thank-you.
 - Address the caller as "ಸರ್" or "ಮಾಮ್" according to their name, in EVERY line from the projects step onward.
 - ONLY other step allowed: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn.
 - CALLBACK TIME: the sales team is available ${CALLBACK_WINDOW_LABEL}, and that is the ONLY window you may promise. If they ask for a time inside it, confirm that exact time back, call setCallbackTime with it, then close as above. If they ask for a time outside it, say ONCE, warmly and without being defensive, that the time is not possible: "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}" — that line names the window and offers another day or a call soon. Never agree to an hour outside ${CALLBACK_WINDOW_LABEL}; never call setCallbackTime for one.
-- LANGUAGE: Kannada is the default and where you start. Follow the language the CALLER is actually speaking — English, Marathi, Hindi — and stay in it until they switch back. Never switch on a single loanword or filler. Natural conversational speech, never literal translation.
+- LANGUAGE: Kannada is the default and where you start. Change language ONLY when the caller ASKS you to ("speak in English", "Hindi mein baat karo") — detection alone is not consent. A caller who gives their NAME, a place name, a loanword (ಸೈಟ್, ಪ್ಲಾಟ್, ಎಮಿ) or a short filler is NOT asking. Stay in Kannada and carry on. If the caller switches back to Kannada in passing, keep speaking Kannada. Never announce a language change. Natural conversational speech, never literal translation.
 - NAME STEP: this flow DOES ask for the caller's name, exactly once, right after they say yes to the opening question. Ask for it, use it, and address them by name and the right honorific afterwards. If they would rather not give a name, never press — move straight on to what we have.
 - INTEREST IS WHAT THEY ASK FOR: the moment they name a locality or say what they are looking for (a plot, a site, Hunsur, K.R. Nagar, anything in our list) they ARE interested. Close with the sales-team transfer + the thank-you + endCall. That is NOT a refusal — never answer interest with the "keep Alliance Square in mind" decline.
 - IF THEY SAY THEY CANNOT HEAR YOU: do not move on, do not change the subject and do not apologise at length. Ask the SAME question again, a little slower and a little louder, then wait. This happens at most once — after that, carry on normally.
@@ -2117,7 +2538,7 @@ OUTBOUND SCRIPT STATE — where the call is right now:
 - Never say you are an AI or language model. You are a sales officer on a live call.
 - "ಧನ್ಯವಾದ" is spoken EXACTLY ONCE per call, and ONLY in this line: "${PDF_THANKS_CLOSE_KN}". The sales-team line carries no thanks. Never add a thank-you to the not-interested close or after it — someone who declined must not be thanked. Every closing line is followed by endCall in the SAME turn.
 - SILENCE: if the caller goes quiet, the system may send a private nudge to check they are still on the line — say that short line ONCE and then keep listening. If they are STILL silent afterwards, the call is over: the system will send a goodbye nudge, and you say ONE short goodbye with a single thank-you for their time and then call endCall in the SAME turn. Never nag, never repeat the check line, and never call endCall merely because the caller is slow to reply.
-- HOW YOU SOUND: keep speaking the way you started — close to the mic, gentle and warm, an audible smile, a real breath before a longer line, commas that are actual pauses. Vary your rhythm instead of delivering every turn at the same speed and shape. If the caller sounds tired, soften; if they sound pleased, brighten. A short line is a fine line — never rush to finish a sentence just to get to the end of it.
+- HOW YOU SOUND: ONE calm, level pace for the WHOLE call, from the first word to the last. NEVER speed up, NEVER slow down, and NEVER change your speed to match how the caller sounds — a tired caller does not make you slower and a pleased one does not make you brighter, because a caller who hears you hurry one line and crawl the next stops believing there is a person here. What DOES change with the caller is your STRATEGY, not your energy: a caller pressed for time gets a shorter sentence, a caller who did not follow gets the same point in plainer words, a caller who sounds irritated gets one brief respectful line. Stay close to the mic, gentle and warm, an audible smile, a real breath before a longer line, commas that are actual pauses. A short line is a fine line — never rush to finish a sentence just to get to the end of it.
 - Reply at a natural human moment after the caller stops — promptly, but not stampeded; a small relaxed beat sounds human.
 - HEARING GUARANTEE: every soft, short or accented caller utterance is a REAL turn — respond immediately, never claim you cannot hear them, never ask them to speak louder. If a private nudge says words were not recognized, briefly acknowledge and ask them kindly to repeat ONCE ("ಒಂದು ಸಲ ಮತ್ತೆ ಹೇಳಿ"); if a nudge says they are waiting for your reply, speak now. The caller must never need to shout or repeat themselves twice.
 
@@ -2414,12 +2835,20 @@ CURRENT DATE: ${currentDateStr}
                   // us here, in the transcription of the audio, so this is the
                   // only place the close can be seen.
                   if (isOutboundCall && !outboundHardMuteAfterClose) {
+                    // A sales-team line is only a CLOSE once the locations line has
+                    // actually been given. Without this the model could jump
+                    // straight from "what is your name, sir?" to "our sales team
+                    // will call you" and end the call, skipping the one thing the
+                    // caller called about. endCall is separately blocked unless a
+                    // close is recognised, so holding it here keeps the call alive.
                     const spoken = String(outTx).trim();
+                    const handoffIsClose = looksLikeHandoffLine(spoken) && outboundAreasLineDelivered;
                     if (spoken) {
                       outboundLastSpokenLine = spoken;
+                      callMemory = rememberAgentLine(callMemory, spoken);
                       if (
                         hasThanksClosing(spoken) ||
-                        looksLikeHandoffLine(spoken) ||
+                        handoffIsClose ||
                         looksLikeNotInterestedCloseLine(spoken)
                       ) {
                         // Authorises the model's own endCall in this same turn.
@@ -2437,8 +2866,21 @@ CURRENT DATE: ${currentDateStr}
                         outboundBusyCloseSent = true;
                         clearOutboundSilenceTimer();
                         activateOutboundPostThanksMute();
-                      } else if (!outboundTransferStarted && looksLikeHandoffLine(spoken)) {
+                      } else if (!outboundTransferStarted && handoffIsClose) {
                         handleSalesTeamCloseSpoken(spoken);
+                      } else if (
+                        !outboundTransferStarted &&
+                        looksLikeHandoffLine(spoken) &&
+                        !outboundAreasLineDelivered
+                      ) {
+                        // Premature close: the caller has not heard what we have
+                        // yet. Give them the locations instead of hanging up.
+                        console.log('[GUARD] Sales-team line before the locations line — not closing');
+                        diagLog('premature handoff (no areas line yet) → locations instead');
+                        if (!outboundLocationsNudgeSent) {
+                          outboundLocationsNudgeSent = true;
+                          geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
+                        }
                       }
                     }
                   }
@@ -2449,7 +2891,17 @@ CURRENT DATE: ${currentDateStr}
                   const userLang = detectScriptLanguage(userText);
                   console.log(`[LANG] Customer STT lang=${userLang} text="${String(userText).slice(0, 100)}"`);
                   lastCustomerTranscript = userText;
+                  callMemory = rememberCallerLine(callMemory, userText);
                   lastCustomerTranscriptAt = Date.now();
+                  callerSpeechEndedAt = Date.now();
+                  telemetry = recordCallerSpeechEnd(
+                    telemetry,
+                    Date.now(),
+                    Math.max(0, Date.now() - (callerVoiceSpanStartedAt || Date.now())),
+                  );
+                  // Communication strategy for the NEXT reply: length and
+                  // explanation follow the caller, the personality never does.
+                  noteCallerSignal(userText);
                   setCallState('PROCESSING', 'customer transcript arrived');
                   diagLog(`stt final lang=${userLang} chars=${userText.length} utteranceCount→${customerUtteranceCount + 1}`);
                   // Ladder guarantee #2: transcript arrived — switch to waiting
@@ -2458,6 +2910,9 @@ CURRENT DATE: ${currentDateStr}
                   noteCustomerTranscriptForRecovery();
                   customerAnsweredOpening(userText);
                   resetOutboundSilenceCycle();
+                  // Their words are in: if the call was already saying goodbye,
+                  // the close is cancelled and they get a real reply.
+                  cancelSilenceCloseIfCallerSpeaks('caller transcript');
                   handleCustomerTranscriptForWait(userText);
                   // LANGUAGE FOLLOW: Kannada default — switch only when the caller
                   // clearly switches (English / Marathi / Hindi).
@@ -2471,6 +2926,8 @@ CURRENT DATE: ${currentDateStr}
                         `[LANG] Caller language ${before} → ${followed.language} (tts=${newTts})`,
                       );
                       activeTtsLanguageCode = newTts;
+                      callMemory = setKnownCaller(callMemory, { language: followed.language });
+                      telemetry = recordLanguageSwitch(telemetry);
                       const prompt = languageFollowSystemPrompt(followed.language);
                       if (Date.now() < aiPlaybackEndsAt - 120) {
                         pendingLanguageSwitchPrompt = prompt;
@@ -2482,7 +2939,8 @@ CURRENT DATE: ${currentDateStr}
 
                   fullTranscription += `User: ${userText}\n`;
                   capture?.onCustomerTranscript(userText);
-                  if (handleNameStep(userText)) {
+                  const nameStepHandled = handleNameStep(userText);
+                  if (nameStepHandled) {
             // The name step owns this turn: we already sent either the name
             // question or the site question. Never fall through and answer it
             // twice, which is what produced doubled sentences.
@@ -2492,7 +2950,17 @@ CURRENT DATE: ${currentDateStr}
                     injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
                     injectDeferredContextAfterOpening();
                   }
-                  if (isShortAffirmativeReply(userText)) {
+                  // OWNERSHIP OF THE TURN: handleNameStep has ALREADY sent its
+                  // nudge for this utterance (the name question, or the
+                  // name-then-locations turn). Both branches below are generic
+                  // "keep talking / continue from the NEXT step" nudges: fired on
+                  // the same turn they told the model to move PAST the step the
+                  // name nudge had just given it, which is why the caller heard
+                  // nothing usable after giving their name. A name turn is owned
+                  // by the name step alone.
+                  if (nameStepHandled) {
+                    // owned by handleNameStep — no second instruction this turn
+                  } else if (isShortAffirmativeReply(userText)) {
                     customerAnsweredOpening(userText);
                     keepOutboundActiveAfterOpeningYes(userText);
                   } else if (
@@ -2515,7 +2983,7 @@ CURRENT DATE: ${currentDateStr}
                       console.error('[GEMINI] Continue-after-opening nudge failed:', e?.message || e);
                     }
                   }
-                  {
+                  if (!nameStepHandled) {
                     if (outboundHardMuteAfterClose) {
                       forceOutboundHangupIfClosing('customer speech after close');
                     } else {
@@ -2598,14 +3066,26 @@ CURRENT DATE: ${currentDateStr}
                         if (outboundTransferStarted) {
                           // Closing already delivered — stay silent; hangup is scheduled.
                         } else if (!outboundNameStepDone) {
-                          // The name step owns this turn. Talking over it with the
-                          // projects line is what made the flow sound scrambled.
-                          console.log('[GUARD] Yes during the name step — staying quiet');
+                          // NEVER SILENCE. This branch used to log "staying quiet"
+                          // and say nothing at all, which is exactly how a caller who
+                          // had already answered the site question was met with dead
+                          // air. The name is the NEXT step in the pinned flow, so
+                          // interested-looking speech before the name is always
+                          // answered by asking for the name — never by going quiet.
+                          if (!handleNameStep(userText)) {
+                            outboundNameAsked = true;
+                            geminiSession?.sendRealtimeInput({ text: OUTBOUND_NAME_QUESTION_NUDGE });
+                            armOutboundStepAudioGuard(
+                              'the name question',
+                              OUTBOUND_NAME_QUESTION_RETRY_NUDGE,
+                            );
+                          }
+                          console.log('[GUARD] Interested before the name — asked for the name');
                         } else if (outboundAreasLineDelivered && !outboundHandoffNudgeSent) {
                           outboundHandoffNudgeSent = true;
                           console.log('[GUARD] Interested in a location — sales-team closing + endCall');
                           geminiSession?.sendRealtimeInput({
-                            text: buildOutboundHandoffTransferNudge(),
+                            text: withTone(buildOutboundHandoffTransferNudge()),
                           });
                           if (customerPhone) {
                             void markOutcomeByPhone(customerPhone, STATUS.INTERESTED, {
@@ -2624,7 +3104,9 @@ CURRENT DATE: ${currentDateStr}
                           // projects line somehow has not landed yet.
                           outboundLocationsNudgeSent = true;
                           console.log('[GUARD] Caller interested — locations line');
-                          geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
+                          geminiSession?.sendRealtimeInput({
+                            text: withTone(OUTBOUND_YES_LOCATIONS_NUDGE),
+                          });
                         }
                       } catch (e: any) {
                         console.error('[GEMINI] Interested-flow nudge failed:', e?.message || e);
@@ -2643,7 +3125,15 @@ CURRENT DATE: ${currentDateStr}
                           outboundNotInterestedNudgeSent = true;
                           console.log('[GUARD] Customer said no — polite close + hangup');
                           clearOutboundSilenceTimer();
-                          geminiSession?.sendRealtimeInput({ text: OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE });
+                          telemetry = recordEnd(
+                            telemetry,
+                            'not_interested_close',
+                            Date.now(),
+                          );
+                          publishCall(summarize(telemetry));
+                          geminiSession?.sendRealtimeInput({
+                            text: withTone(OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE),
+                          });
                         }
                       } catch (e: any) {
                         console.error('[GEMINI] Not-interested close nudge failed:', e?.message || e);
@@ -2992,6 +3482,16 @@ CURRENT DATE: ${currentDateStr}
               } catch { projectReferenceInjected = false; }
               runtimeInstructionsInjected = false;
               injectRuntimeInstructionsIfReady(pendingRuntimeInstruction);
+              // WHAT THE CALLER ALREADY SAID: a fresh session has an empty
+              // history, so without this the caller can be asked something they
+              // already answered — the most obvious memory failure there is.
+              try {
+                const recall = buildRecallContext(callMemory);
+                if (recall) {
+                  injectSilentContext(recall, 'RECALL');
+                  console.log('[GEMINI] Caller recall injected into the fresh session');
+                }
+              } catch { /* the resume line still goes out */ }
               // One short resume line so the caller is never left in dead silence,
               // then straight back to LISTENING.
               try {
@@ -3246,6 +3746,16 @@ CURRENT DATE: ${currentDateStr}
               );
               bargeInConfirmedAt = Date.now();
               capture?.onAiSpeakEnd();
+              // How fast did the agent actually yield? This is the number that
+              // says whether barge-in FEELS human or feels like being talked over.
+              telemetry = recordBargeIn(
+                telemetry,
+                bargeInStartedAt ? Date.now() - bargeInStartedAt : 0,
+              );
+              console.log(
+                `[BARGE-IN] caller took the floor in ` +
+                  `${bargeInStartedAt ? Date.now() - bargeInStartedAt : 0}ms`,
+              );
               clearPlayback();
               bargeInStartedAt = null;
             } else if (bargeDecision.action === 'reset') {
@@ -3291,7 +3801,12 @@ CURRENT DATE: ${currentDateStr}
               vadIsSpeaking = true;
               vadSilenceStartedAt = null;
               vadSpeakingSince = now;
+              lastCallerVoiceAt = now;
+              callerVoiceSpanStartedAt = now;
               resetSpeakNudge();
+              // A caller who starts talking cancels a pending silence goodbye at
+              // the speed of the AUDIO, before their transcript has even landed.
+              cancelSilenceCloseIfCallerSpeaks('caller voice');
               // Caller is speaking — any pending recovery is obsolete; the new turn owns the state.
               speechRecovery = disarmSpeechRecovery(speechRecovery);
               clearRecoveryTick();
@@ -3311,6 +3826,7 @@ CURRENT DATE: ${currentDateStr}
             } else if (speechDecision.event === 'end') {
                 vadIsSpeaking = false;
                 vadSilenceStartedAt = null;
+                lastCallerVoiceAt = now;
                 // A turn ENDED: a fresh debounced start is required before the
                 // next turn — residual 'speech' frames from the tail of the
                 // last syllable cannot immediately re-open USER_SPEAKING.

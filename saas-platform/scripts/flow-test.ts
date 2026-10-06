@@ -159,7 +159,7 @@ function runCall(ai: GoogleGenAI, scenario: Scenario): Promise<ScenarioResult> {
           ready = true;
           // Production opens with the greeting instruction, then speaks the opening.
           say(
-            `OPEN NOW: say EXACTLY this opening, in ONE utterance, immediately — no delay, no extra words, no other questions — then listen: "ಹಲೋ ಸರ್, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಸರ್?"`,
+            `OPEN NOW: say EXACTLY this opening, in ONE utterance, immediately — no delay, no extra words, no other questions — then listen: "ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ನಿಮಗೆ ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ಬೇಕಾ?"`,
             true,
           );
           flushQueue();

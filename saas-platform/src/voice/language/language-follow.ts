@@ -2,16 +2,28 @@
  * ============================================================================
  *   LANGUAGE FOLLOW — Kannada default, follow the caller's actual language.
  * ============================================================================
- *   Spec: the agent's default and primary language is Kannada. It follows the
- *   language the caller is ACTUALLY speaking (never guessed from identity or
- *   records) and switches only when the caller clearly switches:
+ *   Spec (as actually implemented — this comment was previously WRONG and
+ *   promised detection-based switching that the code deliberately does not do):
+ *
+ *   The agent's default and primary language is Kannada, and it changes ONLY
+ *   when the caller explicitly ASKS it to change:
  *     Kannada ↔ English ↔ Marathi ↔ Hindi
  *
- *   - Loanwords / fillers / place names never trigger a switch.
- *   - A clear sentence in another language switches (English: 1 turn,
- *     Marathi/Hindi: 2 consecutive turns — to survive Kannada↔Marathi overlap).
- *   - Once switched, stay in the caller's language until they switch again.
+ *   - DERIVED LANGUAGE IS NOT CONSENT. `detectUtteranceLanguage` is still used
+ *     to CLASSIFY an utterance, but `followLanguageFromUtterance` acts on a
+ *     classification ONLY when its reason is `explicit_request`. Everything
+ *     else — a Latin-script sentence, a name like "Ramesh", a loanword
+ *     (ಸೈಟ್ / ಪ್ಲಾಟ್ / ಎಮಿ), a filler — returns the current language unchanged.
+ *   - WHY: a caller giving their NAME was classified as English and flipped the
+ *     TTS locale to en-IN mid-Kannada-call. The owner's rule is that only an
+ *     explicit request changes the language.
+ *   - Once switched, stay in the caller's language until they ask again.
  *   - The result feeds the TTS languageCode for the next AI turn.
+ *
+ *   NOTE: the `candidate` / `streak` fields are retained on the state object so
+ *   the shape stays stable for callers, but no streak logic is applied — a
+ *   multi-turn detection streak would be a language change the caller never
+ *   asked for.
  *
  *   Pure helpers — unit-tested without a live call. Wired from logic.ts.
  * ============================================================================
@@ -158,33 +170,28 @@ export function followLanguageFromUtterance(
 ): { language: FollowLanguage; switched: boolean; state: LanguageSwitchState } {
   const decision = detectUtteranceLanguage(text);
 
-  // Kannada (or unclear) always returns to/stays in the default cleanly.
-  if (!decision.language) {
-    return { language: state.language, switched: false, state: { ...state, candidate: null, streak: 0 } };
-  }
-  if (decision.language === 'kn') {
-    return { language: 'kn', switched: state.language !== 'kn', state: createLanguageSwitchState() };
+  // OWNER RULE (amended): the conversation language changes ONLY when the
+  // caller explicitly asks the agent to change it. Detection alone is NOT
+  // consent. A caller giving their NAME — "Ramesh", "my name is Ravi" — is a
+  // Latin-script sentence, so the classifier read it as English and flipped
+  // the TTS locale to en-IN in the middle of a Kannada call. Kannada is the
+  // default and stays the default until somebody asks for something else.
+  if (decision.reason !== 'explicit_request' || !decision.language) {
+    return {
+      language: state.language,
+      switched: false,
+      state: { ...state, candidate: null, streak: 0 },
+    };
   }
 
   const target = decision.language;
   if (state.language === target) {
     return { language: target, switched: false, state: { ...state, candidate: null, streak: 0 } };
   }
-
-  // English switches on one clear sentence; Marathi/Hindi need a 2-turn streak.
-  const need = target === 'en' ? 1 : 2;
-  const streak = state.candidate === target ? state.streak + 1 : 1;
-  if (streak >= need) {
-    return {
-      language: target,
-      switched: true,
-      state: { language: target, candidate: null, streak: 0 },
-    };
-  }
   return {
-    language: state.language,
-    switched: false,
-    state: { ...state, candidate: target, streak },
+    language: target,
+    switched: true,
+    state: { language: target, candidate: null, streak: 0 },
   };
 }
 

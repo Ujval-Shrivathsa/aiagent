@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { alegFetchStats } from '../hangup/route';
+import { aggregateRecent, recentCalls } from '@/voice/call-telemetry';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,10 +39,18 @@ export async function GET() {
     ? crypto.createHash('sha256').update(authId).digest('hex').slice(0, 12)
     : '';
   return NextResponse.json({
-    build: 'hangup-status/6',
+    build: 'hangup-status/7',
     now: new Date().toISOString(),
     aleg: stats,
     hangup,
+    // Per-call conversational evidence: counts and millisecond latencies only.
+    // No name, no number, no transcript (see call-telemetry.ts). This is how
+    // "was there dead air / did we talk over them / was the goodbye rescued"
+    // becomes a measurement instead of an opinion.
+    telemetry: {
+      aggregate: aggregateRecent(),
+      recent: recentCalls().slice(0, 5),
+    },
     plivo: {
       authIdConfigured: Boolean(authId),
       authTokenConfigured: Boolean(process.env.PLIVO_AUTH_TOKEN),
