@@ -244,7 +244,7 @@ console.log('\n=== 8. A session restart does not lose what the caller already sa
   m = mem.rememberCallerLine(m, 'ಹೌದು, ಸೈಟ್ ನೋಡ್ತಿದ್ದೀನಿ');
   m = mem.setKnownCaller(m, { name: 'ರವಿ', honorific: 'ಸರ್' });
   m = mem.rememberCallerLine(m, 'ಹುಣಸೂರು ಕಡೆ ನೋಡ್ತಿದ್ದೀನಿ');
-  m = mem.rememberAgentLine(m, 'ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?');
+  m = mem.rememberAgentLine(m, 'ನಿಮ್ಮ ಹೆಸರು ಏನು?');
   m = mem.setCallStep(m, 'projects');
   const recall = mem.buildRecallContext(m);
   check("the caller's own words survive the restart", recall.includes('ಹುಣಸೂರು'));
@@ -254,7 +254,7 @@ console.log('\n=== 8. A session restart does not lose what the caller already sa
   );
   check(
     "the agent's own last line is carried so it cannot be said twice",
-    recall.includes('ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?'),
+    recall.includes('ನಿಮ್ಮ ಹೆಸರು ಏನು?'),
   );
   check(
     'an internal directive can never be laundered into the conversation',

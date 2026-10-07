@@ -132,6 +132,23 @@ describe('v5 script — spoken lines', () => {
     assert.ok(!greeting.includes(PDF_NAME_QUESTION_KN), 'the name question is a LATER turn');
   });
 
+  it('no honorific in any line that can be spoken before the name is known', () => {
+    // OWNER RULE: address the caller neutrally until they actually give a name.
+    // These five are all reachable before step 1C (a silent caller, an immediate
+    // "no", a garbled answer), so none of them may carry an honorific.
+    const preNameLines: Array<[string, string]> = [
+      ['opening', PDF_OPENING_KN],
+      ['name question', PDF_NAME_QUESTION_KN],
+      ['silence check', SILENCE_CHECK_LINE_KN],
+      ['silence goodbye', SILENCE_GOODBYE_LINE_KN],
+      ['decline close', OUTBOUND_NOT_INTERESTED_CLOSE_KN],
+    ];
+    for (const [label, line] of preNameLines) {
+      assert.ok(!line.includes(HONORIFIC_SIR_KN), `${label} says "sir" before the name is known: ${line}`);
+      assert.ok(!line.includes(HONORIFIC_MAAM_KN), `${label} says "ma'am" before the name is known: ${line}`);
+    }
+  });
+
   it('locations line = the four areas, no trailing question', () => {
     assert.doesNotMatch(PDF_AREAS_LINE_KN, /\{name\}/);
     assert.match(PDF_AREAS_LINE_KN, /ಹುಣಸೂರು/);
@@ -218,7 +235,12 @@ describe('v5 script — system instructions', () => {
     assert.match(full, /ನಿಮಗೆ ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ಬೇಕಾ\?/);
     assert.match(full, /STEP 2B — CALLER IS INTERESTED/);
     assert.match(full, /STEP 3 — CALLER SHOWS INTEREST IN A LOCATION/);
-    assert.match(full, /ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್/); // STEP 1B carries the exact name line
+    assert.match(full, /ನಿಮ್ಮ ಹೆಸರು ಏನು\?/); // STEP 1B carries the exact name line
+    // OWNER RULE: no "sir"/"ma'am" before the customer's name is known.
+    assert.ok(!PDF_NAME_QUESTION_KN.includes('ಸರ್'), 'the name question must stay neutral');
+    for (const p of [fast, full]) {
+      assert.match(p, /never ಸರ್, never ಮಾಮ್/, 'both instructions must forbid an honorific before the name');
+    }
     assert.doesNotMatch(full, /setName/);
     assert.match(full, /SILENCE \/ TURN-TAKING PROTOCOL/);
     assert.match(full, /HEARING GUARANTEE/);
@@ -1115,7 +1137,7 @@ describe('names spoken in Kannada script are captured', () => {
     // captured by mistake once Kannada script is in scope. Every word the
     // agent speaks is excluded, so an echo of the site question cannot be
     // handed back to the caller as their own name.
-    assert.equal(extractCallerName('ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್'), null);
+    assert.equal(extractCallerName('ನಿಮ್ಮ ಹೆಸರು ಏನು?'), null);
     assert.equal(extractCallerName('ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದ್ದೀರಾ ಸರ್'), null);
     assert.equal(extractCallerName('ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದ್ದೀರಾ'), null);
     assert.equal(extractCallerName('ಹೌದು'), null);

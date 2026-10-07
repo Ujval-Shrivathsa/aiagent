@@ -648,7 +648,7 @@ yes/no before it is trusted. Nothing in this list may be treated as approved.
 | `PDF_THANKS_CLOSE_KN` | pinned, every call | `ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ` — is this the phrase you would use, or is it slightly formal? | ☐ pending |
 | `CALLBACK_OUTSIDE_WINDOW_LINE_KN` | callback path | Does it sound like a person declining a time, or like a policy? | ☐ pending |
 | `ಸರಿ ಸರ್, ಒಂದು ಸಲ ಮತ್ತೆ ಹೇಳಿ` | repair nudge | Natural way to ask someone to repeat? | ☐ pending |
-| `ಹಲೋ ಸರ್, ಇನ್ನೂ ಲೈನ್ನಲ್ಲಿ ಇದೀರಾ?` | silence check | Would you really ask this after 5 seconds? | ☐ pending |
+| `ಹಲೋ, ಇನ್ನೂ ಲೈನ್ನಲ್ಲಿ ಇದೀರಾ?` | silence check | Would you really ask this after 5 seconds? | ☐ pending |
 
 ## 36. Human conversational imperfection
 

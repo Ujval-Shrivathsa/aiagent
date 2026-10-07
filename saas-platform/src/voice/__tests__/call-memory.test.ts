@@ -75,8 +75,8 @@ describe('call-memory: the caller\'s own words survive the session restart', () 
 
 describe('call-memory: what the agent already said, and what it already knows', () => {
   it('records the agent\'s last spoken line so it is never said twice', () => {
-    const m = rememberAgentLine(createCallMemory(), 'ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?');
-    assert.match(buildRecallContext(m), /ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್\?/);
+    const m = rememberAgentLine(createCallMemory(), 'ನಿಮ್ಮ ಹೆಸರು ಏನು?');
+    assert.match(buildRecallContext(m), /ನಿಮ್ಮ ಹೆಸರು ಏನು\?/);
   });
 
   it('an empty or directive-shaped agent line is not remembered', () => {

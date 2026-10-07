@@ -57,7 +57,7 @@ language is spoken, and their absence is the loudest signal that a machine wrote
   servile and immediately reads as machine-generated.
 - Once the name is known, use `Name + ಸರ್` (`ರವಿ ಸರ್`). Using the bare name without the honorific
   is too familiar for a first cold call.
-- Never say `ನಿಮ್ಗೆ` where `ನಿಮ್ಮ` is meant (the name question is `ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?` — this has
+- Never say `ನಿಮ್ಗೆ` where `ನಿಮ್ಮ` is meant (the name question is `ನಿಮ್ಮ ಹೆಸರು ಏನು?` (no honorific — the name is not known yet) — this has
   already been a shipped bug once).
 
 ---

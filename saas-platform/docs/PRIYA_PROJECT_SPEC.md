@@ -350,13 +350,13 @@ Holds the whole per-call state machine inside `setupGemini`. Key regions:
 |---|---|
 | `PDF_OPENING_INTRO_KN` | `ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ.` |
 | `PDF_OPENING_TURN1_KN` (= `PDF_OPENING_KN` = `PDF_OPENING`) | the site question line |
-| `PDF_NAME_QUESTION_KN` | `ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?` |
+| `PDF_NAME_QUESTION_KN` | `ನಿಮ್ಮ ಹೆಸರು ಏನು?` — neutral: no honorific before the name is known |
 | `PDF_AREAS_LINE_KN` | the projects/areas substance |
 | `PDF_INTEREST_QUESTION_KN` | the one interest question (may be reworded) |
 | `PDF_ACK_KN` | `ಸರ್ತಿ` — one short acknowledgement, **must never** count as a thank-you |
 | `PDF_HANDOFF_LINE_KN` | the sales-team handoff line |
 | `PDF_THANKS_CLOSE_KN` | `ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.` |
-| `SILENCE_CHECK_LINE_KN` | `ಹಲೋ ಸರ್, ಇನ್ನೂ ಲೈನ್‌ನಲ್ಲಿ ಇದೀರಾ?` |
+| `SILENCE_CHECK_LINE_KN` | `ಹಲೋ, ಇನ್ನೂ ಲೈನ್‌ನಲ್ಲಿ ಇದೀರಾ?` — neutral: it can fire before the name is known |
 | `SILENCE_GOODBYE_LINE_KN` | the real goodbye |
 | `HONORIFIC_SIR_KN` / `HONORIFIC_MAAM_KN` | `ಸರ್` / `ಮಾಮ್` |
 
