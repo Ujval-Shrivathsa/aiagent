@@ -16,7 +16,6 @@ import {
   buildOutboundCallbackTimeNudge,
   buildOutboundCallbackOutsideWindowNudge,
   PDF_THANKS_CLOSE_KN,
-  HONORIFIC_SIR_KN,
   CALLBACK_OUTSIDE_WINDOW_LINE_KN,
   OUTBOUND_REPEAT_NUDGE,
   OUTBOUND_NO_REPEAT_NUDGE,
@@ -271,7 +270,7 @@ const OUTBOUND_END_CALL_TOOL = {
     "('the sales team will call you') plus the thank-you line, or " +
     "(4) the caller has not answered your 'are you still there?' check and is still silent. " +
     "'Thank you' is spoken at most ONCE per call, and only in the thank-you line " +
-    "('ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.'). That sentence is the LAST thing you ever say: say it " +
+    "('ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು.'). That sentence is the LAST thing you ever say: say it " +
     "ONCE, then call endCall in that same turn. Never repeat it, never reword it, never " +
     "start it again, and never speak anything after it. " +
     "Never add 'thank you' to the not-interested close — a caller who declined must not be thanked. " +
@@ -694,7 +693,7 @@ let plivoCallUuid: string | null = null;
   /** Name flow: asked once, captured once, then addressed by name for the call. */
   let outboundNameAsked = false;
   let outboundCallerName: string | null = null;
-  let outboundCallerHonorific = HONORIFIC_SIR_KN;
+  let outboundCallerHonorific = ''; // OWNER RULE: no title until a name is captured
   /**
    * ACKNOWLEDGEMENT SELECTOR. The business content of the name step is fixed —
    * ONE short Kannada word that carries the caller's name, then the areas line.
@@ -1080,7 +1079,9 @@ let plivoCallUuid: string | null = null;
     outboundNameStepDone = true;
     if (looksLikeNameRefusal(raw)) {
       outboundNameDeclined = true;
-      outboundCallerHonorific = HONORIFIC_SIR_KN;
+      // OWNER RULE: a declined or unread name is still NO name — no honorific
+      // of any kind may be spoken from here on.
+      outboundCallerHonorific = '';
       console.log('[NAME] Caller declined to give a name — moving on');
       geminiSession?.sendRealtimeInput({
         text: buildOutboundNameDeclinedNudge(outboundCallerHonorific),
@@ -1103,7 +1104,8 @@ let plivoCallUuid: string | null = null;
     } else {
       // Garbled reply: do not stall the call asking again.
       outboundNameDeclined = true;
-      outboundCallerHonorific = HONORIFIC_SIR_KN;
+      // OWNER RULE: garbled name = no captured name = NO honorific.
+      outboundCallerHonorific = '';
       console.log(`[NAME] Could not read a name from "${raw.slice(0, 40)}" — moving on`);
     }
     geminiSession?.sendRealtimeInput({
@@ -2521,7 +2523,7 @@ OUTBOUND SCRIPT STATE — where the call is right now:
 - Opening turn (already spoken): "${PDF_OPENING_KN}" — that was the intro AND the site question together. Never say it again.
 - YOUR WORDING IS YOURS, EXCEPT WHERE A LINE IS ANCHORED. Four things are said word for word: this opening, the name question, the acknowledgement that carries their name, and the one thank-you at the close. Everything in between you say in YOUR OWN WORDS, naturally, like a person on a live sales call. Do not recite the sample phrases below — they tell you what to COVER, not what to say.
 - CALL FLOW, in this order: (1) they said yes → ask their NAME once, your own words; (2) they gave the name → greet them by name, tell them what we have (our projects and localities, around "${PDF_AREAS_LINE_KN}"), then ask ONE friendly question about whether they are interested; (3) they are interested or they name a locality they want → tell them you are connecting/transferring the call to our sales team, then ONE thank-you, then call endCall in the SAME turn — the call ENDS after the thank-you.
-- Address the caller as "ಸರ್" or "ಮಾಮ್" according to their name, in EVERY line from the projects step onward.
+- Address the caller by name with ಸರ್ or ಮಾಮ್ ONLY once they have actually told you their name, and keep that form for the rest of the call. Until then use NO honorific at all — never ಸರ್, never ಮಾಮ್ — even in the projects step.
 - ONLY other step allowed: NO / ಇಲ್ಲ / ಬೇಡ → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn.
 - CALLBACK TIME: the sales team is available ${CALLBACK_WINDOW_LABEL}, and that is the ONLY window you may promise. If they ask for a time inside it, confirm that exact time back, call setCallbackTime with it, then close as above. If they ask for a time outside it, say ONCE, warmly and without being defensive, that the time is not possible: "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}" — that line names the window and offers another day or a call soon. Never agree to an hour outside ${CALLBACK_WINDOW_LABEL}; never call setCallbackTime for one.
 - LANGUAGE: Kannada is the default and where you start. Change language ONLY when the caller ASKS you to ("speak in English", "Hindi mein baat karo") — detection alone is not consent. A caller who gives their NAME, a place name, a loanword (ಸೈಟ್, ಪ್ಲಾಟ್, ಎಮಿ) or a short filler is NOT asking. Stay in Kannada and carry on. If the caller switches back to Kannada in passing, keep speaking Kannada. Never announce a language change. Natural conversational speech, never literal translation.

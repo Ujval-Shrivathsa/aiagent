@@ -188,10 +188,13 @@ describe('the acknowledgement carries the caller name', () => {
     assert.ok(out.includes(HONORIFIC_MAAM_KN), `expected ಮಾಮ್ in "${out}"`);
   });
 
-  test('with no name it uses the honorific alone and never an empty beat', () => {
+  test('with no name there is NO honorific and never an empty beat (owner rule)', () => {
     const out = acknowledgementWithName('ಸರ್ತಿ', null);
-    assert.ok(out.trim().length > 0);
-    assert.ok(out.includes(HONORIFIC_SIR_KN));
+    assert.equal(out, 'ಸರ್ತಿ');
+    // ಸರ್ತಿ itself contains the letters ಸರ್ — what must never appear is a
+    // SEPARATE spoken title after the beat.
+    assert.ok(!out.includes(' ಸರ್'), 'no name → never a spoken ಸರ್ after the beat');
+    assert.ok(!out.includes('ಮಾಮ್'), 'no name → never ಮಾಮ್');
     assert.equal(hasThanksClosing(out), false);
   });
 

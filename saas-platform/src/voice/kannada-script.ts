@@ -6,7 +6,7 @@
  *
  *   FLOW:
  *     TURN 1  OPENING (spoken IMMEDIATELY on answer, ONE utterance):
- *             "ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ನಿಮಗೆ ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ಬೇಕಾ?"
+ *             "ಹಲೋ ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ ಪ್ರಿಯ ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೊತಿದೀರಾ"
  *             (= "Hello, this is Priya from Alliance Square. Are you looking for a site in Mysore?")
  *     TURN 2  INTERESTED → locations (concise, conversational):
  *             "ನಮ್ಮ ಹತ್ತಿರ ಹುಣಸೂರು ರಸ್ತೆ, ತಿ. ನರಸೀಪುರ ರಸ್ತೆ, ಶ್ರೀರಾಂಪುರ ಮತ್ತು ಕೆ. ಆರ್. ನಗರ
@@ -34,20 +34,20 @@
 // ---------------------------------------------------------------------------
 
 /** TURN 1 — the intro ONLY, spoken immediately on answer. The question is TURN 2. */
-export const PDF_OPENING_INTRO_KN = 'ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ.';
+export const PDF_OPENING_INTRO_KN = 'ಹಲೋ ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ ಪ್ರಿಯ';
 
 /** TURN 2 — ask the caller's name. Spoken only after they say anything at all. */
 export const PDF_NAME_QUESTION_KN = 'ನಿಮ್ಮ ಹೆಸರು ಏನು?';
 
 /** TURN 3 — the site question, spoken after we have their name. */
-export const PDF_SITE_QUESTION_KN = 'ನಿಮಗೆ ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ಬೇಕಾ?';
+export const PDF_SITE_QUESTION_KN = 'ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೊತಿದೀರಾ';
 
 /**
  * The full opening as ONE utterance. Kept for reference and for callers that
  * genuinely do not want to give a name — never the default path.
  */
 export const PDF_OPENING_KN =
-  'ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ನಿಮಗೆ ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ಬೇಕಾ?';
+  'ಹಲೋ ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ ಪ್ರಿಯ ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೊತಿದೀರಾ';
 
 /**
  * TURN 1, spoken on answer: the intro AND the Mysuru site question in ONE
@@ -72,7 +72,7 @@ export const HONORIFIC_MAAM_KN = 'ಮಾಮ್';
  * plain, unembellished, and enough for the caller to react to.
  */
 export const PDF_AREAS_LINE_KN =
-  'ಸರಿ ಸರ್, ನಮ್ಮಲ್ಲಿ ಕೆಲವು ಆಯ್ಕೆಗಳಿದೆ — ಹುಣಸೂರು ರಸ್ತೆ, ತಿ. ನರಸೀಪುರ ರಸ್ತೆ, ಶ್ರೀರಾಂಪುರ ಮತ್ತು ಕೆ. ಆರ್. ನಗರ ಪ್ರದೇಶಗಳಲ್ಲಿ ಸೈಟ್‌ಗಳಿವೆ ಸರ್.';
+  'ಸರಿ, ನಮ್ಮಲ್ಲಿ ಕೆಲವು ಆಯ್ಕೆಗಳಿದೆ — ಹುಣಸೂರು ರಸ್ತೆ, ತಿ. ನರಸೀಪುರ ರಸ್ತೆ, ಶ್ರೀರಾಂಪುರ ಮತ್ತು ಕೆ. ಆರ್. ನಗರ ಪ್ರದೇಶಗಳಲ್ಲಿ ಸೈಟ್‌ಗಳಿವೆ.';
 
 /**
  * TURN 2B — the ONE interest question, asked right after the locations line in
@@ -81,7 +81,7 @@ export const PDF_AREAS_LINE_KN =
  * question permitted on the entire call.
  */
 export const PDF_INTEREST_QUESTION_KN =
-  'ಇವುಗಳಲ್ಲಿ ಯಾವುದಾದರೂ ಆಸಕ್ತಿ ಇದೆಯಾ ಸರ್?';
+  'ಇವುಗಳಲ್ಲಿ ಯಾವುದಾದರೂ ಆಸಕ್ತಿ ಇದೆಯಾ?';
 
 /**
  * TURN 2A — the ONE-word acknowledgement the caller hears the moment they give
@@ -100,14 +100,14 @@ export const PDF_ACK_KN = 'ಸರ್ತಿ';
  * hanging up, rather than twice.
  */
 export const PDF_HANDOFF_LINE_KN =
-  'ಸರಿ ಸರ್, ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಶೀಘ್ರದಲ್ಲೇ ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ ಸರ್.';
+  'ಸರಿ, ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಶೀಘ್ರದಲ್ಲೇ ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.';
 
 /**
  * FINAL LINE — spoken immediately after the sales-team line (or after the
  * callback-time confirmation). Contains the call's ONLY ಧನ್ಯವಾದ, and the call
  * ends right after it.
  */
-export const PDF_THANKS_CLOSE_KN = 'ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.';
+export const PDF_THANKS_CLOSE_KN = 'ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು.';
 
 /**
  * CALLBACK WINDOW — the only hours the sales team can be reached.
@@ -125,7 +125,7 @@ export const CALLBACK_WINDOW_LABEL = `${CALLBACK_WINDOW_START_HOUR}am–${CALLBA
  * possible and why, then offer both alternatives: another day, or a call soon.
  */
 export const CALLBACK_OUTSIDE_WINDOW_LINE_KN =
-  'ಸರ್, ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಬೆಳಗ್ಗೆ 10 ಗಂಟೆಗೇ ರಿಂದ ಸಂಜೆ 7 ಗಂಟೆಗವರೆಗೆ ಮಾತ್ರ ಕರೆ ಮಾಡುತ್ತಾರೆ. ' +
+  'ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಬೆಳಗ್ಗೆ 10 ಗಂಟೆಗೇ ರಿಂದ ಸಂಜೆ 7 ಗಂಟೆಗವರೆಗೆ ಮಾತ್ರ ಕರೆ ಮಾಡುತ್ತಾರೆ. ' +
   'ಬೇಕಾದರೆ ಬೇರೆ ದಿನ ಹೇಳಿ, ಅಥವಾ ಶೀಘ್ರದಲ್ಲೇ ಕರೆ ಮಾಡುತ್ತಾರೆ.';
 
 /** NOT-INTERESTED close — polite, NO ಧನ್ಯವಾದ (that word is reserved for the sales-team closing line). */
@@ -144,7 +144,7 @@ export const SILENCE_CHECK_LINE_KN = 'ಹಲೋ, ಇನ್ನೂ ಲೈನ್‌
  * NEVER wired to endCall.
  */
 export const SILENCE_TIMEOUT_CLOSE_KN =
-  'ಸರಿ ಸರ್, ನೀವು ಲೈನ್‌ನಲ್ಲಿ ಇಲ್ಲದ ಕಾರಣ ಈಗ ಕರೆ ಕಡಿತಗೊಳಿಸುತ್ತಿದ್ದೀನಿ.';
+  'ಸರಿ, ನೀವು ಲೈನ್‌ನಲ್ಲಿ ಇಲ್ಲದ ಕಾರಣ ಈಗ ಕರೆ ಕಡಿತಗೊಳಿಸುತ್ತಿದ್ದೀನಿ.';
 
 /** Greeting instruction sent when the media stream opens — the exact opening utterance. */
 export function getOutboundGreetingInstruction(_lang: 'kn' | 'en' = 'kn'): string {
@@ -476,7 +476,7 @@ export function deriveOutboundConversationMemory(
 
   if (
     t.includes(PDF_OPENING_KN) ||
-    /ಸೈಟ್\s*(?:ನೋಡ|ಬೇಕ)/i.test(t) ||
+    /ಸೈಟ್\s*(?:ನೋಡ|ನೊತಿ|ಬೇಕ)/i.test(t) ||
     /looking for a site in mys/i.test(t)
   ) {
     return {
@@ -486,7 +486,7 @@ export function deriveOutboundConversationMemory(
     };
   }
   if (
-    /ಸೈಟ್‌?ಗಳಿವೆ ಸರ್/i.test(t) ||
+    /ಸೈಟ್‌?ಗಳಿವೆ(?:\s*ಸರ್)?/i.test(t) ||
     /(?:ಆಸಕ್ತಿ ಇದೆಯಾ|ಯಾವುದಾದರೂ ಆಸಕ್ತಿ|interested in any (?:of )?(?:these|them))/i.test(t) ||
     (AREAS_KEYWORDS.test(t) && /(?:interested|are you|ಆಸಕ್ತಿ|ಇದ್ದೀರಾ)/i.test(t))
   ) {
@@ -859,7 +859,9 @@ const FEMININE_NAMES = new Set([
 
 /**
  * Address the caller from their name: ma'am only for a clearly feminine given
- * name, sir for everything else (including an unknown or odd name).
+ * name, sir for everything else. NO NAME MEANS NO TITLE — the owner's rule is
+ * that ಸರ್/ಮಾಮ್ may never be spoken before a name has been captured, so an
+ * unknown name yields '' (no honorific), never a default ಸರ್.
  */
 /**
  * Feminine given names written in Kannada script. A Kannada caller who gives
@@ -878,7 +880,7 @@ const KANNADA_FEMININE_NAMES = new Set([
 
 export function honorificForName(name: string | null | undefined): string {
   const n = String(name || '').trim().toLowerCase().replace(/[^a-z\u0C80-\u0CFF]/g, '');
-  if (!n) return HONORIFIC_SIR_KN;
+  if (!n) return ''; // OWNER RULE: no name → no title, never a default ಸರ್
   return FEMININE_NAMES.has(n) || KANNADA_FEMININE_NAMES.has(n)
     ? HONORIFIC_MAAM_KN
     : HONORIFIC_SIR_KN;
@@ -1088,9 +1090,9 @@ export function looksLikeCustomerBusy(text: string): boolean {
 export function looksLikeOpeningRestate(text: string): boolean {
   const t = String(text || '');
   const identityIntro =
-    /(?:this is priya|i am priya|i'?m priya|ನಾನು\s*ಅಲೈಯನ್ಸ್|ಅಲೈಯನ್ಸ್\s*ಸ್ಕ್ವೇರ್‌?ನಿಂದ|from alliance square)/i;
+    /(?:this is priya|i am priya|i'?m priya|ನಾನು\s*ಅಲ[ೈ]?ಯ?ನ್ಸ್|ಅಲ[ೈ]?ಯ?ನ್ಸ್\s*ಸ್ಕ್ವೇರ್\s*‌?ನಿಂದ|from alliance square)/i;
   const openingQuestion =
-    /(?:looking for a (?:residential )?(?:site|plot)|are you looking|ಸೈಟ್\s*(?:ನೋಡ|ಬೇಕ)|site\s*ನೋಡ್ತಿದೀರಾ|ನೋಡ್ತಿದ್ದೀರಾ)/i;
+    /(?:looking for a (?:residential )?(?:site|plot)|are you looking|ಸೈಟ್\s*(?:ನೋಡ|ನೊತಿ|ಬೇಕ)|site\s*ನೋಡ್ತಿದೀರಾ|ನೋಡ್ತಿದ್ದೀರಾ)/i;
   return identityIntro.test(t) && openingQuestion.test(t);
 }
 
@@ -1234,7 +1236,7 @@ export const OUTBOUND_NAME_QUESTION_RETRY_NUDGE =
  */
 export function buildOutboundProjectsNudge(
   name: string | null | undefined,
-  honorific?: string,
+  _honorific?: string,
   /**
    * The acknowledgement for THIS call, chosen by conversation-naturalness.
    * Defaults to the owner's single word, so a caller that never reaches the
@@ -1242,19 +1244,24 @@ export function buildOutboundProjectsNudge(
    */
   ackWord: string = PDF_ACK_KN,
 ): string {
-  const hon = honorific || HONORIFIC_SIR_KN;
+  // OWNER RULE (never a title before the name): the address exists ONLY when a
+  // name was actually captured. Without one there is NO honorific — never ಸರ್,
+  // never ಮಾಮ್ — and the instruction must not pretend a name was given.
   const address = nameWithHonorific(name);
-  const who = address || hon;
   return (
-    `SYSTEM (internal): They told you their name${address ? ` — call them "${address}"` : ''}, and you must ` +
-    `address them as "${who}" in every line from now on. Speak NOW — do not stay silent and do not ` +
+    `SYSTEM (internal): ${address
+      ? `They told you their name — call them "${address}", and you must ` +
+        `address them as "${address}" in every line from now on.`
+      : 'They have NOT given their name. Do NOT ask for it again and do NOT invent a name or title — ' +
+        'speak with NO honorific: never ಸರ್, never ಮಾಮ್, no assumed address of any kind.'} ` +
+    `Speak NOW — do not stay silent and do not ` +
     `react to the name with "ohh", "okay so", "like that" or "ಅಹಾ". ` +
     `Now do ONE job: acknowledge them with ONE short word, then tell them what we actually have, ` +
     `and find out whether they are interested. ` +
     `Speak naturally in the CURRENT conversation language, in YOUR OWN WORDS — the sense of this turn is ` +
     `the substance below, not a script to recite. Two beats, ONE smooth turn, in this order: ` +
-    `(1) ONE short acknowledgement that carries their name — the single Kannada word ` +
-    `"${ackWord}", like "${address ? `${ackWord} ${address}` : `${ackWord} ${hon}`}", said once and nothing longer. ` +
+    `(1) ONE short acknowledgement${address ? ' that carries their name' : ''} — the single Kannada word ` +
+    `"${ackWord}", like "${address ? `${ackWord} ${address}` : ackWord}", said once and nothing longer. ` +
     `It is NOT a sentence, NOT a greeting, NOT a wish and NOT a second chance to be enthusiastic; ` +
     `(2) the projects/areas AND the ONE interest question — the substance is "${PDF_AREAS_LINE_KN}", name ` +
     `the localities naturally and in your own phrasing, then ask "${PDF_INTEREST_QUESTION_KN}" in your ` +
@@ -1282,17 +1289,16 @@ export function buildOutboundProjectsNudge(
  */
 export function buildOutboundProjectsRetryNudge(
   name: string | null | undefined,
-  honorific?: string,
+  _honorific?: string,
   ackWord: string = PDF_ACK_KN,
 ): string {
-  const hon = honorific || HONORIFIC_SIR_KN;
+  // OWNER RULE (never a title before the name): no captured name → NO honorific.
   const address = nameWithHonorific(name);
-  const who = address || hon;
   return (
     `SYSTEM (internal): your previous turn produced NO sound — the caller is still on the line, ` +
     `waiting in silence. Do NOT apologise, do NOT ask them to repeat anything, and do NOT stay ` +
-    `quiet: speak NOW, addressing them as "${who}". One smooth turn, two beats: ` +
-    `(1) ONE short acknowledgement that carries their name — the single Kannada word ` +
+    `quiet: speak NOW${address ? `, addressing them as "${address}"` : ' with NO honorific: never ಸರ್, never ಮಾಮ್'}. One smooth turn, two beats: ` +
+    `(1) ONE short acknowledgement${address ? ' that carries their name' : ''} — the single Kannada word ` +
     `"${ackWord}" and nothing longer; ` +
     `(2) what we actually have — the substance is "${PDF_AREAS_LINE_KN}" — then the ONE interest ` +
     `question, asked in your own words: "${PDF_INTEREST_QUESTION_KN}". ` +
@@ -1302,11 +1308,11 @@ export function buildOutboundProjectsRetryNudge(
   );
 }
 
-/** They declined to give a name — move on, never press, use the honorific alone. */
-export function buildOutboundNameDeclinedNudge(honorific: string): string {
+/** They declined to give a name — move on, never press, NO honorific of any kind. */
+export function buildOutboundNameDeclinedNudge(_honorific?: string): string {
   return (
-    `SYSTEM (internal): They chose not to give a name. Do NOT ask again and do NOT press. Address them ` +
-    `as "${honorific}" from here on. React to nothing — no "ohh", no "okay so", no "like that", no "ಅಹಾ". ` +
+    `SYSTEM (internal): They chose not to give a name. Do NOT ask again and do NOT press. Use ` +
+    `NO honorific from here on: never ಸರ್, never ಮಾಮ್, no invented name. React to nothing — no "ohh", no "okay so", no "like that", no "ಅಹಾ". ` +
     `Move straight on: tell them what we have and ask whether they are ` +
     `interested, in the CURRENT conversation language, in ONE smooth turn and in YOUR OWN WORDS — the ` +
     `substance is "${PDF_AREAS_LINE_KN}" and then ONE friendly interest question. ` +
@@ -1491,8 +1497,9 @@ const NO_ECHO_RULES = `NO ECHOING / NO CONFIRMING / NO DUPLICATE LINES:
 - NEVER ask them to confirm what they just said. Banned outright: "did you say yes sir?",
   "you said yes, right?", "am I hearing you right?", "did I get that right?", "ಹೌದು ಎಂದು ಹೇಳಿದೆಯಾ?",
   "ಸರಿಯೇ?", "ಅರ್ಥವಾಗಿದೆಯೇ?". If you are unsure what they said, assume you heard it and just answer.
-- A short acknowledgment (ಹಾ ಸರ್ / ಸರಿ ಸರ್ / ಹೌದು ಸರ್ / yes sir / हो) is allowed ONLY as the
-  opening word or two of your NEXT real line. It is never a turn by itself, it is never
+- A short acknowledgment (ಹಾ / ಸರಿ / ಹೌದು / yes / हो) is allowed ONLY as the
+  opening word or two of your NEXT real line — and NEVER with ಸರ್ or ಮಾಮ್
+  attached until you have the caller's name. It is never a turn by itself, it is never
   stretched into a question about what they said, and it is never followed by the caller's own
   words said back to them.
 - Restating what the caller just said is BANNED — even shortened, softened, or turned into your
@@ -1604,7 +1611,7 @@ STEP 1C — NAME RECEIVED → THANK THEM IN ONE WORD, THEN GIVE THE LOCATIONS:
 - Then straight into STEP 2B: the locations line and the one interest question.
 - The site question is NOT repeated at this point. It was already asked in STEP 1.
 - If they REFUSE to give a name: do not press and do not ask again — skip the acknowledgement
-  word and address them as "${HONORIFIC_SIR_KN}" straight into the locations line.
+  word and go straight into the locations line with NO honorific (never ಸರ್, never ಮಾಮ್).
 - Use their name naturally from here on ("<name> ${HONORIFIC_SIR_KN}"), at most once per turn.
 
 STEP 2A — CALLER SAYS NO / NOT INTERESTED (ಇಲ್ಲ / ಬೇಡ / not interested / stop calling):
@@ -1646,7 +1653,7 @@ STEP 3B — CALLER NOT INTERESTED AT ANY LATER POINT:
 
 SIDE RULES:
 - A busy caller ("call later", "I'm busy") gets the SAME STEP 2A close, never a different line.
-- Caller asks who you are → answer briefly ("ನಾನು ಪ್ರಿಯಾ, ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಮಾತಾಡ್ತಿದ್ದೀನಿ ಸರ್") and return to the current step.
+- Caller asks who you are → answer briefly ("ನಾನು ಪ್ರಿಯ, ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ ಮಾತಾಡ್ತಿದ್ದೀನಿ") and return to the current step.
 - Caller asks which projects exist → name ONLY these five: UK Square, Sridevi Lake View, CNM Apex City,
   Alliance Serene Phase 2, Adhya Enclave. Never mention any other project name.
 - Never go back to STEP 1. The opening is said once and never repeated.`;
@@ -1737,7 +1744,8 @@ FAST SCRIPT (the ONLY allowed flow):
    ("${HONORIFIC_SIR_KN}" by default, "${HONORIFIC_MAAM_KN}" only for a clearly feminine given
    name) — a single "ಸರ್ತಿ", not a sentence — and then STRAIGHT into step 3, the locations line.
    NEVER re-ask the site question, which was already asked in step 1. If they refuse to give a
-   name, never press: skip the acknowledgement and use "${HONORIFIC_SIR_KN}" into the locations.
+   name, never press: skip the acknowledgement and go into the locations with NO honorific —
+   never ಸರ್, never ಮಾಮ್.
 2. NO → close once ("${OUTBOUND_NOT_INTERESTED_CLOSE_KN}") + endCall SAME turn.
 3. YES/INTERESTED → locations once, AS WRITTEN ("${PDF_AREAS_LINE_KN}") + the ONE interest
    question AS WRITTEN ("${PDF_INTEREST_QUESTION_KN}") — then listen.

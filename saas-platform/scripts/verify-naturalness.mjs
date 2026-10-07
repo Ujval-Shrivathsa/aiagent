@@ -143,8 +143,11 @@ console.log('\n=== 4. The beat carries the name, with the right honorific ===');
   check('a male name gets ಸರ್', sir.endsWith(kn.HONORIFIC_SIR_KN), sir);
   check('a female name gets ಮಾಮ್', maam.endsWith(kn.HONORIFIC_MAAM_KN), maam);
   check(
-    'with no name it still says something, never an empty beat',
-    nat.acknowledgementWithName('ಸರ್ತಿ', null).trim().length > 'ಸರ್ತಿ'.length,
+    'with no name the beat stays bare — NO honorific of any kind (owner rule)',
+    (() => {
+      const anon = nat.acknowledgementWithName('ಸರ್ತಿ', null).trim();
+      return anon === 'ಸರ್ತಿ' && !anon.includes(' ಸರ್') && !anon.includes('ಮಾಮ್');
+    })(),
   );
   check(
     'the whole named beat stays a beat, not a sentence',

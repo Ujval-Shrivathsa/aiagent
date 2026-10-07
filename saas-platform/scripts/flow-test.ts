@@ -41,7 +41,7 @@ const MODEL = 'gemini-3.1-flash-live-preview';
 const END_CALL_TOOL = {
   name: 'endCall',
   description:
-    "End the outbound call ONLY when the caller said goodbye, confirmed they are not interested (after the notInterested close line), or is interested in a location and you JUST spoke the sales-team closing line plus the thank-you line — then call endCall in the SAME turn. 'Thank you' is spoken at most ONCE per call, and only in the thank-you line ('ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.'). Never add 'thank you' to the not-interested close — a caller who declined must not be thanked. If the closing already thanked them, do NOT say it again. NEVER end the call because of silence, a quiet caller, short pauses, short replies, or a topic change.",
+    "End the outbound call ONLY when the caller said goodbye, confirmed they are not interested (after the notInterested close line), or is interested in a location and you JUST spoke the sales-team closing line plus the thank-you line — then call endCall in the SAME turn. 'Thank you' is spoken at most ONCE per call, and only in the thank-you line ('ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು.'). Never add 'thank you' to the not-interested close — a caller who declined must not be thanked. If the closing already thanked them, do NOT say it again. NEVER end the call because of silence, a quiet caller, short pauses, short replies, or a topic change.",
   parameters: { type: Type.OBJECT, properties: {}, required: [] },
 };
 const NOT_INTERESTED_TOOL = {
@@ -67,10 +67,10 @@ const SET_CALLBACK_TIME_TOOL = {
 const RUNTIME_RULES = `
 OUTBOUND SCRIPT STATE — where the call is right now:
 - The opening has already been spoken. Never repeat it, never ask the caller's name.
-- INTERESTED → locations once ("ನಮ್ಮ ಹತ್ತಿರ ಹುಣಸೂರು ರಸ್ತೆ, ತಿ. ನರಸೀಪುರ ರಸ್ತೆ, ಶ್ರೀರಾಂಪುರ ಮತ್ತು ಕೆ. ಆರ್. ನಗರ ಪ್ರದೇಶಗಳಲ್ಲಿ ಸೈಟ್‌ಗಳಿವೆ ಸರ್.") + the ONE cheerful interest question (freshly phrased, reference: "ಇವುಗಳಲ್ಲಿ ಯಾವುದಾದರೂ ಆಸಕ್ತಿ ಇದೆಯಾ ಸರ್?") then listen.
-- INTERESTED IN A LOCATION → sales-team closing line ("ಸರಿ ಸರ್, ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಶೀಘ್ರದಲ್ಲೇ ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ ಸರ್.") + the ONE thank-you ("ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.") + endCall SAME turn — the call ENDS after the thank-you.
-- CALLBACK TIME: the sales team is available 10am–7pm, and that is the ONLY window you may promise. If they ask for a time inside it, confirm that exact time back, call setCallbackTime with it, then close as above. If they ask for a time outside it, say ONCE, warmly and without being defensive, that the time is not possible: "ಸರ್, ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಬೆಳಗ್ಗೆ 10 ಗಂಟೆಗೇ ರಿಂದ ಸಂಜೆ 7 ಗಂಟೆಗವರೆಗೆ ಮಾತ್ರ ಕರೆ ಮಾಡುತ್ತಾರೆ. ಬೇಕಾದರೆ ಬೇರೆ ದಿನ ಹೇಳಿ, ಅಥವಾ ಶೀಘ್ರದಲ್ಲೇ ಕರೆ ಮಾಡುತ್ತಾರೆ." Never agree to an hour outside 10am–7pm; never call setCallbackTime for one.- NO / ಇಲ್ಲ / ಬೇಡ → close once ("ಸರಿ, ಭವಿಷ್ಯದಲ್ಲಿ ಸೈಟ್ ಬೇಕಾದಾಗ ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ಅನ್ನು ನೆನಪಿಸಿಕೊಳ್ಳಿ.") + endCall SAME turn. Never add a thank-you to this close or after it — someone who declined must not be thanked.
-- "ಧನ್ಯವಾದ" is spoken EXACTLY ONCE per call, and ONLY in this line: "ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್."
+- INTERESTED → locations once ("ನಮ್ಮ ಹತ್ತಿರ ಹುಣಸೂರು ರಸ್ತೆ, ತಿ. ನರಸೀಪುರ ರಸ್ತೆ, ಶ್ರೀರಾಂಪುರ ಮತ್ತು ಕೆ. ಆರ್. ನಗರ ಪ್ರದೇಶಗಳಲ್ಲಿ ಸೈಟ್‌ಗಳಿವೆ.") + the ONE cheerful interest question (freshly phrased, reference: "ಇವುಗಳಲ್ಲಿ ಯಾವುದಾದರೂ ಆಸಕ್ತಿ ಇದೆಯಾ?") then listen.
+- INTERESTED IN A LOCATION → sales-team closing line ("ಸರಿ, ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಶೀಘ್ರದಲ್ಲೇ ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.") + the ONE thank-you ("ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು.") + endCall SAME turn — the call ENDS after the thank-you.
+- CALLBACK TIME: the sales team is available 10am–7pm, and that is the ONLY window you may promise. If they ask for a time inside it, confirm that exact time back, call setCallbackTime with it, then close as above. If they ask for a time outside it, say ONCE, warmly and without being defensive, that the time is not possible: "ನಮ್ಮ ಸೇಲ್ಸ್ ಟೀಮ್ ಬೆಳಗ್ಗೆ 10 ಗಂಟೆಗೇ ರಿಂದ ಸಂಜೆ 7 ಗಂಟೆಗವರೆಗೆ ಮಾತ್ರ ಕರೆ ಮಾಡುತ್ತಾರೆ. ಬೇಕಾದರೆ ಬೇರೆ ದಿನ ಹೇಳಿ, ಅಥವಾ ಶೀಘ್ರದಲ್ಲೇ ಕರೆ ಮಾಡುತ್ತಾರೆ." Never agree to an hour outside 10am–7pm; never call setCallbackTime for one.- NO / ಇಲ್ಲ / ಬೇಡ → close once ("ಸರಿ, ಭವಿಷ್ಯದಲ್ಲಿ ಸೈಟ್ ಬೇಕಾದಾಗ ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ಅನ್ನು ನೆನಪಿಸಿಕೊಳ್ಳಿ.") + endCall SAME turn. Never add a thank-you to this close or after it — someone who declined must not be thanked.
+- "ಧನ್ಯವಾದ" is spoken EXACTLY ONCE per call, and ONLY in this line: "ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು."
 - TWO QUESTIONS MAX: the opening question and the one interest question. Nothing else.
 `;
 
@@ -159,7 +159,7 @@ function runCall(ai: GoogleGenAI, scenario: Scenario): Promise<ScenarioResult> {
           ready = true;
           // Production opens with the greeting instruction, then speaks the opening.
           say(
-            `OPEN NOW: say EXACTLY this opening, in ONE utterance, immediately — no delay, no extra words, no other questions — then listen: "ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ನಿಮಗೆ ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ಬೇಕಾ?"`,
+            `OPEN NOW: say EXACTLY this opening, in ONE utterance, immediately — no delay, no extra words, no other questions — then listen: "ಹಲೋ ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ ಪ್ರಿಯ ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೊತಿದೀರಾ"`,
             true,
           );
           flushQueue();

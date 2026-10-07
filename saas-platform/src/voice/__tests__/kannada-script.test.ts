@@ -93,14 +93,16 @@ describe('v5 script — spoken lines', () => {
     // OWNER-SPECIFIED ORDER: greet + name + "are you looking for a site in
     // Mysuru?" is spoken as the opening. The name question comes after the yes,
     // and the projects come after the name.
-    assert.match(PDF_OPENING_KN, /ಪ್ರಿಯಾ/);
-    assert.match(PDF_OPENING_KN, /ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್/);
-    assert.match(PDF_OPENING_KN, /ಸೈಟ್ ಬೇಕಾ\?/); // the site question IS in the opening
+    // OWNER-SPECIFIED EXACT OPENING — word for word, no punctuation.
+    assert.match(PDF_OPENING_KN, /ಪ್ರಿಯ /);
+    assert.doesNotMatch(PDF_OPENING_KN, /ಪ್ರಿಯಾ/);
+    assert.match(PDF_OPENING_KN, /ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ/);
+    assert.match(PDF_OPENING_KN, /ಸೈಟ್ ನೊತಿದೀರಾ/); // the site question IS in the opening
     assert.equal(PDF_OPENING, PDF_OPENING_KN);
     assert.equal(PDF_OPENING_TURN1_KN, PDF_OPENING_KN, 'the opening turn speaks the site question');
 
     // The intro-only constant is kept for reference but is no longer the opening.
-    assert.match(PDF_OPENING_INTRO_KN, /ಪ್ರಿಯಾ/);
+    assert.match(PDF_OPENING_INTRO_KN, /ಪ್ರಿಯ$/);
     // TURN 2 — the name question, after the caller says yes.
     assert.match(PDF_NAME_QUESTION_KN, /ಹೆಸರು/);
     // TURN 3 — the projects, not another site question.
@@ -232,7 +234,7 @@ describe('v5 script — system instructions', () => {
   it('carries the spec flow + language-follow rules', () => {
     assert.match(full, /CHANGE ONLY WHEN THE CALLER ASKS/);
     assert.match(full, /Marathi/);
-    assert.match(full, /ನಿಮಗೆ ಮೈಸೂರಲ್ಲಿ ಸೈಟ್ ಬೇಕಾ\?/);
+    assert.match(full, /ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೊತಿದೀರಾ/);
     assert.match(full, /STEP 2B — CALLER IS INTERESTED/);
     assert.match(full, /STEP 3 — CALLER SHOWS INTEREST IN A LOCATION/);
     assert.match(full, /ನಿಮ್ಮ ಹೆಸರು ಏನು\?/); // STEP 1B carries the exact name line
@@ -333,7 +335,7 @@ describe('v5 script — detectors', () => {
 
   it('conversation memory tracks opening → areas → sales-team closing', () => {
     const afterOpening = deriveOutboundConversationMemory(PDF_OPENING_KN);
-    assert.match(afterOpening.pendingQuestion, /ಸೈಟ್ ಬೇಕಾ/);
+    assert.match(afterOpening.pendingQuestion, /ಸೈಟ್ ನೊತಿದೀರಾ/);
     const afterAreas = deriveOutboundConversationMemory(PDF_AREAS_LINE_KN, afterOpening);
     assert.match(afterAreas.topic, /areas/i);
     const afterHandoff = deriveOutboundConversationMemory(PDF_HANDOFF_LINE_KN, afterAreas);
@@ -903,8 +905,9 @@ describe('caller name and honorific', () => {
     assert.equal(honorificForName('lakshmi'), HONORIFIC_MAAM_KN);
     assert.equal(honorificForName('Ravi'), HONORIFIC_SIR_KN);
     assert.equal(honorificForName('Prakash'), HONORIFIC_SIR_KN);
-    assert.equal(honorificForName(null), HONORIFIC_SIR_KN, 'unknown name → sir, never ma’am');
-    assert.equal(honorificForName(''), HONORIFIC_SIR_KN);
+    // OWNER RULE: a missing name is NO title — never a default ಸರ್.
+    assert.equal(honorificForName(null), '', 'no name → no honorific, never ಸರ್');
+    assert.equal(honorificForName(''), '');
     assert.equal(honorificForName('Xyzzy'), HONORIFIC_SIR_KN, 'unknown name → sir');
   });
 
@@ -964,9 +967,15 @@ describe('caller name and honorific', () => {
     assert.ok(projects.includes('Ravi ಸರ್'), 'must address them by name');
     const maam = buildOutboundProjectsNudge('Lakshmi', HONORIFIC_MAAM_KN);
     assert.ok(maam.includes('Lakshmi ಮಾಮ್'), 'must use maam for a feminine name');
-    // No name → still tell the projects, addressed as sir.
+    // No name → still tell the projects, with NO title (owner rule).
     const anon = buildOutboundProjectsNudge(null, HONORIFIC_SIR_KN);
     assert.ok(anon.includes(PDF_AREAS_LINE_KN));
+    // The ban text itself says "never ಸರ್" — what must never appear is a TITLE
+    // handed to her as an address.
+    assert.ok(!/"ಸರ್"/.test(anon), 'no name → the nudge must never hand her a ಸರ್ address');
+    assert.ok(!/"ಮಾಮ್"/.test(anon), 'no name → the nudge must never hand her a ಮಾಮ್ address');
+    assert.ok(!/as\s+"ಸರ್"/.test(anon), 'no name → no address-as-ಸರ್ instruction');
+    assert.match(anon, /have NOT given their name/);
     // ಧನ್ಯವಾದ in the projects turn would end the call early, so it is banned.
     assert.doesNotMatch(projects, /ಧನ್ಯವಾದ\s*"?\s*$/);
     const declined = buildOutboundNameDeclinedNudge(HONORIFIC_SIR_KN);
@@ -1003,6 +1012,22 @@ describe('caller name and honorific', () => {
         'the prompt must not hand her an opening that drops the site question',
       );
     }
+  });
+
+  it('a refused or missing name never routes to a spoken ಸರ್ (owner rule)', () => {
+    for (const prompt of [
+      buildOutboundFastConnectInstruction('30 Sep 2026'),
+      buildOutboundSystemInstruction('30 Sep 2026'),
+    ]) {
+      const flat = prompt.replace(/\s+/g, ' ');
+      // The OLD wording told her to address a nameless caller as ಸರ್ — banned.
+      assert.doesNotMatch(flat, /use "ಸರ್" into the locations/i);
+      assert.doesNotMatch(flat, /address them as "ಸರ್" straight into/i);
+      assert.match(flat, /never ಸರ್, never ಮಾಮ್/);
+    }
+    const declined = buildOutboundNameDeclinedNudge('ಸರ್');
+    assert.ok(!declined.includes('Address them as'), 'the declined nudge must not assign a title');
+    assert.match(declined, /never ಸರ್, never ಮಾಮ್/);
   });
 });
 
@@ -1116,6 +1141,9 @@ describe('get to the point — no filler reaction, and the name step always spea
     assert.match(flat, /React to nothing/);
     assert.match(flat, /Do NOT re-ask the site question/);
     assert.match(flat, /Do NOT ask again/);
+    // OWNER RULE: a declined name is still no name — no title may be spoken.
+    assert.ok(!flat.includes(HONORIFIC_SIR_KN) || /never ಸರ್, never ಮಾಮ್/.test(flat));
+    assert.match(flat, /never ಸರ್, never ಮಾಮ್/);
   });
 });
 
@@ -1426,9 +1454,12 @@ describe('no dead air after the name, and a late reply is always answered', () =
     assert.match(n, /NEVER say thank you/i);
   });
 
-  it('the projects retry without a name falls back to the honorific alone', () => {
+  it('the projects retry without a name uses NO honorific (owner rule)', () => {
     const n = buildOutboundProjectsRetryNudge(null, HONORIFIC_SIR_KN);
-    assert.ok(n.includes(HONORIFIC_SIR_KN));
+    // The ban text itself says "never ಸರ್" — check no TITLE is handed over.
+    assert.ok(!/"ಸರ್"/.test(n), 'no name → never a ಸರ್ address');
+    assert.ok(!/"ಮಾಮ್"/.test(n), 'no name → never a ಮಾಮ್ address');
+    assert.ok(!/addressing them as "ಸರ್"/.test(n));
     assert.ok(n.includes(PDF_AREAS_LINE_KN));
     assert.equal(n.includes('undefined'), false);
   });

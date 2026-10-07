@@ -52,9 +52,7 @@
  */
 
 import {
-  HONORIFIC_SIR_KN,
   hasThanksClosing,
-  honorificForName,
   nameWithHonorific,
 } from './kannada-script';
 
@@ -218,20 +216,23 @@ export function chooseAcknowledgement(args: {
 }
 
 /**
- * Attach the caller's name (with the right honorific) to an acknowledgement —
- * or to the honorific alone when we never got a usable name.
+ * Attach the caller's name (with the right honorific) to an acknowledgement.
  *
- * This is the owner's decision D4: the acknowledgement CARRIES THE NAME. It is
+ * OWNER RULE: the acknowledgement CARRIES THE NAME, and a title exists only
+ * for a captured name. With no name there is NO honorific — the old
+ * "fall back to a bare ಸರ್" behaviour is what put ಸರ್ in her mouth before she
+ * had ever heard the caller's name.
+ *
+ * This is the owner's decision D4: the acknowledgement is
  * not a greeting, and it is not allowed to become a sentence.
  */
 export function acknowledgementWithName(
   base: string,
   name: string | null | undefined,
-  honorific?: string,
+  _honorific?: string,
 ): string {
-  const hon = honorific || honorificForName(name);
-  const who = nameWithHonorific(name) || hon || HONORIFIC_SIR_KN;
-  return `${base} ${who}`;
+  const who = nameWithHonorific(name);
+  return who ? `${base} ${who}` : base;
 }
 
 /* ------------------------------------------------------------------ *

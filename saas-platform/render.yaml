@@ -17,9 +17,9 @@ services:
       - key: VOICE_PROVIDER
         value: plivo
       - key: VOICE_TTS_VOICE_NAME
-        value: Despina
+        value: Sulafat
       - key: VOICE_TTS_VOICE_NAME_EN
-        value: Despina
+        value: Sulafat
       - key: VOICE_TTS_LANGUAGE_CODE
         value: auto
       - key: VOICE_AFFECTIVE_DIALOG
