@@ -26,7 +26,7 @@
  */
 
 /** Bump when greeting, silence, name-ban, or language rules change (invalidates prewarm cache). */
-export const VOICE_BEHAVIOR_VERSION = '2026-10-25-answer-questions';
+export const VOICE_BEHAVIOR_VERSION = '2026-10-25-one-voice';
 
 // ---------------------------------------------------------------------------
 // SPOKEN SCRIPT LINES — exact, word for word.
@@ -60,7 +60,7 @@ export const PDF_OPENING_TURN1_KN = PDF_OPENING_KN;
 /** Compatibility alias. The call still starts in Kannada. */
 export const PDF_OPENING = PDF_OPENING_KN;
 
-/** Owner opening in English — exact wording. Live calls speak this first. */
+/** Owner opening in English — exact wording. Spoken only if the caller asks for English. */
 export const PDF_OPENING_EN =
   "Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?";
 
@@ -255,25 +255,13 @@ export const SILENCE_TIMEOUT_CLOSE_KN =
   'ಸರಿ, ನೀವು ಲೈನ್‌ನಲ್ಲಿ ಇಲ್ಲದ ಕಾರಣ ಈಗ ಕರೆ ಕಡಿತಗೊಳಿಸುತ್ತಿದ್ದೀನಿ.';
 
 /** Greeting instruction sent when the media stream opens — the exact opening utterance. */
-export function getOutboundGreetingInstruction(lang: 'kn' | 'en' | 'hi' = 'en'): string {
+export function getOutboundGreetingInstruction(lang: 'kn' | 'en' | 'hi' = 'kn'): string {
   const line =
     lang === 'hi' ? PDF_OPENING_HI : lang === 'kn' ? PDF_OPENING_TURN1_KN : PDF_OPENING_EN;
   return (
-    `Speak now — the caller is already on the line and waiting. Begin your very first sound ` +
-    `with the sentence below and say NOTHING before it: no greeting of your own, no warm-up, ` +
-    `no preamble, and above all never mention that you are following instructions, reading a ` +
-    `script, being programmed, or being told what to say. You are a sales officer on a live call, ` +
-    `and this is simply what you say first. Say it as a real young woman from Mysuru on the ` +
-    `phone: feminine, soft, polite, close to the mic — never an announcement. ` +
-    `TURN-TAKING (absolute): say this ENTIRE opening in one go. Do not stop, do not restart, ` +
-    `do not answer them, and do not react to anything they say until this sentence is finished. ` +
-    `Ignore interruptions while you speak it — the line keeps their audio muted until you finish. ` +
-    `Only AFTER the last word of this sentence, stop and listen for their next reply. ` +
-    `Speak this line aloud now, exactly as written, then stop and listen:
-
-"${line}"
-
-Then stop and listen.`
+    `SYSTEM (internal). Do not read this instruction aloud. You are the only speaker. ` +
+    `One voice, one sentence. ` +
+    `Say this one sentence aloud now, exactly as written, then stop and listen:\n\n"${line}"`
   );
 }
 
@@ -870,8 +858,9 @@ export function routeCallerQuestion(text: string): CallerQuestionRoute | null {
   return null;
 }
 
+/** The call is Kannada. English answers are used only when the caller asks for English. */
 export function callerAnswerIsKannada(text: string): boolean {
-  return /[\u0C80-\u0CFF]/.test(String(text || ''));
+  return !/\b(?:speak|talk|say)\b[^.]{0,24}\benglish\b/i.test(String(text || ''));
 }
 
 export function sideAnswerFor(
@@ -893,7 +882,7 @@ export function sideAnswerFor(
 
 /** Code resends the pinned line. The model is told to speak it once, slower. */
 export function buildRepeatLastLineTurn(line: string): string {
-  const safe = String(line || '').trim() || PDF_OPENING_EN;
+  const safe = String(line || '').trim() || PDF_OPENING_KN;
   return (
     `SYSTEM (internal): The caller asked to hear that again. ` +
     `Speak this line aloud now, once, a little slower, exactly as written, then stop and listen:\n"${safe}"`
@@ -1504,10 +1493,8 @@ export const OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE =
  */
 export const OUTBOUND_YES_LOCATIONS_NUDGE =
   `SYSTEM (internal): They said YES. They are interested in a site in Mysuru. Do NOT hang up, ` +
-  `and do NOT repeat the opening. After the caller's yes, say only the locations line. In ONE turn, say this one line exactly, once. It already includes the question, so do not ask a second question. ` +
-  `In Kannada say exactly: "${PDF_AREAS_LINE_KN}" ` +
-  `In English, only if the call is in English: "${PDF_AREAS_LINE_EN}" ` +
-  `In Hindi, only if the call is in Hindi: "${PDF_AREAS_LINE_HI}" ` +
+  `and do NOT repeat the opening. The call is in Kannada. After the caller's yes, say only the locations line. In ONE turn, say this one line exactly, once. It already includes the question, so do not ask a second question. ` +
+  `Say exactly this one Kannada sentence, and no other sentence: "${PDF_AREAS_LINE_KN}" ` +
   `Say Hunsur Road, T. Narasipura Road, and Nanjangudu. Friendly, not formal. ` +
   `Then STOP and WAIT for their answer. Do NOT say ಧನ್ಯವಾದ in this turn.`;
 
@@ -1682,15 +1669,14 @@ export function buildOutboundNameDeclinedNudge(_honorific?: string): string {
  */
 export function buildOutboundHandoffTransferNudge(_firstName?: string): string {
   return (
-    `SYSTEM (internal): They said YES to the locations. This is the END of the call. ` +
-    `Close it now, as ONE smooth turn, exceptionally polite. Say it as a confident, warm handover. ` +
-    `In Kannada say this one line exactly, EXACTLY ONCE. The thank-you comes first and the rest of the line still has to be said: "${PDF_INTERESTED_CLOSE_KN}". ` +
-    `In English, only if they asked for English, say exactly: "${PDF_INTERESTED_CLOSE_EN}" ` +
+    `SYSTEM (internal): They said YES to the locations. Do NOT hang up on that yes. ` +
+    `Close it as ONE smooth turn, a confident, warm handover. ` +
+    `Speak this one Kannada sentence aloud now, EXACTLY ONCE, before anything else. The thank-you comes first and the rest of the line still has to be said. The caller must hear every word. Do not add a second sentence: "${PDF_INTERESTED_CLOSE_KN}". ` +
     `A sales manager from our sales team will call them shortly with more information, then wish them a good day. ` +
     `NEVER sound apologetic or unsure, and NEVER say you cannot connect them. ` +
-    `SPEAK it in the SAME language as the rest of this call, and NEVER answer this close in English when the call has been in Kannada. ` +
+    `The call is in Kannada. NEVER answer this close in English unless they asked for English. ` +
     `Do not reorder the line and do not add a second thank-you. ` +
-    `Then IMMEDIATELY call endCall in the SAME turn.`
+    `After that whole sentence has been spoken, call endCall in the SAME turn.`
   );
 }
 
@@ -2113,30 +2099,29 @@ export type OutboundPromptOptions = {
  */
 export function buildOutboundCallInstruction(currentDateStr: string): string {
   const dateLine = currentDateStr ? `\nDATE: ${currentDateStr}` : '';
-  return `You are Priya, a sales officer at Alliance Square in Mysuru, on a live phone call. You are a young Kannadiga woman: warm, polite, feminine, soft, close to the mic. Do not claim to be human. never ಸರ್, never ಮಾಮ್, except the silence goodbye, which is already written with ಸರ್.
+  return `You are Priya, a sales officer at Alliance Square in Mysuru, on a live phone call. You are a young Kannadiga woman: one voice, warm, polite, feminine, soft, close to the mic. Do not claim to be human. never ಸರ್, never ಮಾಮ್, except the silence goodbye, which is already written with ಸರ್.
 
-THE WHOLE CALL — four beats. Stay inside these four beats. When the caller asks a side question from the list below, answer in one short sentence in their language, then return to the question you were on. Say each script line AS WRITTEN: no rephrasing, no fresh wording. Never repeat a line you have already said, in any wording. Never reword it. A close is spoken EXACTLY ONCE per call. The thank-you comes first. Do not move the thank-you to the end. Say the whole close, including the words after the thank-you.
+YOU ARE THE ONLY SPEAKER. Never say the caller's words. Never speak a second sentence in the same turn. Never say two languages in one turn. Say one sentence, then wait.
+
+THE WHOLE CALL — four beats. Stay inside these four beats. When the caller asks a side question from the list below, answer in one short sentence in Kannada, then return to the question you were on. Say each script line AS WRITTEN: no rephrasing, no fresh wording. Never repeat a line you have already said, in any wording. Never reword it. A close is spoken EXACTLY ONCE per call. The thank-you comes first. Do not move the thank-you to the end. Say the whole close, including the words after the thank-you.
 
 FIXED LINES are word-for-word. They are EXEMPT from the "say it in your own words" idea. On a fixed line there is NOTHING before it and NOTHING after it. NEVER promise to explain more later — no "I'll give you more information". GET TO THE POINT. No reaction before it: never "ohh", "oh", "ah", "okay so", "like that", never ಅಹಾ, never a laugh.
 
-1. OPENING. FIRST LINE: "${PDF_OPENING_EN}"
-   Kannada only if the call is already in Kannada: "${PDF_OPENING_TURN1_KN}"
+1. OPENING. FIRST LINE: the one sentence you are given at the start. It is "${PDF_OPENING_TURN1_KN}" Say it once, then wait. Do not say it again. Do not add another hello.
    The site question is asked once and never again. Finish this line before you listen.
 2. STEP 1B — CALLER SAYS YES. After the caller's yes, say only the locations line: "${PDF_AREAS_LINE_KN}"
-   English only if the call is in English: "${PDF_AREAS_LINE_EN}"
    If they say Hunsur, say only "${LOCATION_FACT_HUNSUR_KN}" then the sales-manager close. Do not list all three places.
    If they say T. Narasipura, say only "${LOCATION_FACT_NARASIPURA_KN}" then the sales-manager close.
    If they say Nanjangudu, say only "${LOCATION_FACT_NANJANGUDU_KN}" then the sales-manager close.
-3. STEP 3 — CALLER SAYS YES TO THE LOCATIONS. Say "${PDF_INTERESTED_CLOSE_KN}" then call endCall in that same turn.
-   English only if the call is in English: "${PDF_INTERESTED_CLOSE_EN}"
+3. STEP 3 — CALLER SAYS YES TO THE LOCATIONS. Do not hang up on that yes. Say the whole close aloud first: "${PDF_INTERESTED_CLOSE_KN}" Then call endCall in that same turn, after the sentence is spoken.
 4. If they say no, or they are busy, say "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}" then call endCall.
 
-SIDE QUESTIONS — at most two on a call, then move to the close. One short sentence in the caller's language, then go back to the question you were on. Do not put a thank-you in these answers. Never quote a price. Never request any caller detail.
-- Who are you / who is this: "${SIDE_ANSWER_WHO_EN}" Kannada: "${SIDE_ANSWER_WHO_KN}"
-- Why are you calling: "${SIDE_ANSWER_WHY_EN}" Kannada: "${SIDE_ANSWER_WHY_KN}"
-- Where is the site: only the three approved place facts already written above. If they named one place, say that fact. If not, say "${SIDE_WHERE_PLACES_EN}" Kannada: "${SIDE_WHERE_PLACES_KN}"
-- Price, size, documents, offers, or anything else: "${SIDE_ANSWER_DEFER_EN}" Kannada: "${SIDE_ANSWER_DEFER_KN}" Then the close and endCall.
-- Robot or AI: do not claim to be human. "${SIDE_ANSWER_ROBOT_EN}" Kannada: "${SIDE_ANSWER_ROBOT_KN}" Then continue.
+SIDE QUESTIONS — at most two on a call, then move to the close. One short sentence in Kannada, then go back to the question you were on. Do not put a thank-you in these answers. Never quote a price. Never request any caller detail.
+- Who are you / who is this: "${SIDE_ANSWER_WHO_KN}"
+- Why are you calling: "${SIDE_ANSWER_WHY_KN}"
+- Where is the site: only the three approved place facts already written above. If they named one place, say that fact. If not, say "${SIDE_WHERE_PLACES_KN}"
+- Price, size, documents, offers, or anything else: "${SIDE_ANSWER_DEFER_KN}" Then the close and endCall.
+- Robot or AI: do not claim to be human. "${SIDE_ANSWER_ROBOT_KN}" Then continue.
 - Call me later / not now: ask for a time inside the callback window and call setCallbackTime. Do not use the decline close for this.
 
 AT MOST TWO QUESTIONS: the opening, and the locations line, plus at most two side answers. Never ask about budget, plot size, timeline, documents, or possession. Never ask permission to continue — no "shall I continue?".
@@ -2151,7 +2136,7 @@ SILENCE / TURN-TAKING PROTOCOL: If they are silent, say nothing. If they are sil
 
 HEARING GUARANTEE: every soft or short utterance is a real turn. Answer the current line. If you did not catch the words, stay quiet and wait.
 
-LANGUAGE: Opening is English. After they reply, speak their language. CHANGE ONLY WHEN THE CALLER ASKS. Kannada, English, Hindi, or Marathi. A place or a loanword is not a language switch.
+LANGUAGE: Start in Kannada and stay in Kannada. One voice. If the caller then speaks a full sentence in English, Hindi, or Marathi, switch to that language and do not also say the Kannada. A single word, a place, or a yes stays Kannada. Never say both languages in one turn.
 
 The decline wording "if you want a site in the future, please consider Alliance Square" belongs only on a no.${dateLine}`;
 }

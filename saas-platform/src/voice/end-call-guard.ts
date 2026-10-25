@@ -63,9 +63,10 @@ export function shouldAllowEndCall(input: EndCallGuardInput): EndCallGuardResult
     return { allow: true, reason: 'not_interested_confirmed' };
   }
 
-  // Opening "yes" is only the first turn — do not hang up yet.
-  if (input.isOutbound && customerUtteranceCount >= 2) {
-    return { allow: true, reason: 'outbound_scripted_flow' };
+  // A yes to the opening, or a yes to the locations, is not a hangup.
+  // Outbound ends only after a spoken close, a goodbye, or notInterested.
+  if (input.isOutbound) {
+    return { allow: false, reason: 'outbound_close_not_spoken' };
   }
 
   if (customerUtteranceCount < 1) {

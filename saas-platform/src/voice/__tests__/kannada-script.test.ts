@@ -129,7 +129,7 @@ describe('v5 script — spoken lines', () => {
     );
     assert.match(PDF_OPENING_HI, /प्रिया/);
     assert.match(PDF_OPENING_HI, /मैसूरु|मैसूर/);
-    assert.match(VOICE_BEHAVIOR_VERSION, /answer-questions/);
+    assert.match(VOICE_BEHAVIOR_VERSION, /one-voice/);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /tell me once more/i);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /एक बार फिर/);
     assert.equal(looksLikeSpokenNameQuestion('आपका नाम क्या है?'), true);
@@ -151,17 +151,15 @@ describe('v5 script — spoken lines', () => {
 
     // OWNER-SPECIFIED: live greeting speaks the English opening word for word.
     const greeting = getOutboundGreetingInstruction('en');
-    assert.match(greeting, /Speak now/);
-    assert.match(greeting, /say NOTHING before it/);
-    assert.match(greeting, /being programmed/);
-    assert.match(greeting, /TURN-TAKING/);
-    assert.match(greeting, /Speak this line aloud now, exactly as written, then stop and listen/);
+    assert.match(greeting, /one sentence/);
+    assert.match(greeting, /then stop and listen/);
+    assert.doesNotMatch(greeting, /being programmed/);
     assert.doesNotMatch(greeting, /Say nothing else/);
-    assert.match(greeting, /Then stop and listen/);
-    assert.ok(
-      greeting.includes(PDF_OPENING_EN),
-      'the greeting speaks the owner English opening',
-    );
+    assert.ok(greeting.includes(PDF_OPENING_EN), 'an English greeting is only the English line');
+    const liveGreeting = getOutboundGreetingInstruction();
+    assert.ok(liveGreeting.includes(PDF_OPENING_KN), 'the live greeting is the Kannada opening');
+    assert.ok(!liveGreeting.includes(PDF_OPENING_EN), 'the live greeting is not the English opening');
+    assert.doesNotMatch(liveGreeting, /how are you/i);
     assert.ok(!greeting.includes(PDF_NAME_QUESTION_KN), 'the name question is never in the greeting');
   });
 
@@ -267,9 +265,12 @@ describe('v5 script — system instructions', () => {
   const fast = buildOutboundFastConnectInstruction('30 Sep 2026');
 
   it('carries the spec flow + language-follow rules', () => {
-    assert.match(full, /CHANGE ONLY WHEN THE CALLER ASKS/);
+    assert.match(full, /Start in Kannada/);
+    assert.doesNotMatch(full, /Opening is English/);
+    assert.match(full, /FIRST LINE:/);
+    assert.doesNotMatch(full, /CHANGE ONLY WHEN THE CALLER ASKS/);
     assert.match(full, /Marathi/);
-    assert.match(full, /Are you looking for a site in Mysuru/);
+    assert.doesNotMatch(full, /Are you looking for a site in Mysuru/);
     assert.match(full, /ನೋಡ್ತಿದೀರಾ/);
     assert.match(full, /STEP 1B — CALLER SAYS YES/);
     assert.match(full, /STEP 3 — CALLER SAYS YES TO THE LOCATIONS/);
@@ -290,7 +291,8 @@ describe('v5 script — system instructions', () => {
 
   it('reference context + nudges carry the exact v5 lines', () => {
     const ref = buildOutboundProjectReferenceContext();
-    assert.ok(ref.includes(PDF_OPENING_EN));
+    assert.ok(ref.includes(PDF_OPENING_TURN1_KN));
+    assert.ok(!ref.includes(PDF_OPENING_EN));
     assert.ok(ref.includes(PDF_AREAS_LINE_KN));
     assert.match(ref, /After the caller's yes, say only the locations line/);
     assert.doesNotMatch(ref, /Name question/);
@@ -1050,8 +1052,8 @@ describe('caller name and honorific', () => {
       // The prompt must carry the opening that is actually SPOKEN, so the
       // model is never told to skip the site question and ask it later.
       assert.ok(
-        flat.includes(PDF_OPENING_EN),
-        'the prompt must carry the owner English opening',
+        !flat.includes(PDF_OPENING_EN),
+        'the live prompt must not also carry the English opening',
       );
       assert.ok(
         flat.includes(PDF_OPENING_TURN1_KN),
@@ -1543,16 +1545,17 @@ describe('repeat detector and side-question routing', () => {
     assert.equal(routeCallerQuestion('not now'), 'callback');
     assert.equal(routeCallerQuestion('what is the price'), 'defer');
     assert.equal(routeCallerQuestion('ನೀವು ಯಾರು'), 'who');
-    assert.equal(sideAnswerFor('who', 'who is this'), SIDE_ANSWER_WHO_EN);
+    assert.equal(sideAnswerFor('who', 'who is this'), SIDE_ANSWER_WHO_KN);
     assert.equal(sideAnswerFor('who', 'ನೀವು ಯಾರು'), SIDE_ANSWER_WHO_KN);
-    assert.equal(sideAnswerFor('why', 'why are you calling'), SIDE_ANSWER_WHY_EN);
+    assert.equal(sideAnswerFor('who', 'please speak english'), SIDE_ANSWER_WHO_EN);
+    assert.equal(sideAnswerFor('why', 'why are you calling'), SIDE_ANSWER_WHY_KN);
     assert.equal(sideAnswerFor('why', 'ಯಾಕೆ ಕರೆ ಮಾಡ್ದೀರಾ'), SIDE_ANSWER_WHY_KN);
-    assert.equal(sideAnswerFor('defer', 'how much'), SIDE_ANSWER_DEFER_EN);
+    assert.equal(sideAnswerFor('defer', 'how much'), SIDE_ANSWER_DEFER_KN);
     assert.equal(sideAnswerFor('defer', 'ಬೆಲೆ ಎಷ್ಟು'), SIDE_ANSWER_DEFER_KN);
-    assert.equal(sideAnswerFor('robot', 'are you a robot'), SIDE_ANSWER_ROBOT_EN);
+    assert.equal(sideAnswerFor('robot', 'are you a robot'), SIDE_ANSWER_ROBOT_KN);
     assert.equal(sideAnswerFor('robot', 'ನೀವು ರೋಬೋಟ್ ಆ?'), SIDE_ANSWER_ROBOT_KN);
-    assert.match(sideAnswerFor('where', 'where is the site'), /Hunsur Road/);
-    assert.match(sideAnswerFor('where', 'where is the Hunsur site'), /ಹುಣಸೂರು|Hunsur Road/);
+    assert.match(sideAnswerFor('where', 'where is the site'), /ಹುಣಸೂರು/);
+    assert.match(sideAnswerFor('where', 'where is the Hunsur site'), /ಹುಣಸೂರು/);
     for (const line of [
       SIDE_ANSWER_WHO_EN,
       SIDE_ANSWER_WHO_KN,

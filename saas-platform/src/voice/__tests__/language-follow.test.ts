@@ -35,14 +35,11 @@ describe('language-follow — defaults and switching', () => {
     assert.equal(state.language, 'kn');
   });
 
-  it('does NOT switch on a plain English sentence — only on a request', () => {
-    // OWNER RULE (amended): detection is not consent. A caller who says one
-    // English sentence — or, as seen on a real call, just gives their NAME in
-    // Latin script — must NOT flip the conversation to English.
+  it('switches when the caller speaks a full English sentence', () => {
     const { results, state } = feed(['ಹೌದು ಸರ್', 'Yes, tell me more about the site please.']);
-    assert.equal(results[1].language, 'kn');
-    assert.equal(results[1].switched, false);
-    assert.equal(state.language, 'kn');
+    assert.equal(results[1].language, 'en');
+    assert.equal(results[1].switched, true);
+    assert.equal(state.language, 'en');
   });
 
   it('does NOT switch on the caller giving their name', () => {
@@ -56,14 +53,15 @@ describe('language-follow — defaults and switching', () => {
     }
   });
 
-  it('stays in Kannada across English/Marathi turns until asked', () => {
+  it('follows a full sentence in another language', () => {
     const { results, state } = feed([
       'Can you give me the location details?',
       'What is the price range there?',
-      'ಸರಿ ಸರ್, ಧನ್ಯವಾದಗಳು',
     ]);
-    assert.ok(results.every((r) => r.language === 'kn' && !r.switched));
-    assert.equal(state.language, 'kn');
+    assert.equal(results[0].language, 'en');
+    assert.equal(results[0].switched, true);
+    assert.equal(results[1].language, 'en');
+    assert.equal(state.language, 'en');
   });
 
   it('switches when the caller explicitly asks', () => {
@@ -86,13 +84,12 @@ describe('language-follow — defaults and switching', () => {
     assert.equal(state.language, 'kn');
   });
 
-  it('does NOT switch on Marathi turns (Latin transliteration)', () => {
+  it('switches when the caller speaks Marathi', () => {
     const { results, state } = feed([
       'Malaa kay aahe tar mala site pahije ahe.',
-      'Nako sir, udya malaa office jaaychay aahe.',
     ]);
-    assert.ok(results.every((r) => r.language === 'kn' && !r.switched));
-    assert.equal(state.language, 'kn');
+    assert.equal(results[0].switched, true);
+    assert.equal(state.language, 'mr');
   });
 
   it('switches to Marathi from Devanagari with Marathi markers', () => {

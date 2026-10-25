@@ -105,7 +105,7 @@ describe('tts speech-config', () => {
       for (const lang of ['hi-IN', 'mr-IN']) {
         assert.equal(
           (buildLiveSpeechConfig(settings, lang).voiceConfig as any).prebuiltVoiceConfig.voiceName,
-          'Despina',
+          'Achernar',
           lang
         );
       }

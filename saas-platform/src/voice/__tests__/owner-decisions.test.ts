@@ -248,8 +248,8 @@ describe('the sales handover is confident, never apologetic', () => {
       handoff.includes(PDF_HANDOFF_LINE_KN),
       'the handoff nudge must carry the actual Kannada sentence',
     );
-    assert.match(handoff, /SPEAK it in the SAME language as the rest of this call/);
-    assert.match(handoff, /NEVER answer this close in English when the call has been in Kannada/);
+    assert.match(handoff, /The call is in Kannada/);
+    assert.match(handoff, /NEVER answer this close in English unless they asked for English/);
   });
 
   it('still ends on one thank-you and endCall in the same turn', () => {
@@ -266,18 +266,19 @@ describe('the sales handover is confident, never apologetic', () => {
  */
 describe('the opening is spoken immediately, with no preamble', () => {
   const greeting = getOutboundGreetingInstruction('en');
+  const live = getOutboundGreetingInstruction();
 
   it('never mentions instructions, a script, or being programmed', () => {
-    assert.match(greeting, /never mention that you are following instructions/);
-    assert.match(greeting, /being programmed/);
-    assert.match(greeting, /say NOTHING before it/);
+    assert.doesNotMatch(live, /being programmed/);
+    assert.doesNotMatch(live, /following instructions/);
+    assert.match(live, /Do not read this instruction aloud/);
   });
 
   it('still speaks the whole opening in one go', () => {
     assert.ok(greeting.includes("Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?"));
-    assert.match(greeting, /TURN-TAKING/);
-    assert.match(greeting, /muted until you finish/);
-    assert.match(greeting, /Then stop and listen/);
+    assert.ok(live.includes(PDF_OPENING_TURN1_KN));
+    assert.match(live, /one sentence/);
+    assert.match(live, /then stop and listen/);
   });
 });
 /**
@@ -320,8 +321,8 @@ describe('the needs list is two questions, and the pinned lines are untouched', 
   it('leaves every pinned line exactly as it was', () => {
     for (const prompt of [full, fast]) {
       assert.ok(
-        prompt.includes("Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?"),
-        'the English opening is still word for word',
+        !prompt.includes("Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?"),
+        'the English opening is not in the live prompt',
       );
       assert.ok(prompt.includes(PDF_OPENING_TURN1_KN), 'the Kannada opening is still available');
       assert.ok(prompt.includes(PDF_AREAS_LINE_KN), 'the areas line is still word for word');

@@ -64,12 +64,12 @@ describe('customer scenarios — stranger on the phone', () => {
     );
     const g = getOutboundGreetingInstruction('en');
     assert.ok(g.includes(PDF_OPENING_EN));
-    assert.match(g, /muted until you finish/);
-    assert.match(g, /Only AFTER the last word/);
+    assert.match(g, /one sentence/);
+    assert.match(g, /then stop and listen/);
     assert.equal(promptLeaksNameQuestionExample(g), false);
     assert.equal(promptLeaksNameQuestionExample(buildOutboundSystemInstruction('1 Jan 2026')), false);
     assert.equal(promptLeaksNameQuestionExample(buildOutboundFastConnectInstruction('1 Jan 2026')), false);
-    assert.match(VOICE_BEHAVIOR_VERSION, /answer-questions/);
+    assert.match(VOICE_BEHAVIOR_VERSION, /one-voice/);
   });
 
   it('plain yes goes to locations — never a name ask', () => {
@@ -79,7 +79,7 @@ describe('customer scenarios — stranger on the phone', () => {
       assert.ok(!OUTBOUND_YES_LOCATIONS_NUDGE.includes('ಹೆಸರು'));
     }
     assert.ok(OUTBOUND_YES_LOCATIONS_NUDGE.includes(PDF_AREAS_LINE_KN));
-    assert.ok(OUTBOUND_YES_LOCATIONS_NUDGE.includes(PDF_AREAS_LINE_EN));
+    assert.ok(!OUTBOUND_YES_LOCATIONS_NUDGE.includes(PDF_AREAS_LINE_EN));
   });
 
   it('real customer: "Yes, I\'m looking for a site in Hunsur" is heard and routes to Hunsur fact', () => {

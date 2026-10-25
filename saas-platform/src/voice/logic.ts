@@ -288,8 +288,8 @@ export function normalizeVoiceEvent(raw: any): any {
 const OUTBOUND_END_CALL_TOOL = {
   name: "endCall",
   description:
-    "YOU END THIS CALL. Call endCall immediately after any closing line, in the SAME turn — " +
-    "the system drops the line the moment you do, so never wait and never speak after it. " +
+    "YOU END THIS CALL. Call endCall only after the whole closing sentence has been spoken in this turn. " +
+    "The line stays up until that sentence finishes playing. Never call endCall on a yes by itself. " +
     "Call it when: (1) the caller clearly said goodbye / asked to end, " +
     "(2) the caller confirmed they are not interested (after the notInterested close line), " +
     "(3) the caller is interested in a location and you JUST spoke the sales-team closing line " +
@@ -862,10 +862,9 @@ let plivoCallUuid: string | null = null;
   let projectReferenceInjected = false;
   let greetingAudioHeard = false;
   let deferredContextScheduled = false;
-  let greetingRetrySent = false;
   let greetingSentAt = 0;
   /** The question she is on. A repeat resends this; a side answer returns to it. */
-  let lastPinnedSpokenLine = PDF_OPENING_EN;
+  let lastPinnedSpokenLine = PDF_OPENING_KN;
   let sideQuestionCount = 0;
   let openingGreetingTurnFinished = false;
   /** Model finished generating the opening. Playback may still be running. */
@@ -874,7 +873,6 @@ let plivoCallUuid: string | null = null;
   let greetingListenTimer: ReturnType<typeof setTimeout> | null = null;
   /** Safety only: a greeting that never arrives must not leave the caller unheard. */
   const GREETING_LISTEN_HOLD_CAP_MS = 20_000;
-  const GREETING_AUDIO_RETRY_MS = 3_000;
   const GREETING_AUDIO_GIVE_UP_MS = 6_000;
   let runtimeInstructionsInjected = false;
   let greetingSent = false;
@@ -977,7 +975,7 @@ let plivoCallUuid: string | null = null;
   const replayLastPinnedLine = () => {
     if (outboundRepeatAskSent || endCallInvoked || outboundHardMuteAfterClose) return;
     outboundRepeatAskSent = true;
-    const line = lastPinnedSpokenLine || PDF_OPENING_EN;
+    const line = lastPinnedSpokenLine || PDF_OPENING_KN;
     console.log('[CALL] repeat last line');
     try {
       sendClientTextTurn(buildRepeatLastLineTurn(line));
@@ -1001,7 +999,7 @@ let plivoCallUuid: string | null = null;
     sideQuestionCount += 1;
     console.log(`[CALL] side question ${route} (${sideQuestionCount}/${2})`);
     try {
-      sendClientTextTurn(buildSideAnswerTurn(route, callerText, lastPinnedSpokenLine || PDF_OPENING_EN));
+      sendClientTextTurn(buildSideAnswerTurn(route, callerText, lastPinnedSpokenLine || PDF_OPENING_KN));
     } catch (e: any) {
       sideQuestionCount = Math.max(0, sideQuestionCount - 1);
       console.error('[CALL] side-answer send failed:', e?.message || e);
@@ -1359,7 +1357,7 @@ let plivoCallUuid: string | null = null;
   const sendOutboundHandoffClose = (lastResponse: string): void => {
     if (outboundHandoffNudgeSent || outboundHardMuteAfterClose || outboundTransferStarted) return;
     outboundHandoffNudgeSent = true;
-    console.log('[NEEDS] checklist done — sales-team closing + endCall');
+    console.log('[CALL] yes to locations — speaking the Kannada close, then hang up after it plays');
     diagLog('needs complete → close');
     try {
       geminiSession?.sendRealtimeInput({
@@ -1461,9 +1459,8 @@ let plivoCallUuid: string | null = null;
     try {
       geminiSession?.sendRealtimeInput({
         text:
-          'SYSTEM (internal): The opening is finished. Stay inside the four beats. ' +
-          'If they say yes, say the locations line. If they ask a side question, ' +
-          'answer in one short sentence in their language, then return to the question you were on.',
+          'SYSTEM (internal): The opening is finished. Stay silent until they answer. ' +
+          'Do not speak this. Do not add a second sentence.',
       });
     } catch (e: any) {
       console.warn('[GEMINI] Post-greeting no-name reminder failed:', e?.message || e);
@@ -1838,7 +1835,7 @@ let plivoCallUuid: string | null = null;
     playGeminiAudioParts(parts);
     outboundLastSpokenLine = turnText;
     if (turnText && looksLikeOpeningRestate(turnText)) {
-      lastPinnedSpokenLine = PDF_OPENING_EN;
+      lastPinnedSpokenLine = /[\u0C80-\u0CFF]/.test(turnText) ? PDF_OPENING_KN : PDF_OPENING_EN;
     } else if (turnText && looksLikeAreasLine(turnText)) {
       lastPinnedSpokenLine = /[\u0C80-\u0CFF]/.test(turnText) ? PDF_AREAS_LINE_KN : PDF_AREAS_LINE_EN;
     }
@@ -3050,34 +3047,21 @@ const forceOutboundHangupIfClosing = (reason: string) => {
           sendSpokenGreeting();
         };
 
-        const armGreetingAudioWatch = () => {
-          setTimeout(() => {
-            if (endCallInvoked || greetingAudioHeard || greetingRetrySent) return;
-            greetingRetrySent = true;
-            console.warn('[CALL] no greeting audio 3s after send — resending the greeting once');
-            greetingSent = false;
-            sendSpokenGreeting();
-          }, GREETING_AUDIO_RETRY_MS);
-        };
-
         const sendSpokenGreeting = () => {
           if (!geminiSession || greetingSent) return;
           greetingSent = true;
           try {
-            const greetingText: string = PDF_OPENING_EN;
-            const instruction = getOutboundGreetingInstruction('en');
+            const greetingText: string = PDF_OPENING_KN;
+            const instruction = getOutboundGreetingInstruction('kn');
             console.log(`[GEMINI] Sending opening greeting once (+${Date.now() - streamConnectAt}ms from stream)`);
             console.log('[CALL] greeting sent');
             diagLog('greeting instruction sent → GREETING (caller audio held until playback ends; interruptions ignored)');
             setCallState('GREETING', 'opening sent');
             capture?.onAiText(greetingText);
-            lastPinnedSpokenLine = PDF_OPENING_EN;
+            lastPinnedSpokenLine = PDF_OPENING_KN;
             geminiSession.sendRealtimeInput({ text: instruction });
             if (greetingHoldStartedAt === 0) greetingHoldStartedAt = Date.now();
-            if (greetingSentAt === 0) {
-              greetingSentAt = Date.now();
-              armGreetingAudioWatch();
-            }
+            if (greetingSentAt === 0) greetingSentAt = Date.now();
             releaseGreetingListening();
           } catch (greetErr) {
             greetingSent = false;

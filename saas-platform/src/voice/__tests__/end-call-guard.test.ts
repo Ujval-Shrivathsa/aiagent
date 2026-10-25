@@ -62,10 +62,10 @@ describe('end-call-guard', () => {
       isOutbound: true,
     });
     assert.equal(r.allow, false);
-    assert.equal(r.reason, 'call_too_short');
+    assert.equal(r.reason, 'outbound_close_not_spoken');
   });
 
-  it('allows outbound scripted close after the purpose answer', () => {
+  it('does not hang up on a yes to the locations', () => {
     const r = shouldAllowEndCall({
       callDurationMs: 20_000,
       customerClearGoodbye: false,
@@ -73,8 +73,8 @@ describe('end-call-guard', () => {
       batchHasNotInterested: false,
       isOutbound: true,
     });
-    assert.equal(r.allow, true);
-    assert.equal(r.reason, 'outbound_scripted_flow');
+    assert.equal(r.allow, false);
+    assert.equal(r.reason, 'outbound_close_not_spoken');
   });
 
   it('allows endCall after sustained conversation', () => {

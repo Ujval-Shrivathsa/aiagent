@@ -164,19 +164,30 @@ export function detectUtteranceLanguage(text: string): MeaningfulLanguageDecisio
  * switch on one clear turn, Marathi/Hindi on two consecutive clear turns (they
  * overlap heavily with Kannada in Latin transliteration).
  */
+function looksLikePersonalIntroduction(text: string): boolean {
+  const t = String(text || '').trim();
+  if (/^[A-Za-z]+(?:\s+[A-Za-z]+)?$/.test(t) && t.split(/\s+/).length <= 2) return true;
+  return /^(?:i am|i'm|this is|my name is|myself)\s+[A-Za-z]+(?:\s+[A-Za-z]+)?$/i.test(t);
+}
+
 export function followLanguageFromUtterance(
   state: LanguageSwitchState,
   text: string,
 ): { language: FollowLanguage; switched: boolean; state: LanguageSwitchState } {
   const decision = detectUtteranceLanguage(text);
+  const callerChangedLanguage =
+    !!decision.language &&
+    (decision.reason === 'explicit_request' ||
+      decision.reason === 'english_sentence' ||
+      decision.reason === 'kannada_script' ||
+      decision.reason === 'hindi_script' ||
+      decision.reason === 'marathi_markers' ||
+      decision.reason === 'marathi_markers_latin' ||
+      decision.reason === 'hindi_markers_latin');
 
-  // OWNER RULE (amended): the conversation language changes ONLY when the
-  // caller explicitly asks the agent to change it. Detection alone is NOT
-  // consent. A caller giving their NAME — "Ramesh", "my name is Ravi" — is a
-  // Latin-script sentence, so the classifier read it as English and flipped
-  // the TTS locale to en-IN in the middle of a Kannada call. Kannada is the
-  // default and stays the default until somebody asks for something else.
-  if (decision.reason !== 'explicit_request' || !decision.language) {
+  // A single word or a short introduction stays in the current language.
+  // A full sentence in another language is the caller changing how they speak.
+  if (!callerChangedLanguage || !decision.language || looksLikePersonalIntroduction(text)) {
     return {
       language: state.language,
       switched: false,

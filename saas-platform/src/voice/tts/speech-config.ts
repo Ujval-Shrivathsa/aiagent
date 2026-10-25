@@ -83,7 +83,7 @@ export function loadLiveSpeechSettings(): LiveSpeechConfig {
   const languageCode = normalizeLiveLanguageCode(process.env.VOICE_TTS_LANGUAGE_CODE);
 
   const tempRaw = Number(process.env.VOICE_LLM_TEMPERATURE);
-  const temperature = Number.isFinite(tempRaw) ? Math.min(1.4, Math.max(0.5, tempRaw)) : 1.0;
+  const temperature = Number.isFinite(tempRaw) ? Math.min(1.4, Math.max(0.5, tempRaw)) : 0.7;
 
   return {
     voiceName,
@@ -115,9 +115,7 @@ export function buildLiveSpeechConfig(
       : normalizeLiveLanguageCode(languageOverride);
   // null language is Kannada. English uses the same soft voice. Hindi and
   // Marathi keep Despina.
-  const english =
-    lang === 'en-IN' || lang === 'en-US' || lang === 'en';
-  const voice = !lang || english ? settings.voiceName : settings.voiceNameEn;
+  const voice = settings.voiceName;
   const speechConfig: Record<string, unknown> = {
     voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
   };
