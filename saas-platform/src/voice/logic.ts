@@ -903,6 +903,9 @@ let plivoCallUuid: string | null = null;
       !locationsTextBad(text)
     );
   };
+  /** A real transcript that is not the three roads. An empty one is just late. */
+  const locationsTextPartial = (text: string) =>
+    text.replace(/[\s\u200c\u200d]/g, '').length >= 12 && !locationsTextReady(text);
   let openingQuestionSent = false;
   let fullCallGuideInjected = false;
   let geminiSessionOpened = false;
@@ -3349,7 +3352,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   }
                   nameQuestionNeedsRedirect = false;
                   if (!locationsReleased && locationsHold.length) {
-                    if (locationsTextBad(outboundAiAccum)) {
+                    if (locationsTextBad(outboundAiAccum) || locationsTextPartial(outboundAiAccum)) {
                       locationsHold = [];
                       if (!locationsRetrySent && geminiSession) {
                         locationsRetrySent = true;
