@@ -892,7 +892,7 @@ let plivoCallUuid: string | null = null;
   let locationsReleased = false;
   let locationsRetrySent = false;
   const locationsTextBad = (text: string) =>
-    /ರಿಂಗ್|ಜೆ\s*ಪಿ|ಜೆಪಿ|ಇಲವಾಲ|ವಿಜಯ|ಬೋಗಾದಿ|ದತ್ತ|ದಟ್ಟ|ಪ್ಲಾಟ್|ಬಡಾವಣೆ|ring road|jp nagar/i.test(text);
+    /ರಿಂಗ್|ಜೆ\s*ಪಿ|ಜೆಪಿ|ಇಲವಾಲ|ವಿಜಯ|ಬೋಗಾದಿ|ದತ್ತ|ದಟ್ಟ|ಪ್ಲಾಟ್|ಬಡಾವಣೆ|ಹೂಟ|ring road|jp nagar/i.test(text);
   const locationsTextReady = (text: string) => {
     const s = text.replace(/[\s\u200c\u200d]/g, '');
     return (
@@ -3620,8 +3620,11 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                     if (spoken && !looksLikeSpokenNameQuestion(spoken) && !unwantedRepeatAsk) {
                       outboundLastSpokenLine = spoken;
                       callMemory = rememberAgentLine(callMemory, spoken);
+                      const thanksEndsCall =
+                        hasThanksClosing(spoken) &&
+                        (outboundAreasLineDelivered || looksLikeNotInterestedCloseLine(spoken));
                       if (
-                        hasThanksClosing(spoken) ||
+                        thanksEndsCall ||
                         handoffIsClose ||
                         looksLikeNotInterestedCloseLine(spoken)
                       ) {
@@ -3629,7 +3632,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                         outboundSpokenCloseText = spoken;
                         armOutboundCloseDeadline('close spoken');
                       }
-                      if (hasThanksClosing(spoken)) {
+                      if (thanksEndsCall) {
                         outboundThanksPlayedInTurn = true;
                         outboundBusyCloseSent = true;
                         clearOutboundSilenceTimer();
