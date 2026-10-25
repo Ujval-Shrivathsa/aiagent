@@ -245,8 +245,8 @@ describe('turn-policy', () => {
     );
   });
 
-  it('hangs up a reconnect that happens before the opening finishes', () => {
-    assert.equal(reconnectDuringOpening(false), 'hangup');
+  it('a reconnect stays on the line and does not replay the opening', () => {
+    assert.equal(reconnectDuringOpening(false), 'resume');
     assert.equal(reconnectDuringOpening(true), 'resume');
   });
 

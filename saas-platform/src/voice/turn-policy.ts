@@ -60,9 +60,9 @@ export function mayClearCallerAudio(input: {
   return input.transcriptIsNameQuestion;
 }
 
-/** A reconnect before the opening has finished ends the call. It does not resume or replay. */
-export function reconnectDuringOpening(openingFinished: boolean): 'hangup' | 'resume' {
-  return openingFinished ? 'resume' : 'hangup';
+/** A reconnect never replays the opening and never hangs up. The line stays open. */
+export function reconnectDuringOpening(_openingFinished: boolean): 'hangup' | 'resume' {
+  return 'resume';
 }
 
 export function evaluateBargeIn(input: BargeInInput): BargeInDecision {

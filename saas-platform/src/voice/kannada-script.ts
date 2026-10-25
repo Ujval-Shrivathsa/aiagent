@@ -2084,7 +2084,7 @@ export function buildOutboundCallInstruction(currentDateStr: string): string {
 
 THE WHOLE CALL — four beats. Stay inside these four beats. Say the whole message you were just given as one short sentence, from the first word through the question. Do not stop at a full stop in the middle. Finish the question, then wait. Do not add words. Do not say the next message until the caller has spoken and you are given it. FIXED LINES are word-for-word. They are EXEMPT from the "say it in your own words" idea. On a fixed line there is NOTHING before it and NOTHING after it. GET TO THE POINT. Say each script line AS WRITTEN: no rephrasing, no fresh wording. Never repeat a line you have already said, in any wording. A close is spoken EXACTLY ONCE per call. NEVER promise to explain more later — no "I'll give you more information". No reaction before it: never "ohh", "oh", "ah", "okay so", "like that", never ಅಹಾ, never a laugh. Never reword it.
 
-1. OPENING. FIRST LINE: say the whole opening you are given, through the question, exactly, then wait. Do not stop halfway. The site question is asked once and never again.
+1. OPENING. FIRST LINE: say the whole opening you are given, through the question, exactly, once, then wait. Do not say it a second time. Do not stop halfway. The site question is asked once and never again. When the caller answers, do not call endCall. Wait, then say only the next line you are given.
 2. STEP 1B — CALLER SAYS YES. After the caller's yes, say only the locations line you are given next, then wait.
 3. STEP 3 — CALLER SAYS YES TO THE LOCATIONS. Do not hang up on that yes. Say only the one sentence you are given, then call endCall in that same turn.
 4. If they say no, say only the sentence you are given, then call endCall.

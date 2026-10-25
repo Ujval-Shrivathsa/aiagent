@@ -105,7 +105,7 @@ import {
   type LanguageSwitchState,
   type FollowLanguage,
 } from '../voice/language/language-follow';
-import { evaluateBargeIn, evaluateLocalSpeech, greetingListenOpen, mayClearCallerAudio, reconnectDuringOpening } from '../voice/turn-policy';
+import { evaluateBargeIn, evaluateLocalSpeech, greetingListenOpen, mayClearCallerAudio } from '../voice/turn-policy';
 import {
   buildRecallContext,
   createCallMemory,
@@ -878,6 +878,7 @@ let plivoCallUuid: string | null = null;
   const GREETING_AUDIO_GIVE_UP_MS = 6_000;
   let runtimeInstructionsInjected = false;
   let greetingSent = false;
+  let openingTurnSealed = false;
   let openingQuestionSent = false;
   let fullCallGuideInjected = false;
   let geminiSessionOpened = false;
@@ -1573,6 +1574,10 @@ let plivoCallUuid: string | null = null;
    */
   const handleSalesTeamCloseSpoken = (turnText: string) => {
     if (!isOutboundCall || outboundTransferStarted) return;
+    if (!outboundAreasLineDelivered) {
+      console.log('[GUARD] Close before the locations line — staying on the call');
+      return;
+    }
     outboundTransferStarted = true;
     callMemory = setCallStep(callMemory, 'closing');
     outboundBusyCloseSent = true;
@@ -2592,6 +2597,10 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       // Private reminder so the model does not invent "tell me once more" / ಮತ್ತೆ ಹೇಳಿ.
       sendOutboundSilenceNudge(OUTBOUND_SILENCE_CHECK_NUDGE);
       scheduleOutboundSilenceTick();
+    } else if (tick.action === 'close_silence' && customerUtteranceCount === 0) {
+      console.log('[SILENCE] Caller has not been heard yet — staying on the line');
+      outboundSilence = armOutboundSilenceCheck(Date.now(), 0);
+      scheduleOutboundSilenceTick();
     } else if (tick.action === 'close_silence') {
       // The check line went unanswered. Say ONE short goodbye, then drop the
       // line. Cutting someone off in total silence with no word at all is
@@ -2832,6 +2841,10 @@ const forceOutboundHangupIfClosing = (reason: string) => {
 
   const gateOutboundAudio = (parts: any[]) => {
     if (!openingGreetingTurnFinished || outboundHardMuteAfterClose) {
+      if (!outboundHardMuteAfterClose && openingTurnSealed && !playScriptAudioNow) {
+        logGate('drop', 'second_opening');
+        return;
+      }
       logGate('play', !openingGreetingTurnFinished ? 'opening' : 'hard_mute');
       playOutboundTurnIfNew(parts, outboundAiAccum);
       return;
@@ -3281,6 +3294,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                       // Generation ending is not playback ending. Keep the
                       // caller muted until the phone has played the greeting.
                       openingTurnComplete = true;
+                      if (greetingAudioHeard) openingTurnSealed = true;
                       latLog('OPENING_TURN_COMPLETE');
                       releaseGreetingListening();
                     } else {
@@ -3903,6 +3917,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                         // so read the handoff straight off its own turn text.
                         salesTeamClose:
                           isOutboundCall &&
+                          outboundAreasLineDelivered &&
                           (looksLikeHandoffLine(currentTurnAiText) ||
                             looksLikeHandoffLine(lastPlayedAiRaw) ||
                             outboundTransferStarted),
@@ -4142,10 +4157,11 @@ const forceOutboundHangupIfClosing = (reason: string) => {
 
         // RECONNECT IMPLEMENTATION — fresh session + restored state + resume line.
         setReconnectFn(async (): Promise<boolean> => {
-          if (reconnectDuringOpening(openingGreetingTurnFinished) === 'hangup') {
-            console.log('[GEMINI] Reconnect before the opening finished — ending the call, not replaying it');
-            await completeAndHangupOutboundCall('reconnect before opening finished');
-            return true;
+          if (!openingGreetingTurnFinished) {
+            console.log('[GEMINI] Reconnect before the opening finished — staying on the line, not replaying it');
+            openingTurnComplete = true;
+            openingTurnSealed = true;
+            openingGreetingTurnFinished = true;
           }
           geminiReconnectAttempts++;
           for (let attempt = 1; attempt <= MAX_GEMINI_CONNECT_ATTEMPTS; attempt++) {
