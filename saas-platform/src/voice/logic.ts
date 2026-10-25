@@ -892,7 +892,7 @@ let plivoCallUuid: string | null = null;
   let locationsReleased = false;
   let locationsRetrySent = false;
   const locationsTextBad = (text: string) =>
-    /ರಿಂಗ್|ಜೆ\s*ಪಿ|ಜೆಪಿ|ಇಲವಾಲ|ವಿಜಯ|ಬೋಗಾದಿ|ದತ್ತ|ದಟ್ಟ|ಪ್ಲಾಟ್|ಬಡಾವಣೆ|ಹೂಟ|ring road|jp nagar/i.test(text);
+    /ರಿಂಗ್|ಜೆ\s*ಪಿ|ಜೆಪಿ|ಇಲವಾಲ|ವಿಜಯ|ಬೋಗಾದಿ|ದತ್ತ|ದಟ್ಟ|ಪ್ಲಾಟ್|ಬಡಾವಣೆ|ಹೂಟ|[A-Za-z]{3,}|ring road|jp nagar/i.test(text);
   const locationsTextReady = (text: string) => {
     const s = text.replace(/[\s\u200c\u200d]/g, '');
     return (
