@@ -2026,6 +2026,9 @@ let plivoCallUuid: string | null = null;
     if (!buf.length) return;
     openingReleased = true;
     openingQuestionAudioPlayed = true;
+    // The line is already on the phone. Listening opens when that playback
+    // ends, even if the model never sends the end of its turn.
+    openingTurnComplete = true;
     aiPlaybackEndsAt = Date.now() + buf.length / 8;
     lastAiAudioAt = Date.now();
     console.log(`[CALL] Opening played as one line (${(buf.length / 8000).toFixed(1)}s)`);
@@ -2040,6 +2043,7 @@ let plivoCallUuid: string | null = null;
         ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload } }));
       }
     }
+    releaseGreetingListening();
   };
 
   const releaseLocationsAudio = () => {
@@ -3344,14 +3348,24 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                     repeatAskCorrectionPending = false;
                   }
                   nameQuestionNeedsRedirect = false;
-                  if (!locationsReleased && locationsHold.length && !locationsTextReady(outboundAiAccum)) {
-                    locationsHold = [];
-                    if (!locationsRetrySent && geminiSession) {
-                      locationsRetrySent = true;
-                      playScriptAudioNow = true;
-                      try {
-                        geminiSession.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
-                      } catch { /* the caller still has the line */ }
+                  if (!locationsReleased && locationsHold.length) {
+                    if (locationsTextBad(outboundAiAccum)) {
+                      locationsHold = [];
+                      if (!locationsRetrySent && geminiSession) {
+                        locationsRetrySent = true;
+                        playScriptAudioNow = true;
+                        try {
+                          geminiSession.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
+                        } catch { /* the caller still has the line */ }
+                      }
+                    } else {
+                      releaseLocationsAudio();
+                      if (!outboundAreasLineDelivered) {
+                        outboundAreasLineDelivered = true;
+                        outboundAreasLineHeard = true;
+                        callMemory = setCallStep(callMemory, 'projects');
+                        console.log('[CALL] Locations played — the three roads are on the line');
+                      }
                     }
                   }
                   if (!(locationsRetrySent && !locationsReleased)) playScriptAudioNow = false;
