@@ -5,6 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  armBargeReplyRecovery,
   armSpeechRecovery,
   cancelSpeechRecovery,
   createSpeechRecoveryState,
@@ -17,8 +18,9 @@ import {
 } from '../speech-recovery';
 
 const CFG = {
-  transcriptGraceMs: 1100,
-  escalateGraceMs: 1600,
+  transcriptGraceMs: 800,
+  bargeReplyGraceMs: 550,
+  escalateGraceMs: 1200,
   maxAttempts: 2,
 };
 
@@ -27,6 +29,8 @@ describe('speech-recovery config', () => {
     const cfg = loadRecoveryConfig();
     assert.ok(cfg.transcriptGraceMs >= 800, 'grace window gives STT a real chance');
     assert.ok(cfg.transcriptGraceMs <= 2000, 'grace window stays fast');
+    assert.ok(cfg.bargeReplyGraceMs >= 500 && cfg.bargeReplyGraceMs <= 1500, 'an interruption is answered within a second or so');
+    assert.ok(cfg.bargeReplyGraceMs <= cfg.transcriptGraceMs, 'barge reply is not slower than a normal turn');
     assert.ok(cfg.maxAttempts >= 1 && cfg.maxAttempts <= 3, 'escalation bounded');
     assert.ok(cfg.escalateGraceMs >= cfg.transcriptGraceMs, 'escalation waits at least as long');
   });
@@ -124,5 +128,21 @@ describe('speech-recovery ladder', () => {
     }
     assert.match(speechRecoveryNudgeText('ask_repeat', 1), /repeat/);
     assert.match(speechRecoveryNudgeText('reply_now', 1), /Reply NOW/);
+  });
+
+  it('answers an interruption within a second, without asking them to repeat', () => {
+    const cfg = { ...CFG, bargeReplyGraceMs: 800 };
+    let s = armBargeReplyRecovery(createSpeechRecoveryState(), 10_000);
+    assert.equal(s.stage, 'answerGrace');
+    assert.equal(s.priority, 'barge');
+    assert.equal(tickSpeechRecovery(s, cfg, 10_400).action, 'none');
+    s = resolveSpeechRecoveryWithTranscript(s, 10_300);
+    assert.equal(s.armedAt, 10_000, 'a transcript must not push the reply further out');
+    const d = tickSpeechRecovery(s, cfg, 10_800);
+    assert.equal(d.action, 'send_recovery_nudge');
+    if (d.action === 'send_recovery_nudge') {
+      assert.equal(d.kind, 'reply_now');
+      assert.equal(d.attempt, 1);
+    }
   });
 });

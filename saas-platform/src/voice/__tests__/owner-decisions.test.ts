@@ -9,6 +9,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  NEEDS_LOCALITY_QUESTION_KN,
+  NEEDS_PURPOSE_QUESTION_KN,
+  buildOutboundFastConnectInstruction,
+  buildOutboundSystemInstruction,
   extractCallerName,
   looksLikeCannotAnswerLine,
   buildOutboundRepeatQuestionNudge,
@@ -19,6 +23,7 @@ import {
   hasThanksClosing,
   PDF_THANKS_CLOSE_KN,
   PDF_AREAS_LINE_KN,
+  PDF_INTEREST_QUESTION_KN,
   PDF_HANDOFF_LINE_KN,
   PDF_NAME_QUESTION_KN,
   OUTBOUND_YES_LOCATIONS_NUDGE,
@@ -27,6 +32,19 @@ import {
   HONORIFIC_SIR_KN,
   HONORIFIC_MAAM_KN,
 } from '../kannada-script';
+import {
+  absorbVolunteeredNeeds,
+  buildNeedQuestionNudge,
+  createNeedsChecklist,
+  isNeedsComplete,
+  nextUnaskedNeed,
+  recordNeedAnswer,
+} from '../needs-checklist';
+import {
+  LISTENING_BEATS_KN,
+  chooseListeningBeat,
+  isSafeListeningBeat,
+} from '../conversation-naturalness';
 
 /**
  * "I am looking for a plot in Hunsur" is the caller answering the PROJECTS
@@ -67,13 +85,14 @@ describe('a caller answering about a plot is never mistaken for a name', () => {
 describe('a hearing complaint repeats the same question, once', () => {
   const nudge = buildOutboundRepeatQuestionNudge('ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್?');
 
-  it('quotes the question it is repeating', () => {
-    assert.match(nudge, /ನಿಮ್ಮ ಹೆಸರು ಏನು ಸರ್\?/);
+  it('never repeats a name question', () => {
+    assert.doesNotMatch(nudge, /ಹೆಸರು/);
+    assert.match(nudge, /ನೋಡ್ತಿದೀರಾ|looking for a site/i);
   });
 
-  it('says it slower and louder, then waits', () => {
+  it('says it slower and clearer, then waits', () => {
     assert.match(nudge, /SLOWER/);
-    assert.match(nudge, /louder/);
+    assert.match(nudge, /clearer/);
     assert.match(nudge, /STOP\s+and WAIT/);
   });
 
@@ -84,8 +103,9 @@ describe('a hearing complaint repeats the same question, once', () => {
 
   it('copes with no known previous line', () => {
     const bare = buildOutboundRepeatQuestionNudge('');
-    assert.match(bare, /the question you just asked/);
+    assert.match(bare, /ನೋಡ್ತಿದೀರಾ/);
     assert.doesNotMatch(bare, /undefined/);
+    assert.doesNotMatch(bare, /ಹೆಸರು/);
   });
 });
 
@@ -127,13 +147,15 @@ describe('an unanswerable question is handed to the sales team', () => {
 describe('only the opening is scripted', () => {
   it('never quotes a line the agent must say', () => {
     assert.doesNotMatch(OUTBOUND_NAME_QUESTION_NUDGE, /you already asked "are you looking/);
-    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /Say ONLY this one short question/);
+    assert.equal(OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_NAME_QUESTION_KN), false);
+    assert.ok(OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_AREAS_LINE_KN));
   });
 
   it('still carries the substance the turn must cover', () => {
     const projects = buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN);
     assert.match(projects, /YOUR OWN WORDS/);
-    assert.match(projects, /Ravi ಸರ್/);
+    assert.doesNotMatch(projects, /Ravi/);
+    assert.match(projects, /Say only the line given/);
     assert.match(projects, /STOP and WAIT/);
   });
 
@@ -141,7 +163,6 @@ describe('only the opening is scripted', () => {
     // ಧನ್ಯವಾದ ends the call on this system, so it must not appear in any
     // mid-call turn — only as an explicit BAN in these instructions.
     for (const nudge of [
-      OUTBOUND_NAME_QUESTION_NUDGE,
       buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN),
       buildOutboundProjectsNudge(null, HONORIFIC_MAAM_KN),
     ]) {
@@ -182,24 +203,19 @@ describe('the close is recognised however the agent words it', () => {
  * a few options" — modest, and enough for the caller to react to.
  */
 describe('the areas line is offered modestly', () => {
-  it('says we have a few options, in Kannada', () => {
-    assert.match(PDF_AREAS_LINE_KN, /ಕೆಲವು ಆಯ್ಕೆಗಳಿದೆ/);
+  it('names Hunsur Road, T. Narasipura Road, and Nanjangudu', () => {
     assert.match(PDF_AREAS_LINE_KN, /ಹುಣಸೂರು/);
     assert.match(PDF_AREAS_LINE_KN, /ನರಸೀಪುರ/);
-    // Still information only — the interest question is a separate beat.
-    assert.doesNotMatch(PDF_AREAS_LINE_KN, /\?/);
+    assert.match(PDF_AREAS_LINE_KN, /ನಂಜನಗೂಡ/);
+    assert.match(PDF_AREAS_LINE_KN, /\?/);
     assert.doesNotMatch(PDF_AREAS_LINE_KN, /ಧನ್ಯವಾದ/);
   });
 
-  it('tells the agent not to boast in either nudge that quotes it', () => {
-    for (const nudge of [
-      buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN),
-      OUTBOUND_YES_LOCATIONS_NUDGE,
-    ]) {
-      assert.match(nudge, /MODEST/);
-      assert.match(nudge, /never boast|never boast/i);
-      assert.match(nudge, /the sites (?:you|they) are looking for/);
-    }
+  it('the locations nudge says those three places and then waits', () => {
+    assert.ok(OUTBOUND_YES_LOCATIONS_NUDGE.includes(PDF_AREAS_LINE_KN));
+    assert.ok(OUTBOUND_YES_LOCATIONS_NUDGE.includes(PDF_INTEREST_QUESTION_KN));
+    assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /STOP and WAIT/);
+    assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /Do NOT say ಧನ್ಯವಾದ/);
   });
 });
 
@@ -212,20 +228,13 @@ describe('the sales handover is confident, never apologetic', () => {
     assert.match(handoff, /NEVER say you cannot connect them/);
   });
 
-  it('the name question carries the exact Kannada wording, not an improvised one', () => {
-    // From a real call: Priya asked "ನಮ್ಗೆ ಹೆಸರು ಏನು ಸರ್?" instead of
-    // "ನಿಮ್ಗೆ ಹೆಸರು ಏನು ಸರ್?". The nudge used to say "in YOUR OWN WORDS ...
-    // never read out a fixed line", with no Kannada to anchor it — the same
-    // defect that made the sales-team close come out in English.
+  it('the old name nudge no longer asks for a name', () => {
     const nudge = OUTBOUND_NAME_QUESTION_NUDGE;
-    assert.ok(nudge.includes(PDF_NAME_QUESTION_KN), 'the nudge must carry the real sentence');
-    assert.match(nudge, /say ನಿಮ್ಮ, never ನಿಮ್ಗೆ or ನಮ್ಗೆ/);
-    // The old "never read out a fixed line" is what produced the wrong wording.
+    assert.equal(nudge.includes(PDF_NAME_QUESTION_KN), false);
+    assert.ok(nudge.includes(PDF_AREAS_LINE_KN));
+    assert.doesNotMatch(nudge, /ask their name/i);
+    assert.doesNotMatch(nudge, /ಹೆಸರು/);
     assert.doesNotMatch(nudge, /never read out a fixed line/);
-    // ONE question and nothing else — the verbose nudge made her add chatter.
-    assert.match(nudge, /Say ONLY this one short question/);
-    assert.match(nudge, /nothing before it, nothing after it/);
-    assert.match(nudge, /STOP and WAIT for their name/);
   });
 
   it('carries the Kannada line, so the close cannot come out in English', () => {
@@ -245,8 +254,7 @@ describe('the sales handover is confident, never apologetic', () => {
 
   it('still ends on one thank-you and endCall in the same turn', () => {
     assert.match(handoff, /sales team/i);
-    assert.match(handoff, /ONE short thank-you/);
-    assert.match(handoff, /exactly ONCE/i);
+    assert.match(handoff, /exactly once/i);
     assert.match(handoff, /endCall in the SAME turn/);
   });
 });
@@ -257,7 +265,7 @@ describe('the sales handover is confident, never apologetic', () => {
  * narrated out loud before the real line.
  */
 describe('the opening is spoken immediately, with no preamble', () => {
-  const greeting = getOutboundGreetingInstruction();
+  const greeting = getOutboundGreetingInstruction('en');
 
   it('never mentions instructions, a script, or being programmed', () => {
     assert.match(greeting, /never mention that you are following instructions/);
@@ -266,7 +274,113 @@ describe('the opening is spoken immediately, with no preamble', () => {
   });
 
   it('still speaks the whole opening in one go', () => {
-    assert.ok(greeting.includes(PDF_OPENING_TURN1_KN));
+    assert.ok(greeting.includes("Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?"));
+    assert.match(greeting, /TURN-TAKING/);
+    assert.match(greeting, /muted until you finish/);
     assert.match(greeting, /Then stop and listen/);
+  });
+});
+/**
+ * OWNER DECISION — THE NEEDS CHECKLIST (13 Oct 2026).
+ *
+ * The pinned five steps told the sales team WHO was interested and almost
+ * nothing about WHAT the caller needed, so the employee had to re-ask the two
+ * qualifying questions the caller had just answered to a machine. The agent now
+ * has a two-item todo list — the purpose, and the preferred area — asked one at
+ * a time before the close.
+ *
+ * These tests encode the parts that must not drift: exactly two questions, the
+ * pinned lines untouched, an answered or volunteered item never asked, an
+ * unanswered item never holding the call open, and the whole thing still unable
+ * to trip the thank-you detector.
+ */
+describe('the needs list is two questions, and the pinned lines are untouched', () => {
+  const full = buildOutboundSystemInstruction('30 Sep 2026');
+  const fast = buildOutboundFastConnectInstruction('30 Sep 2026');
+
+  it('does not ask the purpose or the area on this call', () => {
+    for (const prompt of [full, fast]) {
+      assert.match(prompt, /After the caller's yes, say only the locations line/);
+      assert.doesNotMatch(prompt, /3B\. THE TWO NEEDS QUESTIONS/);
+      assert.ok(!prompt.includes(NEEDS_PURPOSE_QUESTION_KN));
+      assert.ok(!prompt.includes(NEEDS_LOCALITY_QUESTION_KN));
+    }
+  });
+
+  it('bans every question the owner did not authorise', () => {
+    for (const banned of ['budget', 'plot size', 'timeline', 'documents', 'possession']) {
+      assert.ok(
+        new RegExp('never ask about[^.]*' + banned, 'i').test(full),
+        `"${banned}" must stay on the forbidden list`,
+      );
+    }
+    assert.match(full, /After the caller's yes, say only the locations line/i);
+  });
+
+  it('leaves every pinned line exactly as it was', () => {
+    for (const prompt of [full, fast]) {
+      assert.ok(
+        prompt.includes("Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?"),
+        'the English opening is still word for word',
+      );
+      assert.ok(prompt.includes(PDF_OPENING_TURN1_KN), 'the Kannada opening is still available');
+      assert.ok(prompt.includes(PDF_AREAS_LINE_KN), 'the areas line is still word for word');
+      assert.ok(prompt.includes(PDF_HANDOFF_LINE_KN), 'the sales-manager line is still word for word');
+      assert.ok(prompt.includes(PDF_THANKS_CLOSE_KN), 'the thank-you is still word for word');
+    }
+    assert.equal(hasThanksClosing(PDF_THANKS_CLOSE_KN), true, 'the thanks detector still fires');
+    assert.equal(hasThanksClosing(PDF_AREAS_LINE_KN), false, 'and never on the areas line');
+  });
+
+  it('the two questions cannot hang the call up', () => {
+    assert.equal(hasThanksClosing(NEEDS_PURPOSE_QUESTION_KN), false);
+    assert.equal(hasThanksClosing(NEEDS_LOCALITY_QUESTION_KN), false);
+  });
+
+  it('an answer the caller already gave is never asked for again', () => {
+    let c = createNeedsChecklist();
+    c = absorbVolunteeredNeeds(c, 'I am looking for a plot in Hunsur for investment');
+    assert.equal(nextUnaskedNeed(c), null, 'both questions are answered before either is asked');
+    const nudge = buildNeedQuestionNudge('purpose', { acquired: null });
+    assert.doesNotMatch(nudge, /asked=\[/, 'the nudge carries no second question');
+  });
+
+  it('an unanswered question never holds the call open', () => {
+    let c = createNeedsChecklist();
+    c = recordNeedAnswer(c, 'purpose', 'hmm');
+    c = recordNeedAnswer(c, 'locality', 'no idea');
+    assert.equal(isNeedsComplete(c), true, 'the call closes with whatever was collected');
+  });
+});
+
+/**
+ * OWNER DECISION — THE ONE PERMITTED HUMAN BEAT (13 Oct 2026).
+ *
+ * The strict style banned every reaction before a line, which is what removed
+ * the machine-chatter the callers complained about — and with it the small sound
+ * that makes a voice sound like a person listening. The owner allowed ONE short
+ * listening sound, at the START of a real step, and nothing more.
+ */
+describe('one short listening beat, at the start of a real line only', () => {
+  const full = buildOutboundSystemInstruction('30 Sep 2026');
+
+  it('the short instruction says only the line given', () => {
+    assert.match(full, /Say only the line given/);
+    assert.match(full, /Say nothing else/);
+    assert.doesNotMatch(full, /ONE exception, and it is the only one/);
+  });
+
+  it('every permitted beat is short, safe and Kannada', () => {
+    for (const beat of LISTENING_BEATS_KN) {
+      assert.equal(isSafeListeningBeat(beat.text), true);
+      assert.equal(hasThanksClosing(beat.text), false, 'a beat must never end the call');
+    }
+    assert.equal(chooseListeningBeat({ variantIndex: 0 }), LISTENING_BEATS_KN[0].text);
+  });
+
+  it('the old ban on an opener is still in force for everything else', () => {
+    assert.match(full, /No reaction before it/);
+    assert.match(full, /never "ohh", "oh", "ah", "okay so"/);
+    assert.match(full, /never a laugh/);
   });
 });

@@ -51,14 +51,9 @@ language is spoken, and their absence is the loudest signal that a machine wrote
 
 ### 1.2 Address and honorific
 
-- Use `ಸರ್` by default, `ಮಾಮ್` when the caller's name is recognisably feminine
-  (`KANNADA_FEMININE_NAMES` + `FEMININE_NAMES` in `kannada-script.ts`).
-- The honorific attaches to the **address**, not to every clause. One per turn is right; three is
-  servile and immediately reads as machine-generated.
-- Once the name is known, use `Name + ಸರ್` (`ರವಿ ಸರ್`). Using the bare name without the honorific
-  is too familiar for a first cold call.
-- Never say `ನಿಮ್ಗೆ` where `ನಿಮ್ಮ` is meant (the name question is `ನಿಮ್ಮ ಹೆಸರು ಏನು?` (no honorific — the name is not known yet) — this has
-  already been a shipped bug once).
+- Do not address the caller by a name, and do not use `ಸರ್` or `ಮಾಮ್` on the scripted lines.
+  The silence goodbye is the only pinned line that already contains `ಸರ್`.
+- Never say `ನಿಮ್ಗೆ` where `ನಿಮ್ಮ` is meant.
 
 ---
 
@@ -117,9 +112,8 @@ Two contradictory instructions, and the model obeyed whichever it read last.
 |---|---|
 | Opening intro | `PDF_OPENING_INTRO_KN` |
 | Site question (rides in the opening) | `PDF_OPENING_TURN1_KN` |
-| Name question | `PDF_NAME_QUESTION_KN` |
 | The single thank-you | `PDF_THANKS_CLOSE_KN` |
-| Silence check line | `SILENCE_CHECK_LINE_KN` (identical both times — a deliberate owner decision) |
+| Silence check line | `SILENCE_CHECK_LINE_KN` (said once) |
 | Silence goodbye | `SILENCE_GOODBYE_LINE_KN` |
 
 **Free — the model's own words, in the caller's language:**
@@ -215,6 +209,17 @@ Run this against every Kannada change:
 - [ ] No invented locality, project, price, offer, or availability claim.
 - [ ] Reads as speech when read aloud, not as prose.
 - [ ] A native speaker has heard it and approved it.
+
+### 8.1 New phrases added by the needs-checklist pass (13 Oct 2026) — ALL AWAITING SIGN-OFF
+
+| Phrase | Where | Why it needs a human verdict |
+|---|---|---|
+| `ನೀವು ಇನ್ವೆಸ್ಟ್ಮೆಂಟ್ಗಾಗಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ, ಅಥವಾ ಮನೆ ಕಟ್ಟಿಸೋಕೆ ಅಂತ ನೋಡ್ತಿದೀರಾ?` | `NEEDS_PURPOSE_QUESTION_KN` | It is the guardrails document's English purpose question rendered into Kannada. Two options in one sentence is easy to write badly: check the rhythm of the `ಅಥವಾ` clause and that `ಇನ್ವೆಸ್ಟ್ಮೆಂಟ್` reads as the loanword a local salesperson actually uses. |
+| `ನಿಮಗೆ ಯಾವ ಕಡೆ ಸೈಟ್ ಬೇಕು?` | `NEEDS_LOCALITY_QUESTION_KN` | Deliberately open and deliberately short. Check that it does not sound brusque, and that it invites an area rather than a yes/no. |
+| `ಹಾ` / `ಹೂಂ` / `ಸರಿ ಸರಿ` | `LISTENING_BEATS_KN` | The backchannel. These are the sounds a caller hears when the agent shows it is listening, so a wrong one is worse than none: check each is something a Mysuru woman would actually say on a phone, and that none of them reads as impatience. |
+
+All six are flagged `validatedByNativeSpeaker: false` in code. The listening beats are also asserted
+to be ≤ 3 words, Kannada-script-only, honourific-free and non-thanks by `needs-checklist.test.ts`.
 
 ---
 

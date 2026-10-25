@@ -6,6 +6,16 @@ export type SummaryInput = {
   transcription: string;
   interested: boolean | null | undefined;
   customerName?: string;
+  /**
+   * The needs-checklist answers, already rendered as one line by
+   * needs-checklist.ts (`needsSummaryLine`). This is the part the sales employee
+   * needs first — what the caller wants the plot for and which area they want —
+   * so it leads the summary instead of being buried in the transcript.
+   *
+   * Optional on purpose: a caller who declines or goes quiet leaves this empty
+   * and the summary must read exactly as it did before.
+   */
+  needsLine?: string;
 };
 
 function buildFallbackSummary(input: SummaryInput): string {
@@ -23,7 +33,9 @@ function buildFallbackSummary(input: SummaryInput): string {
     .filter(Boolean)
     .slice(-6);
   const snippet = lines.length > 0 ? lines.join(' ') : 'No transcript captured.';
-  return `${durationInfo}\n\n${outcomeLine} ${snippet}`;
+  const needs = input.needsLine?.trim();
+  const needsLine = needs ? `${needs}\n\n` : '';
+  return `${durationInfo}\n\n${needsLine}${outcomeLine} ${snippet}`;
 }
 
 export async function generateCallSummary(input: SummaryInput): Promise<string> {
@@ -40,6 +52,8 @@ Summarize the following conversation between an AI Agent (Priya) and a Customer.
 
 REQUIREMENTS:
 - Professional and concise (2-3 sentences).
+- If a NEEDS line is given below, open with what the customer wants the plot for and which area they asked
+  for — that is the first thing the sales employee needs. Never invent a purpose or an area that is not in it.
 - State clearly whether the customer is looking for a plot/site or not.
 - Highlight the key outcome.
 - INCLUDE the specific property name only if the customer showed interest or booked a visit.
@@ -47,7 +61,7 @@ REQUIREMENTS:
 
 CONVERSATION:
 ${input.transcription}
-
+${input.needsLine?.trim() ? `\nNEEDS — collected on the call by the agent's checklist (use these exact facts):\n${input.needsLine.trim()}\n` : ''}
 SUMMARY:
 `;
 

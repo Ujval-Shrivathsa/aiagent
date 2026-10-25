@@ -11,7 +11,7 @@ Version 1.0 · Repository: `priya---alliance-square-properties` · Branch: `main
 
 Priya is an **outbound AI voice agent that places real phone calls, in Kannada, to prospective property buyers on behalf of Alliance Square Properties (Mysuru, Karnataka, India)**.
 
-When a prospect answers, an AI voice agent named **Priya** conducts a short, disciplined sales conversation in Kannada: she asks whether the caller is looking for a plot in Mysuru, asks the caller's name, names the layouts/areas Alliance Square has, asks one interest question, and — if the caller is interested — hands the lead to the sales team and closes with a single thank-you before ending the call.
+When a prospect answers, an AI voice agent named **Priya** conducts a short, disciplined sales conversation in Kannada: she asks whether the caller is interested in a site in Mysuru, names the three places, and — if the caller is interested — says the sales manager will call, then ends the call. She never asks for the caller's name.
 
 The entire product is one thing done extremely well: **a five-step outbound Kannada phone call that sounds like a real person, never leaves dead air, and never runs away from the script.**
 
@@ -95,11 +95,11 @@ These are **explicitly out of scope**. Do not implement them as part of ongoing 
 
 **P1. One real outbound call per dialled lead.** Plivo `answer_url` fires only on pickup, which is what moves a lead `calling → answered`.
 **P2. The call is a five-step pinned script.** Step 1 site question → step 2 name → step 3 projects + one interest question → step 4 (only if interested) sales-team handoff line + one thank-you → step 5 stop talking; line goes quiet; call ends. There is no sixth step.
-**P3. Pinned lines are spoken word for word.** Opening, name question, areas line, and the thank-you close are fixed Kannada strings in `kannada-script.ts`. Only the interest question may be reworded in the caller's language.
+**P3. Pinned lines are spoken word for word.** Opening, locations line, interested close, and not-interested close are fixed Kannada strings in `kannada-script.ts`. There is no name question.
 **P4. One calm, even pace for the entire call.** No speeding up, slowing down, trailing off, or matching the caller's energy.
 **P5. Dead air is a defect, never a behaviour.** After any pinned question, the engine guarantees audible speech or a repair.
 **P6. A late reply is always answered.** A caller who speaks 3–5 seconds late cancels the pending goodbye and is answered.
-**P7. Silence has a defined ladder:** check at 5s, check again 5s later (identical line), then a real goodbye and end ~5s after the second check.
+**P7. Silence has a defined ladder:** one check at 5s, then a busy goodbye and end 5s later if they still have not spoken.
 **P8. The call ends once, 1 second after the closing thank-you has finished playing** (audio-settle 350 ms, hard cap 8 s).
 **P9. Interest is captured, and interested leads are visible** on the dashboard's Confirmed tab with recording and transcript.
 **P10. The deployed build is identifiable** at runtime without host logs.
@@ -350,9 +350,11 @@ Holds the whole per-call state machine inside `setupGemini`. Key regions:
 |---|---|
 | `PDF_OPENING_INTRO_KN` | `ಹಲೋ, ನಾನು ಅಲೈಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ.` |
 | `PDF_OPENING_TURN1_KN` (= `PDF_OPENING_KN` = `PDF_OPENING`) | the site question line |
-| `PDF_NAME_QUESTION_KN` | `ನಿಮ್ಮ ಹೆಸರು ಏನು?` — neutral: no honorific before the name is known |
+| `PDF_NAME_QUESTION_KN` | Detector only. Never spoken and never placed in a prompt. |
 | `PDF_AREAS_LINE_KN` | the projects/areas substance |
 | `PDF_INTEREST_QUESTION_KN` | the one interest question (may be reworded) |
+| `NEEDS_PURPOSE_QUESTION_KN` | needs checklist (a) — investment or building a home. **NOT pinned**: reworded, like the interest question |
+| `NEEDS_LOCALITY_QUESTION_KN` | needs checklist (b) — which area. **NOT pinned**, and deliberately open (no menu of our layouts) |
 | `PDF_ACK_KN` | `ಸರ್ತಿ` — one short acknowledgement, **must never** count as a thank-you |
 | `PDF_HANDOFF_LINE_KN` | the sales-team handoff line |
 | `PDF_THANKS_CLOSE_KN` | `ನಿಮ್ಗೆ ಸಮಯ ಕೊಡಿದಂತೆ ಧನ್ಯವಾದಗಳು ಸರ್.` |
@@ -371,9 +373,9 @@ Holds the whole per-call state machine inside `setupGemini`. Key regions:
 | Constant | Value | Meaning |
 |---|---|---|
 | `SILENCE_CHECK_AFTER_MS` | `5_000` | first silence check |
-| `SILENCE_CHECK_REPEAT_AFTER_MS` | `5_000` | second check (identical line) |
-| `SILENCE_CLOSE_AFTER_CHECK_MS` | `5_000` | goodbye after the second check |
-| `SILENCE_CHECKS_MAX` | `2` | checks before closing |
+| `SILENCE_CHECK_REPEAT_AFTER_MS` | `5_000` | wait after the one check |
+| `SILENCE_CLOSE_AFTER_CHECK_MS` | `5_000` | busy goodbye after that wait |
+| `SILENCE_CHECKS_MAX` | `1` | one check, then the goodbye |
 | `OUTBOUND_THANKS_AUDIO_SETTLE_MS` | `350` | wait for audio tail |
 | `OUTBOUND_THANKS_AUDIO_WAIT_CAP_MS` | `8_000` | hard cap on that wait |
 | `OUTBOUND_END_AFTER_THANKS_MS` | `1_000` | hangup after the thank-you finishes |
@@ -527,7 +529,7 @@ sequenceDiagram
 
 1. Call opens. Priya says the opening intro and the pinned site question.
 2. Caller says yes / shows interest.
-3. Priya asks the pinned name question; caller answers; `extractCallerName` captures it, honouring `ಸರ್`/`ಮಾಮ್` via `KANNADA_FEMININE_NAMES`.
+3. A yes goes to the locations line. Priya does not ask for a name.
 4. Priya says `PDF_ACK_KN` (`ಸರ್ತಿ`) — **one** short acknowledgement carrying the name — then the areas line, then the one interest question.
 5. Caller is interested → Priya says the sales-team handoff line, then `PDF_THANKS_CLOSE_KN`.
 6. `hasThanksClosing` recognises the turn; the thanks audio settles (350 ms, cap 8 s); **1 second later the call is hung up.** The line goes quiet for a second or two before the hangup.
@@ -535,7 +537,7 @@ sequenceDiagram
 
 ### 17.2 Caller is not interested
 
-Caller declines the site question or the name question. Priya accepts immediately — `ಸರ್ತಿ` and nothing more; if the caller refuses to give a name, `buildOutboundNameDeclinedNudge` uses the honourific alone and never presses. The not-interested close line is spoken, `NOT_INTERESTED_TOOL` fires, the call ends.
+Caller declines the site question. Priya says the remember-us close and ends the call. There is no name question, so a refusal to give a name never arises. If an old path still sends `buildOutboundNameDeclinedNudge`, that nudge says the locations line and does not ask for a name.
 
 ### 17.3 Caller declines to give a name
 
@@ -543,7 +545,7 @@ Caller declines the site question or the name question. Priya accepts immediatel
 
 ### 17.4 Caller goes silent
 
-After a turn, `armOutboundSilenceAfterTurn` arms the ladder. At 5 s of no caller voice **and** no speech-class energy, `SILENCE_CHECK_LINE_KN` is spoken. Silence again → **the identical line** at 5 s later. Silence again → `SILENCE_GOODBYE_LINE_KN`, then the call ends ~5 s after the second check. At most `OUTBOUND_SILENCE_MAX_DEFERS = 4` defers are granted while speech-class energy is present.
+After a turn, `armOutboundSilenceAfterTurn` arms the ladder. At 5 s of no caller voice **and** no speech-class energy, `SILENCE_CHECK_LINE_KN` is spoken once. Silence again → `SILENCE_GOODBYE_LINE_KN`, then the call ends ~5 s after that one check. At most `OUTBOUND_SILENCE_MAX_DEFERS = 4` defers are granted while speech-class energy is present.
 
 ### 17.5 Caller replies late
 
@@ -551,7 +553,7 @@ If the caller speaks 3–5 s after a question, VAD `lastCallerVoiceAt` and/or th
 
 ### 17.6 Dead-air repair
 
-A pinned question is spoken by the model, but the turn produces no audible output (nothing generated, dropped by a dedup guard, or muted before any chunk reached the caller). `armOutboundStepAudioGuard(label, retryText, attempt = 1)` re-issues it within `OUTBOUND_STEP_AUDIO_GUARD_MS = 2_600`, up to `OUTBOUND_STEP_AUDIO_GUARD_MAX = 2` times. The guard is armed after: the name question (both in `handleNameStep` and the interested-before-name fallback), the projects nudge in `handleNameStep`, the name-declined nudge, and the stalled-turn re-issue. It **skips** when `vadIsSpeaking`, on a hard mute / thanks / transfer, when there is no session, or when `lastAiAudioAt > armedAt && !lastOutboundTurnSuppressed` (i.e. audio did flow). `sendPcmToTwilio` calls `clearOutboundStepAudioGuard()` immediately after `lastAiAudioAt = Date.now()`.
+A pinned question is spoken by the model, but the turn produces no audible output (nothing generated, dropped by a dedup guard, or muted before any chunk reached the caller). `armOutboundStepAudioGuard(label, retryText, attempt = 1)` re-issues it within `OUTBOUND_STEP_AUDIO_GUARD_MS = 2_600`, up to `OUTBOUND_STEP_AUDIO_GUARD_MAX = 2` times. The guard is armed after the locations nudge. There is no name question to re-issue. It **skips** when `vadIsSpeaking`, on a hard mute / thanks / transfer, when there is no session, or when `lastAiAudioAt > armedAt && !lastOutboundTurnSuppressed` (i.e. audio did flow). `sendPcmToTwilio` calls `clearOutboundStepAudioGuard()` immediately after `lastAiAudioAt = Date.now()`.
 
 A **dropped** projects turn is detected by the played-turn detector setting `outboundAreasLineHeard`, so the retry is re-said **by name** via `buildOutboundProjectsRetryNudge(name, honorific)` (which carries the name, `PDF_ACK_KN`, `PDF_AREAS_LINE_KN`, and `PDF_INTEREST_QUESTION_KN`, and bans any thank-you) rather than jumping ahead to the handoff close. This branch sits **before** the `outboundAreasLineDelivered && !outboundHandoffNudgeSent` branch in the suppressed-repeat advance block.
 
@@ -607,11 +609,21 @@ Add Lead → Launch Campaign → watch Overview/Confirmed → open a lead → pl
 
 ```
 1. SITE QUESTION   (verbatim)  PDF_OPENING_TURN1_KN
-2. THEIR NAME      (verbatim)  PDF_NAME_QUESTION_KN
-3. THE PROJECTS    (verbatim)  PDF_AREAS_LINE_KN, then ONE interest question PDF_INTEREST_QUESTION_KN
+2. THERE IS NO NAME STEP. Never ask for the caller's name.
+3. THE LOCATIONS   (verbatim)  PDF_AREAS_LINE_KN — the line already includes the question
+3B. THE NEEDS CHECKLIST        NEEDS_PURPOSE_QUESTION_KN, then NEEDS_LOCALITY_QUESTION_KN — ONE at a
+                               time, reworded, only if they are interested; skip any item they have
+                               already answered; never ask an item twice; never block the close on one
 4. THE CLOSE (if interested)   PDF_HANDOFF_LINE_KN, then ONE thank-you PDF_THANKS_CLOSE_KN
 5. THEN STOP TALKING. The line goes quiet for a second or two and the call ends.
 ```
+
+**Amendment (13 Oct 2026, explicit owner request).** Step 3B is the TWO-ITEM NEEDS CHECKLIST: the
+agent's to-do list for the call. It is not a sixth step — the pinned lines are unchanged — and it
+exists so the sales employee receives what the caller needs instead of re-asking for it. The rules
+live as pure helpers in `src/voice/needs-checklist.ts`, the wiring as `handleNeedsStep` in
+`logic.ts`, and the answers are written ONCE at call end to `Lead.needPurpose` / `Lead.needLocality`
+plus the call summary. See D31.
 
 `FIVE_STEP_FLOW` is placed at the top of **both** instructions, because every complaint behind the pinning — slow once then fast, repeating, saying unwanted things, dragging the talk out — was the model improvising around a script it was never actually pinned to. It states: there is **no sixth step**; no extra question, explanation, summary, recap, "is there anything else", or improved re-run of a line already said.
 
@@ -716,7 +728,7 @@ Some turns must be dropped rather than spoken. Suppression reasons that **advanc
 **EC6.** A leading `ಸರಿ` on an otherwise negative reply — Kannada no/decline wins.
 **EC7.** Caller refuses a name — accept in one sentence, never press, use the honourific alone.
 **EC8.** Caller answers something other than the site question at the name step — `looksLikeAnswerToSiteQuestion()` gate; the step must not advance.
-**EC9.** Caller says "yes" to the opening — **no reaction**, then the name question.
+**EC9.** Caller says "yes" to the opening — **no reaction**, then the locations line. Never a name question.
 **EC10.** Caller is silent from the start — the ladder still runs; a goodbye is spoken; the call ends.
 **EC11.** Caller switches language — follow immediately, caller-initiated only.
 **EC12.** Caller is busy / asks to call back — busy close line, callback window 10:00–19:00, outside-window line.
@@ -740,13 +752,14 @@ Some turns must be dropped rather than spoken. Suppression reasons that **advanc
 **Verified at time of writing:** `npm test` → **194 tests, 38 suites, 194 pass, 0 fail, exit 0** (~4.0 s). `npx tsc --noEmit` → exit 0. Verification scripts `verify-late-reply.mjs` (23 checks), `verify-name-step.mjs`, `verify-silence-thanks.mjs` all exit 0. Line endings verified: `logic.ts` 3694/3694 CRLF, `kannada-script.ts` 1847/1847, `kannada-script.test.ts` 1413/1413.
 
 > **Superseded numbers — this paragraph is a snapshot, not current truth.** After the
-> conversational-naturalness work the suite is **263 tests / 46 suites**, `logic.ts` is 3883 lines and
-> `kannada-script.ts` is 1856. Current figures and the commands that produce them live in
-> `VOICE_QA_PLAN.md` §7 and `SCENARIO_REGRESSION.md` §2. Prefer those; this line stays as history.
+> conversational-naturalness work the suite was **263 tests / 46 suites**. After the needs-checklist
+> pass (13 Oct 2026) it is **325 tests / 59 suites**, `logic.ts` is 4138 lines, `kannada-script.ts` is
+> 1970 and `needs-checklist.ts` is 541. Current figures and the commands that produce them live in
+> `VOICE_QA_PLAN.md` §7; this line stays as history.
 
 ### 24.1 Completed — the latest fix (name-step dead air + late reply)
 
-1. **Step audio guard** — `OUTBOUND_STEP_AUDIO_GUARD_MS = 2_600`, `OUTBOUND_STEP_AUDIO_GUARD_MAX = 2`, `armOutboundStepAudioGuard` / `clearOutboundStepAudioGuard`, armed at the name question (both sites), the projects nudge, the name-declined nudge, and the stalled-turn re-issue; cleared in `sendPcmToTwilio` right after `lastAiAudioAt = Date.now()`.
+1. **Step audio guard** — `OUTBOUND_STEP_AUDIO_GUARD_MS = 2_600`, `OUTBOUND_STEP_AUDIO_GUARD_MAX = 2`, `armOutboundStepAudioGuard` / `clearOutboundStepAudioGuard`, armed at the locations nudge; there is no name question; cleared in `sendPcmToTwilio` right after `lastAiAudioAt = Date.now()`.
 2. **`outboundAreasLineHeard`** — set by the played-turn detector when `looksLikeAreasLine`, so a dropped projects turn is re-said **by name** (`buildOutboundProjectsRetryNudge`) instead of jumping to the handoff close; the new branch precedes the `outboundAreasLineDelivered && !outboundHandoffNudgeSent` branch.
 3. **Silence ladder** — `outboundSilenceDeferUsed` (bool) replaced by `outboundSilenceDefers` (count) + `OUTBOUND_SILENCE_MAX_DEFERS = 4`; the tick calls the pure `shouldHoldSilenceClose(...)` (inclusive `<= graceMs` at the 3 s boundary, holds on speech-class energy). Reset in `resetOutboundSilenceCycle` and `armOutboundSilenceAfterTurn`.
 4. **Late-reply cancellation** — `outboundSilenceGoodbyeSentAt` set at `close_silence` after `outboundSpokenCloseText = 'silence goodbye'`, plus `clearOutboundStepAudioGuard()` before the goodbye; `cancelSilenceCloseIfCallerSpeaks(source)` uses the pure `shouldCancelPendingSilenceClose(...)` and on cancel clears the goodbye/busy/close-text flags, calls the new `clearOutboundCloseDeadline()`, `cancelRecovery()`, `resetOutboundSilenceCycle()`, `armOutboundSilenceAfterTurn()`, and sends `OUTBOUND_SILENCE_CANCELLED_NUDGE`. Wired at VAD speech start (`'caller voice'`) and on customer transcript (`'caller transcript'`, after `resetOutboundSilenceCycle()`).
@@ -859,10 +872,10 @@ Confirmed by the owner; do not relitigate without being asked.
 |---|---|
 | **D1** | **Total silence after the name is the worst outcome.** "Listen well" means the caller hears the name correctly **and** Priya never goes silent afterwards. |
 | **D2** | **A late reply at 3–5 s must cancel the goodbye and always be answered** — the recommended option was chosen explicitly. |
-| **D3** | No reaction on "yes" — go straight to the name question. |
+| **D3** | No reaction on "yes" — go straight to the locations line. Never ask for a name. |
 | **D4** | Exactly one short acknowledgement (`ಸರ್ತಿ`) that carries the name, then the locations. |
 | **D5** | Name capture in Kannada script. |
-| **D6** | Silence = check twice (5 s, then 5 s later), then end ~5 s after the second check. The **identical** check line both times. |
+| **D6** | Silence = one check at 5 s, then the busy goodbye and hangup 5 s later. Never a second check. |
 | **D7** | Hang up 1 s after the thank-you **finishes**, not after it starts. |
 | **D8** | **One calm, even pace** for the whole call. Never match the caller's energy. |
 | **D9** | The **pinned five-step flow** is the entire call; nothing is added to it. |
@@ -887,12 +900,15 @@ Confirmed by the owner; do not relitigate without being asked.
 | **D28** | `summary` is written once at call end, not live. |
 | **D29** | No sentiment tracking. No Google Calendar. |
 | **D30** | Render is the deployment of record; GitHub auto-deploys on push to `main`. |
+| **D31** | **TWO-ITEM NEEDS CHECKLIST (13 Oct 2026, owner request).** Before the close the agent asks (a) what they need the plot for — investment or building a home — and (b) which area they want. One at a time, never re-asked, skipped when already volunteered, never blocking the close. Both answers reach the sales employee on the lead and in the summary. It is exactly two items; a third is scope creep. |
+| **D32** | **ONE short listening beat** may open a real, non-pinned line (ಹಾ / ಹೂಂ / ಸರಿ ಸರಿ) — never a turn of its own, never more than one, never on a fixed line. Designed as a separate set from the named acknowledgement so D4 is untouched. |
+| **D33** | **Voice stays on Gemini Live native audio.** The female voice is chosen BY EAR from `scripts/voice-lab.ts` renders and set via `VOICE_TTS_VOICE_NAME`; it is not switched to a Cloud TTS pipeline. The Live voices are not documented as Kannada-native, so naturalness is carried by the prompt (see `VOICE_DELIVERY`). |
 
 ---
 
 ## 30. Things AI Must Not Change
 
-**M1. The pinned five-step flow or any pinned line** in `kannada-script.ts` (opening, name question, areas line, thank-you close, silence lines). `PRIYA_GUARDRAILS.md` is marked *DO NOT MODIFY WITHOUT EXPLICITLY REQUEST*.
+**M1. The pinned spoken lines** in `kannada-script.ts` (opening, locations line, interested close, not-interested close, silence goodbye). There is no name question. Do not add one.
 **M2. The one-pace delivery rules** (`VOICE_DELIVERY`).
 **M3. Any timing constant** in §14.2 without explicit instruction and a matching test update. These are the product's feel.
 **M4. The `thanks ⇒ mute` behaviour** or the `PDF_ACK_KN` guarantee. It is ugly but it is the mechanism that prevents Priya talking over a closing thank-you.
@@ -950,14 +966,14 @@ node scripts/verify-silence-thanks.mjs; echo "SILENCE-THANKS-EXIT: $?"
 # line endings
 node -e "for (const f of ['src/voice/logic.ts','src/voice/kannada-script.ts','src/voice/__tests__/kannada-script.test.ts']) { const s=require('fs').readFileSync(f,'utf8'); console.log(f, (s.match(/\r\n/g)||[]).length, (s.match(/(?<!\r)\n/g)||[]).length); }"
 ```
-**T9. Manual audible checklist (owner-run only; see §27 C1):** opening heard; name question heard; name captured; `ಸರ್ತಿ` + areas + interest question heard; late reply at 3–5 s answered; two identical silence checks; a real goodbye; exactly one hangup after the thank-you finishes; no overlapping speech; no dead air.
+**T9. Manual audible checklist (owner-run only; see §27 C1):** opening heard; locations line heard after a yes; no name question at any point; late reply at 3–5 s answered; silence stays quiet until the goodbye; exactly one hangup after the close finishes; no overlapping speech; no dead air.
 
 ---
 
 ## 33. Acceptance Criteria
 
 **Voice behaviour (the product):**
-- [ ] Priya says the opening, the name question, the areas line, and the interest question in Kannada, in that order, with nothing between them.
+- [ ] Priya says the opening, then the locations line, and never asks for a name.
 - [ ] `ಸರ್ತಿ` carries the caller's name and is the **only** acknowledgement.
 - [ ] The areas line is modest and the site question is never re-asked.
 - [ ] No thank-you, thanks, or ಧನ್ಯವಾದ is spoken before the closing turn.
@@ -966,11 +982,13 @@ node -e "for (const f of ['src/voice/logic.ts','src/voice/kannada-script.ts','sr
 - [ ] A dropped projects turn is re-said **by name**, never skipped to the close.
 - [ ] A caller who replies 3–5 s late has the goodbye **cancelled** and is answered.
 - [ ] A caller who speaks **during** the goodbye is answered.
-- [ ] Silence produces two **identical** check lines 5 s apart, then a real goodbye, and the call ends ~5 s after the second check.
+- [ ] Silence produces one check at 5 s, then the busy goodbye, and the call ends ~5 s after that check.
 - [ ] The call hangs up exactly once, 1 s after the closing thank-you finishes, never mid-sentence.
 - [ ] Priya never ends a call during a recovery nudge.
 - [ ] A caller-initiated language switch is followed immediately; Priya never switches on her own.
 - [ ] Priya does not repeat her own name except after one of the four allowed identity questions.
+- [ ] The agent asks the TWO needs questions before the close — purpose, then preferred area — one at a time, and never asks one the caller has already answered.
+- [ ] A third needs question is never asked, and the two answers reach the lead record and the dashboard.
 - [ ] An inbound call to the number is hung up immediately.
 
 **Platform:**
@@ -985,7 +1003,7 @@ node -e "for (const f of ['src/voice/logic.ts','src/voice/kannada-script.ts','sr
 **Engineering:**
 - [ ] `npx tsc --noEmit` exits 0.
 - [ ] `npm test` exits 0 with all tests passing, none skipped, none weakened.
-- [ ] All three `verify-*.mjs` scripts exit 0.
+- [ ] All the `verify-*.mjs` scripts exit 0, including `verify-needs-checklist.mjs` (41 checks).
 - [ ] Line endings preserved (CRLF/LF counts equal for the CRLF files).
 - [ ] No new dependency without justification.
 - [ ] No secret committed or exposed.
@@ -1024,6 +1042,9 @@ A task is done when:
 9. **TBD — rate limiting / retry policy for campaigns.** None exists.
 10. **TBD — `hangup-status/6` → `/7` bump.** Needed before the next deploy so a 200 can be trusted as proof of the new build.
 11. **TBD — Kannada anchors for `OUTBOUND_CLEAN_CLOSE_NUDGE` and `OUTBOUND_CANNOT_ANSWER_NUDGE`.**
+15. **REQUIRES OWNER ACTION — apply the `needs_checklist` migration.** `prisma/migrations/20261013120000_needs_checklist/migration.sql` adds `Lead.needPurpose` and `Lead.needLocality`. The agent wrote the SQL and regenerated the Prisma client but did **not** touch the database; run `npx prisma migrate deploy` against the intended database. Until then the two fields stay null and the dashboard shows "Not collected on this call".
+16. **REQUIRES NATIVE SPEAKER — the two needs questions and the three listening beats.** `NEEDS_PURPOSE_QUESTION_KN`, `NEEDS_LOCALITY_QUESTION_KN` and `LISTENING_BEATS_KN` all carry `validatedByNativeSpeaker: false`.
+17. **REQUIRES THE OWNER'S EAR — the production voice.** `render.yaml`/`.env.example`/`speech-config.ts` now default to `Despina`; the committed deploy still reads `Sulafat`, and no audio has been judged by a human this pass. See D33.
 12. **TBD — `AGENTS.md` drift** (Twilio, `/api/voice/recording`, Groq, SQLite, `silenceDurationMs`).
 13. **REQUIRES CLARIFICATION — language scope.** Which languages Priya may follow, and with what quality bar.
 14. **REQUIRES CLARIFICATION — handoff.** Spoken handoff line vs. real transfer to `PLIVO_TRANSFER_NUMBER`.

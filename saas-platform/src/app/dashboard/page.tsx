@@ -120,6 +120,26 @@ export default function Dashboard() {
 
   const leadLookingLabel = (lead: any) => lookingStatusLabel(lead);
 
+  /**
+   * The two needs-checklist answers the agent collected on the call — what they
+   * want the plot for, and which area they asked for.
+   *
+   * These are the first facts the sales employee needs (they decide which project
+   * to open with), so they are surfaced next to the name instead of being buried
+   * in the transcript. Empty for a call that never reached the checklist:
+   * a caller can decline, go quiet, or hang up before either question is asked.
+   */
+  const leadNeeds = (lead: any): { purpose: string | null; locality: string | null } => ({
+    purpose: lead?.needPurpose || null,
+    locality: lead?.needLocality || null,
+  });
+
+  const leadNeedsCell = (lead: any): string | null => {
+    const { purpose, locality } = leadNeeds(lead);
+    const parts = [purpose, locality].filter(Boolean);
+    return parts.length ? parts.join(" · ") : null;
+  };
+
   const summaryEmptyMessage = (lead: any) => {
     const call = String(lead.call_status || lead.callStatus || lead.status || "").toLowerCase();
     if (["pending", "calling"].includes(call)) {
@@ -575,6 +595,11 @@ export default function Dashboard() {
                               </div>
                               <DualStatusBadges lead={lead} />
                             </div>
+                            {leadNeedsCell(lead) && (
+                              <p className="mt-2 text-[11px] text-neutral-600 truncate">
+                                Needs: {leadNeedsCell(lead)}
+                              </p>
+                            )}
                             <div className="mt-3 flex items-center justify-between">
                               {lead.summary ? (
                                 <span className="text-[11px] font-medium text-neutral-600 flex items-center gap-1">
@@ -607,6 +632,7 @@ export default function Dashboard() {
                           <th className="px-4 lg:px-6 py-3.5 font-normal">Name</th>
                           <th className="px-4 lg:px-6 py-3.5 font-normal">Call status</th>
                           <th className="px-4 lg:px-6 py-3.5 font-normal">Lead interest</th>
+                          <th className="px-4 lg:px-6 py-3.5 font-normal">Needs</th>
                           <th className="px-4 lg:px-6 py-3.5 font-normal">Summary</th>
                           <th className="px-4 lg:px-6 py-3.5 text-right font-normal">Action</th>
                         </tr>
@@ -614,7 +640,7 @@ export default function Dashboard() {
                       <tbody className="divide-y divide-neutral-100">
                         {filteredLeads.length === 0 ? (
                           <tr>
-                            <td colSpan={6} className="px-6 py-20 text-center">
+                            <td colSpan={7} className="px-6 py-20 text-center">
                               <div className="mx-auto w-12 h-12 rounded-full bg-neutral-100 flex items-center justify-center mb-4">
                                 <Database size={22} strokeWidth={1.5} className="text-neutral-400" />
                               </div>
@@ -645,6 +671,13 @@ export default function Dashboard() {
                               </td>
                               <td className="px-4 lg:px-6 py-4">
                                 <OutcomeStatusBadge lead={lead} />
+                              </td>
+                              <td className="px-4 lg:px-6 py-4">
+                                {leadNeedsCell(lead) ? (
+                                  <span className="text-[12px] text-neutral-600">{leadNeedsCell(lead)}</span>
+                                ) : (
+                                  <span className="text-neutral-300">—</span>
+                                )}
                               </td>
                               <td className="px-4 lg:px-6 py-4 text-center">
                                 {lead.summary ? (
@@ -955,6 +988,28 @@ export default function Dashboard() {
                   >
                     {leadLookingLabel(selectedLead)}
                   </span>
+                </div>
+
+                <div>
+                  <h4 className="section-label mb-3 sm:mb-4">What They Need</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="bg-neutral-50 p-4 rounded-xl border border-neutral-100">
+                      <p className="section-label mb-1">Purpose</p>
+                      <p className="text-sm font-medium text-neutral-800">
+                        {leadNeeds(selectedLead).purpose || (
+                          <span className="text-neutral-400 font-normal">Not collected on this call</span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="bg-neutral-50 p-4 rounded-xl border border-neutral-100">
+                      <p className="section-label mb-1">Preferred locality</p>
+                      <p className="text-sm font-medium text-neutral-800">
+                        {leadNeeds(selectedLead).locality || (
+                          <span className="text-neutral-400 font-normal">Not collected on this call</span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
                 </div>
 
                 <div>

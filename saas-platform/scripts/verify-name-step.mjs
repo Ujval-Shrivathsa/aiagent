@@ -20,6 +20,7 @@ import {
   hasThanksClosing,
   looksLikeAnswerToSiteQuestion,
   PDF_SITE_QUESTION_KN,
+  PDF_NAME_QUESTION_KN,
   PDF_AREAS_LINE_KN,
   PDF_ACK_KN,
 } from '../src/voice/kannada-script.ts';
@@ -55,7 +56,7 @@ for (const said of CALLER_REPLIES) {
     silent++;
   }
   console.log(
-    `  ${advances ? 'ASKS THE NAME' : 'own path (decline/busy/etc)'}${short && !answers ? '  [short yes]' : ''}  <- "${said}"`,
+    `  ${advances ? 'GOES TO LOCATIONS (never asks a name)' : 'own path (decline/busy/etc)'}${short && !answers ? '  [short yes]' : ''}  <- "${said}"`,
   );
 }
 const longerYeses = CALLER_REPLIES.filter((s) => !/^(?:ಹೌದು|yes|sari|ok|haan)[\s.!?]*$/i.test(s));
@@ -108,7 +109,7 @@ console.log('=== STEP 1 — what she says on answer ===');
 console.log(getOutboundGreetingInstruction('kn').split('\n').filter((l) => l.includes('"')).join('\n'));
 console.log('site question asked here? ', getOutboundGreetingInstruction('kn').includes(PDF_SITE_QUESTION_KN));
 
-console.log('\n=== STEP 1B — caller says "yes": the name nudge ===');
+console.log('\n=== STEP 1B — caller says "yes": the locations nudge (no name) ===');
 console.log(line(OUTBOUND_NAME_QUESTION_NUDGE));
 console.log('re-asks the site question? ', OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_SITE_QUESTION_KN));
 
@@ -153,6 +154,7 @@ for (const [label, prompt] of [
     'exempt from the fresh-phrasing rule': /EXEMPT from the "say it in your own words/.test(flat),
     'never promises a later step': /NEVER promise to explain more later/.test(flat),
     'nothing around a fixed line': /On a fixed line there is NOTHING before it and NOTHING after it/.test(flat),
+    'says only the locations line after a yes': /After the caller's yes, say only the locations line/.test(flat) && !flat.includes(PDF_NAME_QUESTION_KN),
   };
   console.log(`  ${label}:`);
   for (const [k, v] of Object.entries(checks)) {

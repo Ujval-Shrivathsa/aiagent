@@ -28,11 +28,18 @@ export type SpeechRecoveryState = {
   armedAt: number | null;
   /** Escalation nudges sent for the current pending turn. */
   attempts: number;
+  /** 'barge' = the caller spoke over the agent and is owed an answer, not a repeat-ask. */
+  priority: 'normal' | 'barge';
 };
 
 export type RecoveryConfig = {
   /** Wait this long for a transcript / AI reply before the first nudge. */
   transcriptGraceMs: number;
+  /**
+   * After the caller interrupts the agent, answer sooner than a normal turn.
+   * Still long enough for them to finish the sentence.
+   */
+  bargeReplyGraceMs: number;
   /** Wait this long after a nudge before escalating again. */
   escalateGraceMs: number;
   /** Max escalation nudges per pending turn; afterwards the silence protocol owns the call. */
@@ -47,14 +54,16 @@ function num(env: string | undefined, fallback: number): number {
 
 export function loadRecoveryConfig(): RecoveryConfig {
   return {
-    transcriptGraceMs: num(process.env.VOICE_RECOVERY_GRACE_MS, 1100),
-    escalateGraceMs: num(process.env.VOICE_RECOVERY_ESCALATE_MS, 1600),
+    // Tight windows for a fast reply. Floor is 800ms so STT still has a real chance.
+    transcriptGraceMs: num(process.env.VOICE_RECOVERY_GRACE_MS, 800),
+    bargeReplyGraceMs: num(process.env.VOICE_BARGE_REPLY_GRACE_MS, 550),
+    escalateGraceMs: num(process.env.VOICE_RECOVERY_ESCALATE_MS, 1200),
     maxAttempts: num(process.env.VOICE_RECOVERY_MAX_ATTEMPTS, 2),
   };
 }
 
 export function createSpeechRecoveryState(): SpeechRecoveryState {
-  return { stage: 'idle', armedAt: null, attempts: 0 };
+  return { stage: 'idle', armedAt: null, attempts: 0, priority: 'normal' };
 }
 
 /** Customer speech confirmed ended → wait briefly for STT. */
@@ -62,7 +71,18 @@ export function armSpeechRecovery(
   state: SpeechRecoveryState,
   now: number,
 ): SpeechRecoveryState {
-  return { stage: 'grace', armedAt: now, attempts: 0 };
+  return { stage: 'grace', armedAt: now, attempts: 0, priority: 'normal' };
+}
+
+/**
+ * The caller talked over the agent and has now stopped. Skip the
+ * "please repeat" step and answer what they said, within about a second.
+ */
+export function armBargeReplyRecovery(
+  state: SpeechRecoveryState,
+  now: number,
+): SpeechRecoveryState {
+  return { stage: 'answerGrace', armedAt: now, attempts: 0, priority: 'barge' };
 }
 
 /** A customer transcript arrived — now wait for the AI's reply audio. */
@@ -71,7 +91,10 @@ export function resolveSpeechRecoveryWithTranscript(
   now: number,
 ): SpeechRecoveryState {
   if (state.stage === 'idle') return state;
-  return { stage: 'answerGrace', armedAt: now, attempts: 0 };
+  if (state.priority === 'barge') {
+    return { ...state, stage: 'answerGrace' };
+  }
+  return { stage: 'answerGrace', armedAt: now, attempts: 0, priority: 'normal' };
 }
 
 /** AI audio reached the caller — turn fully resolved. */
@@ -79,7 +102,7 @@ export function resolveSpeechRecoveryWithAiAudio(
   state: SpeechRecoveryState,
 ): SpeechRecoveryState {
   if (state.stage === 'idle') return state;
-  return { stage: 'idle', armedAt: null, attempts: 0 };
+  return { stage: 'idle', armedAt: null, attempts: 0, priority: 'normal' };
 }
 
 /** Caller started speaking again — pending recovery is obsolete. */
@@ -87,14 +110,14 @@ export function disarmSpeechRecovery(
   state: SpeechRecoveryState,
 ): SpeechRecoveryState {
   if (state.stage === 'idle') return state;
-  return { stage: 'idle', armedAt: null, attempts: 0 };
+  return { stage: 'idle', armedAt: null, attempts: 0, priority: 'normal' };
 }
 
 /** Call ended / hard mute — stop everything. */
 export function cancelSpeechRecovery(
   state: SpeechRecoveryState,
 ): SpeechRecoveryState {
-  return { stage: 'idle', armedAt: null, attempts: 0 };
+  return { stage: 'idle', armedAt: null, attempts: 0, priority: 'normal' };
 }
 
 export type RecoveryDecision =
@@ -121,9 +144,13 @@ export function tickSpeechRecovery(
     return { action: 'none', state };
   }
   const armedFor = now - state.armedAt;
-  const waitingFor = state.stage === 'grace' || state.stage === 'answerGrace'
-    ? cfg.transcriptGraceMs
-    : cfg.escalateGraceMs;
+  const bargeGrace = cfg.bargeReplyGraceMs ?? cfg.transcriptGraceMs;
+  const waitingFor =
+    state.priority === 'barge' && (state.stage === 'grace' || state.stage === 'answerGrace')
+      ? bargeGrace
+      : state.stage === 'grace' || state.stage === 'answerGrace'
+        ? cfg.transcriptGraceMs
+        : cfg.escalateGraceMs;
   if (armedFor < waitingFor) {
     return { action: 'none', state };
   }
@@ -132,7 +159,7 @@ export function tickSpeechRecovery(
     // quiet-caller reprompt cycle owns the line until the caller speaks.
     return {
       action: 'resume_after_exhausted',
-      state: { stage: 'idle', armedAt: null, attempts: 0 },
+      state: { stage: 'idle', armedAt: null, attempts: 0, priority: 'normal' },
     };
   }
   const attempt = state.attempts + 1;
@@ -140,7 +167,7 @@ export function tickSpeechRecovery(
     state.stage === 'grace' ? 'ask_repeat' : 'reply_now';
   return {
     action: 'send_recovery_nudge',
-    state: { stage: 'nudge', armedAt: now, attempts: attempt },
+    state: { stage: 'nudge', armedAt: now, attempts: attempt, priority: state.priority },
     attempt,
     kind,
   };
@@ -152,17 +179,11 @@ export function speechRecoveryNudgeText(
   attempt: number,
 ): string {
   if (kind === 'ask_repeat') {
-    if (attempt <= 1) {
-      return (
-        'SYSTEM (internal, private): The caller just finished speaking but their words were not recognized. ' +
-        'Reply NOW with warm Kanglish speech: acknowledge briefly (ಹಾ ಸರ್) and ask them to kindly repeat that once — ' +
-        'then LISTEN. One short sentence only. Do not repeat any earlier line. Do not stay silent. Do not end the call.'
-      );
-    }
     return (
-      'SYSTEM (internal, private): Still no recognized words from the caller. Do NOT wait. ' +
-      'Say ONE short line now — e.g. "ಸರಿ ಸರ್, ಒಂದು ಸಲ ಮತ್ತೆ ಹೇಳಿ" (kindly say that once more) — then LISTEN. ' +
-      'Do not repeat anything you already said. Do not end the call.'
+      'SYSTEM (internal, private): Their words were not recognized. Do NOT ask them to repeat. ' +
+      'Do NOT speak. Stay silent and LISTEN. Do not end the call. Attempt ' +
+      String(attempt) +
+      '.'
     );
   }
   if (attempt <= 1) {

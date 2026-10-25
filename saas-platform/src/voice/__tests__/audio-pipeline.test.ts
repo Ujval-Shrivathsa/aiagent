@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { loadAudioPipelineConfig } from '../audio-pipeline-config';
 import { buildLiveSpeechConfig, describeSpeechConfig, loadLiveSpeechSettings } from '../tts/speech-config';
 import { detectScriptLanguage, isPrimarilyKannada } from '../language/script-detect';
-import { evaluateBargeIn, evaluateLocalSpeech } from '../turn-policy';
+import { evaluateBargeIn, evaluateLocalSpeech, greetingListenOpen, mayClearCallerAudio, reconnectDuringOpening } from '../turn-policy';
 import {
   analyzePcmFrame,
   classifyFrame,
@@ -80,26 +80,43 @@ describe('tts speech-config', () => {
   it('defaults to native auto-detect (no languageCode) for Kannada-first calls', () => {
     const prevLang = process.env.VOICE_TTS_LANGUAGE_CODE;
     const prevVoice = process.env.VOICE_TTS_VOICE_NAME;
+    const prevVoiceEn = process.env.VOICE_TTS_VOICE_NAME_EN;
     delete process.env.VOICE_TTS_LANGUAGE_CODE;
     delete process.env.VOICE_TTS_VOICE_NAME;
+    delete process.env.VOICE_TTS_VOICE_NAME_EN;
     try {
       const settings = loadLiveSpeechSettings();
       // Kannada is NOT a documented Live locale, so no languageCode is sent.
       assert.equal(settings.languageCode, null);
-      assert.equal(settings.voiceName, 'Kore');
+      assert.equal(settings.voiceName, 'Achernar');
+      assert.equal(settings.voiceNameEn, 'Despina');
       const cfg = buildLiveSpeechConfig(settings);
       assert.equal(cfg.languageCode, undefined, 'no languageCode key is sent');
       assert.equal('languageCode' in cfg, false);
-      assert.deepEqual(
+      assert.equal(
         (cfg.voiceConfig as any).prebuiltVoiceConfig.voiceName,
-        'Kore'
+        'Achernar'
       );
+      assert.equal(
+        (buildLiveSpeechConfig(settings, 'en-IN').voiceConfig as any).prebuiltVoiceConfig.voiceName,
+        'Achernar',
+        'en-IN'
+      );
+      for (const lang of ['hi-IN', 'mr-IN']) {
+        assert.equal(
+          (buildLiveSpeechConfig(settings, lang).voiceConfig as any).prebuiltVoiceConfig.voiceName,
+          'Despina',
+          lang
+        );
+      }
       assert.match(describeSpeechConfig(settings), /auto/);
     } finally {
       if (prevLang === undefined) delete process.env.VOICE_TTS_LANGUAGE_CODE;
       else process.env.VOICE_TTS_LANGUAGE_CODE = prevLang;
       if (prevVoice === undefined) delete process.env.VOICE_TTS_VOICE_NAME;
       else process.env.VOICE_TTS_VOICE_NAME = prevVoice;
+      if (prevVoiceEn === undefined) delete process.env.VOICE_TTS_VOICE_NAME_EN;
+      else process.env.VOICE_TTS_VOICE_NAME_EN = prevVoiceEn;
     }
   });
 
@@ -170,6 +187,67 @@ describe('turn-policy', () => {
     assert.equal(tooSoon.action, 'none');
     const fire = evaluateBargeIn({ ...base, now: 1300, bargeInStartedAt: 1000 });
     assert.equal(fire.action, 'fire');
+  });
+
+  it('keeps the opening greeting uninterruptible until playback ends', () => {
+    const base = {
+      isOutbound: true,
+      turnComplete: true,
+      audioHeard: true,
+      now: 5_000,
+      playbackEndsAt: 8_000,
+      holdStartedAt: 1_000,
+      holdCapMs: 20_000,
+    };
+    assert.equal(greetingListenOpen(base), false, 'audio still in the phone buffer');
+    assert.equal(greetingListenOpen({ ...base, now: 8_000 }), true, 'playback just finished');
+    assert.equal(
+      greetingListenOpen({ ...base, now: 30_000, playbackEndsAt: 31_000 }),
+      false,
+      'a long greeting still playing is not opened by the cap',
+    );
+    assert.equal(
+      greetingListenOpen({ ...base, audioHeard: false, turnComplete: false, now: 22_000, playbackEndsAt: 0 }),
+      true,
+      'a greeting that never arrives must not deafen the call',
+    );
+    assert.equal(
+      greetingListenOpen({ ...base, isOutbound: false, now: 5_000 }),
+      true,
+      'inbound calls are unchanged',
+    );
+    // After the greeting, the same loud speech barges in as before.
+    const after = evaluateBargeIn({
+      now: 9_000,
+      aiPlaybackEndsAt: 12_000,
+      rms: 2000,
+      bargeInRms: 1400,
+      gateOpen: true,
+      requireGateOpen: true,
+      bargeInStartedAt: 8_800,
+      minHoldMs: 150,
+    });
+    assert.equal(after.action, 'fire');
+  });
+
+  it('does not clear opening audio unless the transcript is a name question', () => {
+    assert.equal(
+      mayClearCallerAudio({ openingFinished: false, transcriptIsNameQuestion: false }),
+      false,
+    );
+    assert.equal(
+      mayClearCallerAudio({ openingFinished: false, transcriptIsNameQuestion: true }),
+      true,
+    );
+    assert.equal(
+      mayClearCallerAudio({ openingFinished: true, transcriptIsNameQuestion: false }),
+      true,
+    );
+  });
+
+  it('hangs up a reconnect that happens before the opening finishes', () => {
+    assert.equal(reconnectDuringOpening(false), 'hangup');
+    assert.equal(reconnectDuringOpening(true), 'resume');
   });
 
   it('does not end a turn on a brief pause under the silence window', () => {

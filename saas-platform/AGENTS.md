@@ -60,19 +60,20 @@
   - The agent now automatically detects and switches to the user's language (Hindi, Kannada, Telugu, Tamil, etc.) immediately without asking.
 - **Improved Portal UI**: Continuous refinements to the dashboard for a more premium, Awwwards-inspired aesthetic.
  - **Bulk Delete**: Ability to select and delete multiple leads at once.
-- **Unnamed Outbound Flow**: If a customer says "Yes" on an unnamed call, the AI agent will politely ask for their name before proceeding.
+- **Unnamed Outbound Flow**: If a customer says "Yes", the AI agent says the locations line. It never asks for the caller's name.
 - **Simplified Navigation**: Extra pages (leads, campaigns, settings) have been removed, leaving only the essential Overview and Confirmed Leads tabs.
 - **Mobile Responsive**: Fully functional across desktop and mobile devices.
 
 ## Best Practices & Constraints (What NOT To Do)
 
-- **[STRICT CONSTRAINT] Generic Names**: NEVER use "Customer", "Contact", or "Lead" in AI greetings. If a name is missing, the agent uses the unnamed flow automatically.
+- **[STRICT CONSTRAINT] No name request**: The agent never asks for, waits for, or addresses the caller by a name. Never use "Customer", "Contact", or "Lead" in AI greetings.
 - **No Sentiment Tracking**: DO NOT add sentiment analysis back; it has been explicitly removed.
 - **No Live Summary Updates**: DO NOT update the `summary` field in the database during the call with turn-by-turn metadata. Wait until the call ends to save the final professional summary.
 - **No Repetitive Greetings**: DO NOT repeat the greeting if the user has already started speaking.
 - **No Google Calendar**: The agent does NOT schedule meetings in Google Calendar. All "scheduled" meetings are tracked internally in the portal's calendar widget.
-- **Functionality Stability**: DO NOT change the existing conversation flow of Priya (Alliance Square plot sales) unless explicitly requested. The new features (tracking, recording) are layered on top.
+- **Functionality Stability**: DO NOT change the existing conversation flow of Priya (Alliance Square plot sales) unless explicitly requested. The new features (tracking, recording) are layered on top. **Changed once, by explicit owner request (13 Oct 2026):** a TWO-ITEM NEEDS CHECKLIST (purpose, preferred area) is now asked before the close, as step 3B of the pinned flow. The pinned lines themselves are unchanged and must stay unchanged.
 - **Data Persistence**: NEVER skip updating the database for call status or summaries. These are essential for the "Live Stream" feature in the dashboard.
+- **Needs Checklist Fields**: `Lead.needPurpose` and `Lead.needLocality` hold what the caller told the agent they need. They are written ONCE at the end of the call, in the same update as the summary — never per answer, and never mid-call. The dashboard shows both on the lead so the sales employee does not re-ask.
 - **Tool Usage**: ALWAYS call the `endCall` tool immediately if a customer says "No" or shows no interest to save costs and respect their time.
 - **Language Consistency**: NEVER respond in English if the user has switched to another language. Stick to the user's preferred language.
 - **SQLite Concurrency**: Avoid high-frequency database writes (under 500ms) to prevent SQLite from locking up. Always use the retry logic implemented in the API routes.

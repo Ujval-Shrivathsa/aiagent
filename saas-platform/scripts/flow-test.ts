@@ -409,20 +409,15 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
-    // The opening asks the site question, so the order is: yes → name →
-    // projects, addressed by name and the right honorific.
-    name: 'name step → asks the name, then tells the projects addressing them by name',
+    name: 'a yes goes to the locations and never asks for a name',
     turns: [
       { caller: 'ಹೌದು ಸರ್', nudge: OUTBOUND_NAME_QUESTION_NUDGE, label: 'yes to the opening' },
-      { caller: 'Ravi', nudge: buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN), label: 'gives name' },
+      { caller: 'Ravi', nudge: buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN), label: 'volunteers a name' },
     ],
     check: (r) => {
-      if (!/ಹೆಸರು/.test(r.said)) return 'never asked for the name';
-      if (!/ರಾಸ್ತೆ|ಪ್ರದೇಶ|ಸೈಟ್/.test(r.said)) return 'never told them the projects after the name';
-      if (!/ಆಸಕ್ತಿ/.test(r.said)) return 'never asked the interest question';
-      // Kannada TTS transliterates "Ravi" rather than pronouncing it, so match the
-      // honorific it produced with the name ("Ravi ಸರ್" → "ರವಿ ಸರ್").
-      if (!/ರವಿ|Ravi/i.test(r.said)) return 'never addressed them by name';
+      if (/ಹೆಸರು|your name/i.test(r.said)) return 'asked for a name';
+      if (/ರವಿ|Ravi/i.test(r.said)) return 'addressed them by name';
+      if (!/ಸೈಟ್/.test(r.said)) return 'never told them the locations';
       return null;
     },
   },

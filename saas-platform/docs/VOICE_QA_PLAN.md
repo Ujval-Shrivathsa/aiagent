@@ -192,11 +192,12 @@ baseline to argue with once real numbers exist, not as a specification.
 | Whether the hangup actually executed | same endpoint → `aleg.count` |
 | Which build answered the call | same endpoint → `build` (must read `hangup-status/7`) |
 | Static wiring of the guarantees | `npx tsx scripts/verify-late-reply.mjs` (23 checks, exits non-zero) |
-| The name step, the silence ladder and the one thank-you | `npx tsx scripts/verify-name-step.mjs`, `npx tsx scripts/verify-silence-thanks.mjs` — both print a readable trace **and** exit non-zero on a wrong trace |
+| The no-name rule, the silence ladder and the thank-you close | `npx tsx scripts/verify-name-step.mjs`, `npx tsx scripts/verify-silence-thanks.mjs` — both print a readable trace **and** exit non-zero on a wrong trace. The name-step check must fail if a name question is spoken. |
 | The naturalness layer, wired as the engine wires it | `npx tsx scripts/verify-naturalness.mjs` (37 checks) |
 | Which assertion protects which scenario | `npx tsx scripts/verify-scenarios.mjs` (13 checks — validates `SCENARIO_REGRESSION.md` against the test files, and fails if the document drifts) |
 | That the scenario gate itself can fail | `npx tsx scripts/verify-scenarios-selftest.mjs` (7 corruptions; each must be caught by name, not merely by a non-zero exit) |
-| Mechanism-level behaviour | `npm test` (279 tests, 50 suites) |
+| Mechanism-level behaviour | `npm test` (325 tests, 59 suites) |
+| The needs checklist, wired as the engine wires it | `node scripts/verify-needs-checklist.mjs` (41 checks) — asserts the two questions are asked BEFORE the pinned close, that an open question is never put twice and never closed over, that the answers cost exactly ONE database write, and that every pinned line is unchanged |
 | Which of the caller's own words survive a dropped session | `npx tsx scripts/verify-naturalness.mjs` §8 (9 wiring checks) + `call-memory.test.ts` (16 tests) |
 | Every difference from a human salesperson, and whether each claim is real | `npx tsx scripts/verify-human-gap.mjs` (27 checks) — resolves all 57 evidence literals in `HUMAN_VS_HUMAN_GAP_AUDIT.md`, and fails if a plan item is missing, a severity or category count drifts, the headline exceeds `conversation + 10`, or a `yes` verdict coexists with a score of 90+ |
 | That the gap gate itself can fail | `npx tsx scripts/verify-human-gap-selftest.mjs` (12 corruptions, each caught **by name**) |

@@ -51,10 +51,7 @@
  *   set — do not "improve" it by translating from English.
  */
 
-import {
-  hasThanksClosing,
-  nameWithHonorific,
-} from './kannada-script';
+import { hasThanksClosing } from './kannada-script';
 
 /** Longest acknowledgement we will ever speak, in whitespace-separated words. */
 export const ACK_MAX_WORDS = 3;
@@ -216,23 +213,114 @@ export function chooseAcknowledgement(args: {
 }
 
 /**
- * Attach the caller's name (with the right honorific) to an acknowledgement.
- *
- * OWNER RULE: the acknowledgement CARRIES THE NAME, and a title exists only
- * for a captured name. With no name there is NO honorific — the old
- * "fall back to a bare ಸರ್" behaviour is what put ಸರ್ in her mouth before she
- * had ever heard the caller's name.
- *
- * This is the owner's decision D4: the acknowledgement is
- * not a greeting, and it is not allowed to become a sentence.
+ * The acknowledgement is the beat alone. A name is never attached, and this
+ * call never asks for one.
  */
 export function acknowledgementWithName(
   base: string,
-  name: string | null | undefined,
+  _name: string | null | undefined,
   _honorific?: string,
 ): string {
-  const who = nameWithHonorific(name);
-  return who ? `${base} ${who}` : base;
+  return base;
+}
+
+/* ------------------------------------------------------------------ *
+ * LISTENING BEATS — the human backchannel
+ * ------------------------------------------------------------------ *
+ * WHY THIS IS A SEPARATE SET
+ *
+ * `ACK_VARIANTS_KN` is the beat that CARRIES THE CALLER'S NAME in the projects
+ * turn, and it is capped at six phrases because that turn is the one every
+ * caller hears. A listening beat is a different job: it is the small sound a
+ * person makes to show they are still there and still interested — "ಹಾ", a
+ * quiet "ಹೂಂ", a doubled "ಸರಿ ಸರಿ". It is what stops a caller who has just
+ * answered a question from hearing a machine that waited in complete silence
+ * and then spoke.
+ *
+ * It is kept out of `ACK_VARIANTS_KN` so that adding the human texture does not
+ * change, or silently enlarge, the named acknowledgement the owner decided on
+ * (D4) — and so a listening beat can never be handed to the projects turn by
+ * accident.
+ *
+ * HARD INVARIANTS — identical to the acknowledgement set, and for the same
+ * reason:
+ *   - at most three words: it is a beat, not a sentence;
+ *   - NEVER a thanks-style close, because ಧನ್ಯವಾದ is the engine's end-of-call
+ *     trigger (`hasThanksClosing`) and a beat would hang the caller up;
+ *   - never an honourific: ಸರ್ / ಮಾಮ್ exist only after a captured name;
+ *   - one per calling turn, at the START of a real line, never a turn by
+ *     itself and never before or after a pinned line. This is the same rule the
+ *     NO_ECHO_RULES prompt already states for "ಹಾ / ಸರಿ / ಹೌದು": a short
+ *     acknowledgment is allowed ONLY as the opening word or two of the next
+ *     real line.
+ *
+ * KANNADA CAVEAT: spoken Mysuru forms, still awaiting native-speaker sign-off —
+ * same convention as `ACK_VARIANTS_KN` and docs/KANNADA_STYLE_GUIDE.md.
+ */
+export type ListeningBeat = {
+  /** Spoken Kannada. Lower-case, no trailing punctuation, no honourific. */
+  text: string;
+  /** Why a real Mysuru speaker makes this sound, kept for the audit. */
+  note: string;
+  validatedByNativeSpeaker: boolean;
+};
+
+/**
+ * THREE, not five: a backchannel repeated too often is its own machine tell —
+ * the caller notices the same "ಹಾ" at the same beat every time. Three is the
+ * smallest set that still varies between two consecutive calls.
+ */
+export const LISTENING_BEATS_KN: readonly ListeningBeat[] = [
+  {
+    text: 'ಹಾ',
+    note: "The smallest listening sound there is — 'mm, go on'. Made with the mouth closed, so it never competes with the caller's own next words.",
+    validatedByNativeSpeaker: false,
+  },
+  {
+    text: 'ಹೂಂ',
+    note: "Mysuru 'mm-hm', used while someone else is still talking. Distinct from ಹಾ in mouth shape, so two calls do not open with the same sound.",
+    validatedByNativeSpeaker: false,
+  },
+  {
+    text: 'ಸರಿ ಸರಿ',
+    note: "The doubled 'okay okay' a saleswoman says to move the caller along. Two words, still not a sentence.",
+    validatedByNativeSpeaker: false,
+  },
+];
+
+/** Same safety gate as the acknowledgement set: short, and never a close. */
+export function isSafeListeningBeat(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (hasThanksClosing(t)) return false;
+  if (t.split(/\s+/).length > ACK_MAX_WORDS) return false;
+  // An honourific can only appear after a captured name, and a beat is spoken
+  // before we know anything about the caller more often than not.
+  if (/ಸರ್|ಮಾಮ್/.test(t)) return false;
+  return true;
+}
+
+/**
+ * Choose ONE listening beat for this call, deterministically — same contract as
+ * `chooseAcknowledgement`: `variantIndex` is a stable per-call counter, never a
+ * random number, so a live call stays reproducible and a test can assert the
+ * exact word. Phrases already used on this call are skipped first, so the
+ * caller never hears the same backchannel twice in one conversation.
+ */
+export function chooseListeningBeat(args: {
+  /** Stable per-call counter, e.g. how many beats have already been used. */
+  variantIndex?: number;
+  /** Beats already spoken on this call. */
+  avoid?: readonly string[];
+  /** Rollback: send nothing at all and let the model answer plainly. */
+  disabled?: boolean;
+} = {}): string {
+  const { variantIndex = 0, avoid = [], disabled = false } = args;
+  if (disabled) return '';
+  const avoided = new Set(avoid.map(squash));
+  const unused = LISTENING_BEATS_KN.filter((b) => !avoided.has(squash(b.text)));
+  const pool = unused.length ? unused : LISTENING_BEATS_KN;
+  return pool[Math.abs(variantIndex) % pool.length].text;
 }
 
 /* ------------------------------------------------------------------ *

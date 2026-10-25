@@ -41,14 +41,14 @@
  * Pure helpers — unit-tested without a live call. Wired from logic.ts.
  */
 
-/** How many caller utterances to carry into a fresh session. */
+import { looksLikeSpokenNameQuestion } from './kannada-script';
 export const RECALL_MAX_UTTERANCES = 4;
 
 /** Per-utterance cap. Long enough for a real answer, short enough to stay cheap. */
 export const RECALL_MAX_CHARS_PER_LINE = 160;
 
 /** The step the call has reached. Mirrors the runtime state block's own words. */
-export type CallStep = 'opening' | 'name' | 'projects' | 'closing' | 'ended';
+export type CallStep = 'opening' | 'locations' | 'projects' | 'closing' | 'ended';
 
 export type CallMemory = {
   /** Caller utterances, oldest first. Most recent last. */
@@ -124,10 +124,10 @@ export function rememberCallerLine(memory: CallMemory, text: string): CallMemory
   return { ...memory, callerLines };
 }
 
-/** Remember the agent's own last spoken line, so it is never said twice. */
+/** Remember the agent's own last spoken line, so it is never said twice. A name question is never stored, so a restarted session cannot be told to say it. */
 export function rememberAgentLine(memory: CallMemory, text: string): CallMemory {
   const line = normalizeCallerLine(text);
-  if (!line) return memory;
+  if (!line || looksLikeSpokenNameQuestion(line)) return memory;
   return { ...memory, lastAgentLine: line };
 }
 
@@ -155,8 +155,8 @@ export function setKnownCaller(
 
 const STEP_LABEL: Record<CallStep, string> = {
   opening: 'the opening question has been asked; no answer needed from you yet',
-  name: 'the caller has answered the opening and has been asked for their name',
-  projects: 'the name step is finished and the localities have been given',
+  locations: 'the caller has answered the opening; the next spoken line is the locations',
+  projects: 'the localities have been given',
   closing: 'the call has reached the closing step',
   ended: 'the call is over',
 };
@@ -178,10 +178,6 @@ export function buildRecallContext(memory: CallMemory): string {
     `Flow position: ${STEP_LABEL[memory.step]}.`,
   ];
 
-  if (memory.callerName) {
-    const who = memory.honorific ? `${memory.callerName} ${memory.honorific}` : memory.callerName;
-    lines.push(`You already know the caller as: ${who}. Use it; never ask for the name again.`);
-  }
   if (memory.language) {
     lines.push(`The conversation is in: ${memory.language}. Do not announce or change it.`);
   }
@@ -197,6 +193,9 @@ export function buildRecallContext(memory: CallMemory): string {
     'Never ask again for anything listed above, never re-say your last line, and never say that you lost track, ' +
       'that your system restarted, or that you need them to repeat something already answered. Simply carry on ' +
       'from the flow position above, in the same calm tone, with audio.',
+  );
+  lines.push(
+    'After the caller\'s yes, say only the locations line. Say only the line given. Say nothing else.',
   );
 
   return lines.join('\n');

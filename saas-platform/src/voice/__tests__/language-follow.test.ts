@@ -128,5 +128,8 @@ describe('language-follow — defaults and switching', () => {
     assert.equal(ttsLanguageFor('mr'), 'mr-IN');
     assert.equal(ttsLanguageFor('hi'), 'hi-IN');
     assert.match(languageFollowSystemPrompt('mr'), /Marathi/);
+    assert.match(languageFollowSystemPrompt('en'), /Indian English/);
+    assert.match(languageFollowSystemPrompt('en'), /never Kannada retroflex/);
+    assert.match(languageFollowSystemPrompt('kn'), /Mysuru Kannada/);
   });
 });

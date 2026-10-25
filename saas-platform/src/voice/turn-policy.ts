@@ -19,6 +19,52 @@ export type BargeInDecision =
   | { action: 'fire'; startedAt: null }
   | { action: 'reset'; startedAt: null };
 
+/**
+ * Outbound opening only. Listening and barge-in stay closed until the greeting
+ * turn has been generated AND its audio has finished playing on the phone.
+ * A hold that never produces audio opens after `holdCapMs`, but a greeting
+ * that is still playing is never opened early.
+ */
+export function greetingListenOpen(input: {
+  isOutbound: boolean;
+  turnComplete: boolean;
+  audioHeard: boolean;
+  now: number;
+  playbackEndsAt: number;
+  holdStartedAt: number;
+  holdCapMs: number;
+}): boolean {
+  if (!input.isOutbound) return true;
+  const stillPlaying = input.playbackEndsAt > input.now;
+  if (input.audioHeard && stillPlaying) return false;
+  if (
+    input.holdStartedAt > 0 &&
+    input.now - input.holdStartedAt >= input.holdCapMs &&
+    !stillPlaying
+  ) {
+    return true;
+  }
+  if (!input.audioHeard || !input.turnComplete) return false;
+  return input.now >= input.playbackEndsAt;
+}
+
+/**
+ * Opening playback must not be cleared. The one exception is a turn the
+ * name-question detector already matched — that cut stays as it is.
+ */
+export function mayClearCallerAudio(input: {
+  openingFinished: boolean;
+  transcriptIsNameQuestion: boolean;
+}): boolean {
+  if (input.openingFinished) return true;
+  return input.transcriptIsNameQuestion;
+}
+
+/** A reconnect before the opening has finished ends the call. It does not resume or replay. */
+export function reconnectDuringOpening(openingFinished: boolean): 'hangup' | 'resume' {
+  return openingFinished ? 'resume' : 'hangup';
+}
+
 export function evaluateBargeIn(input: BargeInInput): BargeInDecision {
   const candidate =
     input.now < input.aiPlaybackEndsAt &&

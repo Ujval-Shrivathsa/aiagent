@@ -82,7 +82,7 @@ Every `Evidence` cell is checked by `scripts/verify-human-gap.mjs`.
 | G07 | B | A simple "yes" gets an immediate reply; a real question gets a beat | Nothing in the pipeline varies latency with the content of the turn | The timing carries no attentiveness at all | Medium | "She answers the same way no matter what I say." | `src/voice/call-telemetry.ts::export function createCallTelemetry` | Same as G06 — one measurement, then one deliberate change. |
 | G08 | B | Yields the floor in ~100–200 ms on a real interruption | Barge-in arms after a 150 ms hold of speech-class frames, then clears playback | Close to human. Not a defect. Listed for completeness | Low | Interruption mostly feels right | `src/voice/audio-pipeline-config.ts::bargeInMinMs: num(process.env.VOICE_BARGE_IN_MIN_MS, 150)` | Nothing. This one is working. |
 | G09 | B | Waits out a thinking pause — silence mid-sentence is not the end of a turn | End of turn is committed after 250 ms of quiet; the recovery ladder then waits 1 100 ms for words | A human pause to think is read as a finished turn, then as a possible failure | High | A caller who pauses mid-thought gets "kindly say that again" instead of patience | `src/voice/audio-pipeline-config.ts::vadSilenceMs: silenceMs(process.env.VOICE_VAD_SILENCE_MS, 250)` | Raise the end-of-turn quiet for the caller's first reply after a question only. See P05. |
-| G10 | B | Would never ask "are you still there?" five seconds after a question | Availability check fires at 5 s, again at 10 s, goodbye at 15 s, call ends | Five seconds is a fast answer, not an emergency | High | A caller who is thinking, or finding their glasses, is asked if they are still on the line — twice — and then hung up on | `src/voice/kannada-script.ts::export const SILENCE_CHECK_AFTER_MS = 5_000;` | Owner decision on the ladder. Even at 8 s it would read as impatience. See P06. |
+| G10 | B | Would never ask "are you still there?" five seconds after a question | Availability check fires once at 5 s, busy goodbye at 10 s, call ends | Five seconds is a fast answer, not an emergency | High | A caller who is thinking, or finding their glasses, is asked if they are still on the line — once — and then hung up on | `src/voice/kannada-script.ts::export const SILENCE_CHECK_AFTER_MS = 5_000;` | Owner decision on the ladder. Even at 8 s it would read as impatience. See P06. |
 | G11 | C | Speaks idiomatic spoken Kannada, judged by ear, never by rule | Every phrase is unaudited — no native speaker has approved any of them | The largest single unknown in the project | Critical | A caller either hears their language or hears a translation. If it is a translation, they know in one sentence | `src/voice/conversation-naturalness.ts::validatedByNativeSpeaker: false` | Native review. Nothing in code can substitute. See P07. |
 | G12 | C | Never uses a written verb form in speech | The prompt lists the correct spoken forms and bans the written ones, but the model still chooses each form freely | A rule in a prompt is a strong hint, not a guarantee | High | One `ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ` in the middle of a call is louder than ten correct sentences | `src/voice/kannada-script.ts::Never: ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ, ವಾಸಿಸುತ್ತೀರಾ, ತಿಳಿದುಕೊಳ್ಳಬೇಕು` | Add an output-side detector for the written forms and re-ask the turn. See P08. |
 | G13 | C | Speaks Kannada because that is their language | Kannada is sent to the TTS with **no** language code (the Live API silently ignores `kn-IN`), so the model self-detects | The model, not the config, decides what Kannada sounds like | Medium | Kannada whose accent and phonemes are the model's guess | `src/voice/language/language-follow.ts::kn: null,` | Re-test `kn-IN` when the Live API adds Kannada; until then nothing. |
@@ -93,7 +93,7 @@ Every `Evidence` cell is checked by `scripts/verify-human-gap.mjs`.
 | G18 | D | **Proves** comprehension — repeats the key word, asks about it, reflects it | Is **forbidden** to: "Never repeat the caller's own words back at them before you respond" and "if you are unsure what they said, assume you heard it and just answer" | The one behaviour that makes a caller feel heard is banned by the prompt | Critical | A buyer gives a specific answer — "Hunsur, my brother lives there" — gets "ಸರ್ತಿ", and hears nothing about Hunsur. That is the moment they know | `src/voice/kannada-script.ts::Never repeat the caller's own words back at them before you respond` | Distinguish *echoing the words* (correctly banned) from *referring to the content* (banned by accident). See P10 — this is the highest-value fix in the document. |
 | G19 | D | An acknowledgement carries information about what was heard | Every acknowledgement is capped at three words and is chosen to be reusable in any context | By construction, deleting the caller's previous sentence would not break it | High | The acknowledgement is audibly a beat, not a response | `src/voice/conversation-naturalness.ts::export const ACK_MAX_WORDS = 3;` | Add a second, content-bearing clause after the beat where the caller gave content. See P10. |
 | G20 | E | Holds the whole conversation in mind without effort | The model session holds it — until the socket drops. A reconnect builds a **fresh session with restored instructions and no dialogue history** | Across a reconnect the caller's own words were gone entirely | High | The caller tells her something, the line glitches, and she does not know it any more | `src/voice/logic.ts::RECONNECT IMPLEMENTATION — fresh session + restored state + resume line` | **Fixed this pass:** a bounded recall block is now injected into the fresh session. See P11. |
-| G21 | E | Uses the caller's name naturally later in the call | Captures the name, picks ಸರ್/ಮಾಮ್, persists it to the lead, and carries it into the acknowledgement | Working as intended | Low | Being called by name, correctly gendered | `src/voice/logic.ts::callMemory = setKnownCaller(callMemory, { name, honorific: outboundCallerHonorific });` | Nothing. |
+| G21 | E | Uses the caller's name naturally later in the call | The agent never asks for a name and never addresses the caller by one | Owner decision: no name step | Low | A name is never requested | `src/voice/kannada-script.ts::Never request the caller's name` | Do not add a name question. |
 | G22 | E | Knows what the company already knows about the caller — they enquired about Hunsur last month | The lead-name lookup was removed and no CRM context reaches the prompt | A salesperson with a CRM would open differently for a warm enquiry; Priya cannot tell a warm lead from a cold one | Medium | A warm caller gets the same cold-call opening as everyone else | `src/voice/logic.ts::Lead-name lookup removed` | Pass the lead's enquired locality/project into the runtime block. See P12. |
 | G23 | E | Does not press for something the caller has declined to give | Stores the refusal, skips the acknowledgement word, goes straight to the locations | Working as intended | Low | Declining to give a name is accepted without friction | `src/voice/__tests__/kannada-script.test.ts::a declined name still goes straight to the locations, with no reaction` | Nothing. |
 | G24 | F | Hears irritation and stops selling immediately | Irritation is recognised by pattern, and the directive is short and respectful | Right behaviour, narrow trigger | High | A caller who is annoyed in words Priya does not know gets the ordinary flow | `src/voice/conversation-naturalness.ts::const ANNOYED_RE =` | Broaden the trigger; treat any second refusal as irritation. See P13. |
@@ -103,13 +103,13 @@ Every `Evidence` cell is checked by `scripts/verify-human-gap.mjs`.
 | G28 | G | Adapts to how the caller talks — their formality, their mixing, their accent | Adapts only on an explicit request to change language | A human mirrors the register of the person they are talking to; Priya waits to be told | Medium | She sounds the same whether the caller is formal or casual | `src/voice/language/language-follow.ts::if (decision.reason !== 'explicit_request' || !decision.language) {` | Owner decision — the current rule is a deliberate fix for a real bug. Register (not language) could still adapt. See P14. |
 | G29 | G | Naturally says less when there is less to say | The tone directive is **appended to a nudge** and the model may ignore it. Nothing verifies the reply actually got shorter | The adaptation is advisory text, not a control | High | The "shorter reply" for a busy caller is often the usual reply | `src/voice/conversation-naturalness.ts::export function buildToneDirective` | Measure turn length against the directive on real calls; if ignored, cut the source material instead of asking the model to. See P15. |
 | G30 | G | Goes quiet and gives room when someone is unsure | Hesitant directive: one short line, no push, no repeat of the question | Working as intended, when hesitation is detected at all | Low | An unsure caller is not pressured | `src/voice/conversation-naturalness.ts::Give them room with one short line` | Nothing (the detection gap is G16). |
-| G31 | H | Qualifies: budget, timeline, purpose, who else decides — conversationally, woven in | Forbidden. Two questions for the entire call, by owner decision | The call is structurally a two-question script with a handoff. It cannot read as a sales conversation because it is not one | Critical | A buyer notices within two turns that this is an information-gathering call, not a sales conversation — the shape gives it away | `src/voice/kannada-script.ts::TWO QUESTIONS MAX on the whole call` | Owner decision. If the two-question limit stays, at minimum let her *sound* like she chose it. See P16. |
+| G31 | H | Qualifies: budget, timeline, purpose, who else decides — conversationally, woven in | Bounded: two pinned questions plus the two-item needs checklist (purpose, preferred area). Budget, timeline and decision-makers are still forbidden | The call is structurally a four-question script with a handoff. The needs checklist qualifies the lead, but the questions are still asked in sequence rather than woven in | Critical | A buyer notices within two turns that this is an information-gathering call, not a sales conversation — the shape gives it away | `src/voice/kannada-script.ts::AT MOST FOUR QUESTIONS on the whole call` | Partly addressed on 13 Oct 2026: the needs checklist now asks the purpose and the preferred area, so the call qualifies the lead before the handoff. Budget, timeline and who-else-decides are still forbidden, and the questions are still not conversationally woven in. See P16. |
 | G32 | H | Answers a price question with a range, a starting point, or an honest "it depends" | Refuses and hands off, always with the same line | A human gives partial information and keeps the conversation; a machine declines | High | "She won't tell me anything about price" — which reads as either a bot or a bad salesperson | `src/voice/kannada-script.ts::Never invent prices, sizes, approvals or any fact not in the script` | Business constraint. The fix is to supply *some* approved indicative content. See P17. |
 | G33 | H | Asks a different, smaller question when the first answer was ambiguous | May ask only the two permitted questions, ever | Cannot clarify without breaking the flow | Medium | An ambiguous answer produces a handoff instead of a second question | `src/voice/kannada-script.ts::no "shall I continue?"` | Fold the clarification into the flow rather than adding a question. See P16. |
 | G34 | H | Stops selling the moment the answer is no | The not-interested directive says "Stop selling. Close kindly and briefly, once, and end the call" | Working as intended — this one is genuinely good | Low | A decline is respected in one turn | `src/voice/conversation-naturalness.ts::Stop selling. Close kindly and briefly` | Nothing. |
 | G35 | H | When asked something they do not know, says "let me find out and come back to you" | An unanswerable question triggers the sales-team line, **one thank-you, and endCall in the same turn** — the call ends | A salesperson keeps the conversation; Priya terminates it | Critical | Ask "how did you get my number?" or "which company are you from?" and the call can end with a thank-you. Nothing exposes a script like being thanked and hung up on for asking a normal question | `src/voice/kannada-script.ts::Add ONE short thank-you. Then`<br>`src/voice/kannada-script.ts::IMMEDIATELY call endCall in the SAME turn — that is the end of this call` | Answer or deflect, then continue. Never close the call because a question was hard. See P18. |
 | G36 | I | If the line drops, says so: "sorry, I lost you for a second" | Forbidden from admitting anything of the kind — the recall block explicitly instructs her not to mention it | A human acknowledges the gap; Priya pretends it never happened | Medium | A caller who noticed the gap hears the pretence and knows | `src/voice/call-memory.ts::never say that you lost track` | Deliberate: admitting a system restart is worse. Leave it. |
-| G37 | I | If a garbled word is obvious from context, uses the context | If a name cannot be read, marks it declined and moves on without asking again | A human asks once more, gently, with a guess attached; Priya silently drops it and stops using a name | Medium | "She stopped using my name and never asked again — as if she gave up" | `src/voice/logic.ts::Could not read a name from` | One gentle retry with a guess, then move on. See P19. |
+| G37 | I | If a garbled word is obvious from context, uses the context | A volunteered name is not asked again and is not guessed | There is no name step | Low | A name is never requested | `src/voice/kannada-script.ts::Never request the caller's name` | Do not add a name retry. See P19. |
 | G38 | I | Distinguishes "I didn't catch that" from "I don't understand what you mean" | The ladder has exactly two kinds — ask for a repeat, or reply now. Both produce the same one generic request | A single generic repair tells the caller the system failed, not that a person missed a word | High | "Sorry, could you repeat that" for a mispronunciation, for a mumble, and for a hard question — the same sentence every time | `src/voice/speech-recovery.ts::ask them to kindly repeat that once` | Differentiated repair per cause. See P20. |
 | G39 | I | Checks a specific word when unsure: "Hunsur, is it?" | Explicitly banned: "NEVER ask them to confirm what they just said", plus a code-level suppressor for echo-confirm questions | A human closes a misunderstanding in four words; Priya is not allowed to | High | The one repair that would feel most human is the one she cannot make | `src/voice/kannada-script.ts::NEVER ask them to confirm what they just said` | Allow a *content* confirmation ("Hunsur, right?") while keeping the *meta* confirmation banned. See P20. |
 | G40 | I | Resumes a sentence after being interrupted, from where they were | On barge-in the playback is cleared and the model regenerates the turn from the flow state | The interrupted half-sentence is lost, not resumed | Medium | She starts the thought again from the top, or drops it entirely | `src/voice/logic.ts::Local barge-in — clearing AI playback` | Record how far the turn got and nudge "finish that thought". See P21. |
@@ -180,9 +180,8 @@ The engine has exactly two interpretations of silence, and both are wrong for a 
 1. **250 ms of quiet inside the caller's turn = the turn has ended.** A human's mid-sentence thinking
    pause routinely exceeds that. The caller's half-finished thought becomes a committed turn, then no
    transcript arrives, then the recovery ladder asks them to repeat.
-2. **5 s of quiet after a turn = the caller may have gone away.** A human waits much longer, and does
-   not use an identical sentence for it. The check line is deliberately repeated word-for-word at 10 s
-   (`SILENCE_CHECK_REPEAT_AFTER_MS`), and at 15 s the call is ended with a goodbye.
+2. **5 s of quiet after a turn = the caller may have gone away.** A human waits much longer. The check
+   line is asked once, and at 10 s the call ends with the busy goodbye.
 
 The second is bounded and safe — it can no longer hang up on someone who has just spoken (a late reply
 cancels the close). But the *first* is the one that hurts, because it fires during ordinary speech
@@ -309,7 +308,7 @@ explicit: `TWO QUESTIONS MAX on the whole call`, "There is NO sixth step", "Noth
 budget". The call is:
 
 ```
-opening question → name question → localities + one interest question → handoff + thank-you → hangup
+opening question → localities and one question → sales-manager close → hangup. There is no name question.
 ```
 
 That is a form with a human voice over it. Micro-transitions — the whole of §14 — are explicitly
@@ -320,6 +319,17 @@ So the honest answer to "does the caller feel the underlying questionnaire?" is 
 was written specifically to make it feel that way, for good reasons.** Each rule was added because a
 caller complained about the opposite failure. The system is now on the far side of that trade-off:
 perfectly on-script, and audibly not a conversation.
+
+**Update, 13 Oct 2026 — the needs checklist (owner request).** The call now asks two more questions
+before the close: what the caller needs the plot for (investment, or to build a home) and which area
+they want. This *adds* questionnaire structure deliberately, and it is worth being explicit about the
+trade: the sales employee no longer re-asks the two qualifying questions the caller just answered to a
+machine, and in exchange the call is one step further from a conversation. Three things keep it from
+becoming a form: the list is capped at two items and is stated as such in the prompt (`3B. THE TWO NEEDS
+QUESTIONS`); an item the caller has already answered — including while answering something else — is
+never asked (`absorbVolunteeredNeeds`); and an unanswered item never holds the call open, so a quiet
+caller is closed with a partial checklist rather than interviewed. G31 stays **Critical**: the questions
+are still asked in sequence and still are one-directional.
 
 ## 15. Script detection
 
@@ -622,7 +632,7 @@ Checked against every pinned line. Verdict per line, from the caller's side:
 | Line | Would a salesperson say this? | Comment |
 |---|---|---|
 | `PDF_OPENING_TURN1_KN` | Yes | Short, natural, one question |
-| `PDF_NAME_QUESTION_KN` | Yes | Plain and normal |
+| `PDF_NAME_QUESTION_KN` | No | Not spoken. There is no name step. |
 | `PDF_AREAS_LINE_KN` | Mostly | Four localities in one breath is a list, not speech. A salesperson names one or two and asks which area they know |
 | `PDF_INTEREST_QUESTION_KN` | Yes | Natural wording (`ಇದೆಯಾ`, not `ಇದೆಯೇ`) |
 | `PDF_HANDOFF_LINE_KN` | Yes | Standard handoff |
@@ -792,9 +802,9 @@ caller-visible impact per unit of risk. `Root cause` names the layer using §32'
 - **Expected impact:** High — removes one of the most human-detectable failure moments.
 
 ### P06 — The 5-second availability check
-- **Problem:** "Are you still there?" fires at 5 s and a goodbye at 15 s (§10).
+- **Problem:** "Are you still there?" fires at 5 s and a goodbye at 10 s (§10).
 - **Human behaviour:** Waits far longer, and never repeats the same sentence word for word.
-- **Current AI behaviour:** Check at 5 s, the identical check at 10 s, goodbye and hangup at 15 s.
+- **Current AI behaviour:** One check at 5 s, then the busy goodbye and hangup at 10 s. Never a second check.
 - **Why the AI differs:** The owner's complaint was an endless check loop; the ladder removed it and
   over-corrected the timing.
 - **Root cause:** state machine
@@ -978,17 +988,17 @@ caller-visible impact per unit of risk. `Root cause` names the layer using §32'
 - **How to measure improvement:** `VOICE_QA_PLAN.md` §2 row 19 with the named questions, and native Q13 (first moment of suspicion).
 - **Expected impact:** Critical. This is one of the most obvious script tells in the system.
 
-### P19 — A garbled name is silently dropped
-- **Problem:** If a name cannot be read, it is marked declined and never asked again (§37).
-- **Human behaviour:** Asks once more, gently, with a guess attached; then uses whatever they get.
-- **Current AI behaviour:** `outboundNameDeclined = true` and straight to the locations, with no second attempt.
-- **Why the AI differs:** A stall on the name step was a real complaint, so the retry was removed.
-- **Root cause:** code
-- **Implementation change:** When `extractCallerName` returns nothing but the utterance is not a refusal, issue one gentle retry with a candidate name offered as a guess; bound it to once per call.
-- **Prompt change:** Permit the guess form ("ಸರ್, ಹೆಸರು ಸ್ವಲ್ಪ ಸ್ಪಷ್ಟವಾಗಿ ಹೇಳ್ತೀರಾ?") and keep the ban on meta-confirmation.
-- **Test required:** Unit tests for the three branches: name found, name refused, name garbled-then-retried-once.
-- **How to measure improvement:** Name-capture rate on real calls with a deliberately mumbled test call.
-- **Expected impact:** Medium. Small, bounded, and removes a moment where she visibly gives up.
+### P19 — Do not ask for a name
+- **Problem:** An earlier flow asked for the caller's name. That question is forbidden.
+- **Human behaviour:** A salesperson may ask. This agent must not.
+- **Current AI behaviour:** A yes goes to the locations line. A spoken name question is cut.
+- **Why the AI differs:** The owner removed the name step.
+- **Root cause:** owner decision
+- **Implementation change:** Do not add a name question, a name retry, or a guessed name.
+- **Prompt change:** Do not ask for a name, and do not guess one. Continue the current script step.
+- **Test required:** The system instruction and every nudge must not request a name.
+- **How to measure improvement:** No name question in a call transcript.
+- **Expected impact:** The caller is never asked for their name.
 
 ### P20 — Repair is not differentiated
 - **Problem:** One generic repeat request covers mishearing, mumbling, ambiguity and a hard question; content confirmation is banned outright (§38, §39).

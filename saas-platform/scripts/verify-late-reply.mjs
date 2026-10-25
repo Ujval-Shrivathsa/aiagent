@@ -162,7 +162,7 @@ console.log('\n=== 3. TIMELINE: name step, then dead air (no agent audio) ===');
   const kn = await import(
     pathToFileURL(path.join(root, 'src/voice/kannada-script.ts')).href
   );
-  console.log('  t=0.0s  caller gives their name — nudge sent, speak guard armed');
+  console.log('  t=0.0s  caller answers — locations nudge sent, speak guard armed');
   const repairs = [];
   for (let attempt = 1; attempt <= Math.max(1, rec.maxAttempts); attempt += 1) {
     repairs.push({

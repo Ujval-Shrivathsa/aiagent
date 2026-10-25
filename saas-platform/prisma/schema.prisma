@@ -44,6 +44,14 @@ model Lead {
   summary     String?
   interested  Boolean?
   appointmentTime DateTime?
+  // The needs checklist — the two qualifying answers the agent collects on the
+  // call and hands to the sales employee. Nullable because a caller can decline,
+  // go quiet, or hang up before either question is answered.
+  //   needPurpose:  "investment" | "construction" | "Not stated"
+  //   needLocality: a canonical locality label ("Hunsur Road", "T. Narasipura
+  //                 Road", ...) or "Other area named"
+  needPurpose   String?
+  needLocality  String?
   transcription String?
   recordingUrl String?
   lastResponse String?

@@ -202,9 +202,19 @@ export function followLanguageFromUtterance(
 export function languageFollowSystemPrompt(lang: FollowLanguage): string {
   const name =
     lang === 'kn' ? 'Kannada' : lang === 'en' ? 'English' : lang === 'mr' ? 'Marathi' : 'Hindi';
+  const mouth =
+    lang === 'en'
+      ? ' Same soft polite woman, Indian English, natural word stress, never a translation, never Kannada retroflex sounds.'
+      : lang === 'kn'
+        ? ' Spoken Mysuru Kannada, soft and polite.'
+        : lang === 'hi'
+          ? ' Soft natural Hindi, polite, never a literal translation from Kannada.'
+          : '';
   return (
     `SYSTEM (internal): The caller has switched to ${name}. From your next turn onward speak ${name} — ` +
-    `natural and conversational, never literal translation. Keep the same script step and continue. ` +
+    `natural and conversational, never literal translation.${mouth} Keep the same script step and continue. ` +
+    `Say only the line for this step. Say nothing else. ` +
+    `On silence, stay quiet — never say "tell me once more" or ask them to repeat unless they asked first. ` +
     `Do not mention the language change.`
   );
 }

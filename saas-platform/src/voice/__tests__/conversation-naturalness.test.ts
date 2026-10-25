@@ -33,9 +33,7 @@ import {
   buildOutboundProjectsNudge,
   buildOutboundProjectsRetryNudge,
   hasThanksClosing,
-  HONORIFIC_MAAM_KN,
   HONORIFIC_SIR_KN,
-  nameWithHonorific,
 } from '../kannada-script';
 import {
   aggregateRecent,
@@ -175,17 +173,18 @@ describe('acknowledgement selection: deterministic, never the same twice', () =>
   });
 });
 
-describe('the acknowledgement carries the caller name', () => {
-  test('it addresses the caller with the right honorific', () => {
+describe('the acknowledgement never carries a name', () => {
+  test('a volunteered name is not spoken back', () => {
     const out = acknowledgementWithName('ಸರ್ತಿ', 'Ravi');
-    assert.match(out, /Ravi/);
-    assert.match(out, new RegExp(HONORIFIC_SIR_KN));
+    assert.equal(out, 'ಸರ್ತಿ');
+    assert.doesNotMatch(out, /Ravi/);
     assert.equal(hasThanksClosing(out), false);
   });
 
-  test('a Kannada feminine name gets ಮಾಮ್, not ಸರ್', () => {
+  test('a feminine name is not spoken back either', () => {
     const out = acknowledgementWithName('ಹೌದು', 'Lakshmi');
-    assert.ok(out.includes(HONORIFIC_MAAM_KN), `expected ಮಾಮ್ in "${out}"`);
+    assert.equal(out, 'ಹೌದು');
+    assert.doesNotMatch(out, /Lakshmi/);
   });
 
   test('with no name there is NO honorific and never an empty beat (owner rule)', () => {
@@ -198,9 +197,9 @@ describe('the acknowledgement carries the caller name', () => {
     assert.equal(hasThanksClosing(out), false);
   });
 
-  test('the name-acknowledgement is still a beat, not a sentence', () => {
+  test('the acknowledgement stays a beat, not a sentence', () => {
     const words = acknowledgementWithName('ಸರ್ತಿ', 'Ravi').split(/\s+/).length;
-    assert.ok(words <= 3, `${words} words — the ack plus a name must stay short`);
+    assert.ok(words <= 3, `${words} words — the beat must stay short`);
   });
 });
 

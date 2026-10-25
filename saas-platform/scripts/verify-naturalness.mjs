@@ -136,12 +136,12 @@ console.log('\n=== 3. SAFETY: no phrase can ever end the call by accident ===');
   );
 }
 
-console.log('\n=== 4. The beat carries the name, with the right honorific ===');
+console.log('\n=== 4. The beat never carries a name ===');
 {
   const sir = nat.acknowledgementWithName('ಸರ್ತಿ', 'Ravi');
   const maam = nat.acknowledgementWithName('ಸರ್ತಿ', 'Lakshmi');
-  check('a male name gets ಸರ್', sir.endsWith(kn.HONORIFIC_SIR_KN), sir);
-  check('a female name gets ಮಾಮ್', maam.endsWith(kn.HONORIFIC_MAAM_KN), maam);
+  check('a male name is not spoken', sir === 'ಸರ್ತಿ' && !/Ravi/.test(sir), sir);
+  check('a female name is not spoken', maam === 'ಸರ್ತಿ' && !/Lakshmi/.test(maam), maam);
   check(
     'with no name the beat stays bare — NO honorific of any kind (owner rule)',
     (() => {
@@ -252,12 +252,12 @@ console.log('\n=== 8. A session restart does not lose what the caller already sa
   const recall = mem.buildRecallContext(m);
   check("the caller's own words survive the restart", recall.includes('ಹುಣಸೂರು'));
   check(
-    'the name is carried and never asked for again',
-    recall.includes('ರವಿ ಸರ್') && recall.includes('never ask for the name again'),
+    'a stored name is never put back into the prompt',
+    !recall.includes('ರವಿ') && !/ask for the name/i.test(recall),
   );
   check(
-    "the agent's own last line is carried so it cannot be said twice",
-    recall.includes('ನಿಮ್ಮ ಹೆಸರು ಏನು?'),
+    'a name question is not remembered as something to say again',
+    !recall.includes('ನಿಮ್ಮ ಹೆಸರು ಏನು?'),
   );
   check(
     'an internal directive can never be laundered into the conversation',

@@ -24,6 +24,35 @@ function isUsableVoiceUrl(url: string): boolean {
   return !host.startsWith('localhost') && !host.includes('ngrok') && !host.includes('127.0.0.1');
 }
 
+function isTransientDbError(err: unknown): boolean {
+  const e = err as { code?: string; message?: string };
+  const msg = e?.message || '';
+  return (
+    e?.code === 'P1001' ||
+    e?.code === 'P1008' ||
+    e?.code === 'P1017' ||
+    msg.includes("Can't reach database server") ||
+    msg.includes('Server has closed the connection') ||
+    msg.includes('busy') ||
+    msg.includes('locked')
+  );
+}
+
+async function withDbRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  let last: unknown;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      last = err;
+      if (!isTransientDbError(err) || attempt === 5) throw err;
+      console.warn(`[campaign/start] ${label} unreachable, retry ${attempt}/5`);
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+    }
+  }
+  throw last;
+}
+
 async function livePlivoPhoneTails(authId: string, authToken: string): Promise<string[]> {
   try {
     const res = await fetch(`https://api.plivo.com/v1/Account/${authId}/Call/?status=live&limit=20`, {
@@ -63,18 +92,20 @@ export async function POST(req: Request) {
       provider === 'plivo' && process.env.PLIVO_AUTH_ID && process.env.PLIVO_AUTH_TOKEN
         ? await livePlivoPhoneTails(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN)
         : [];
-    const released = await releaseCallingLeadsForRedial(campaignId, liveTails);
+    const released = await withDbRetry('release stuck leads', () =>
+      releaseCallingLeadsForRedial(campaignId, liveTails),
+    );
     if (released > 0) {
       callLog('CALL', `Released ${released} stuck calling lead(s) before dial`);
     }
 
-    const leads = await prisma.lead.findMany({
+    const leads = await withDbRetry('load dialable leads', () => prisma.lead.findMany({
       where: {
         campaignId,
         status: { notIn: [...SKIP_DIAL_STATUSES, 'scheduled visit'] },
       },
       orderBy: { createdAt: 'asc' },
-    });
+    }));
 
     if (leads.length === 0) {
       return NextResponse.json({
@@ -172,6 +203,9 @@ export async function POST(req: Request) {
     }, { status: called > 0 ? 200 : 502 });
   } catch (error: any) {
     console.error('[campaign/start]', error);
-    return NextResponse.json({ error: error.message || 'Failed to start campaign' }, { status: 500 });
+    const errorMessage = isTransientDbError(error)
+      ? 'Cannot reach the database. Confirm the Supabase project is running, then start the campaign again.'
+      : error.message || 'Failed to start campaign';
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }

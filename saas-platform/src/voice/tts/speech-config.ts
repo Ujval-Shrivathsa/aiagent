@@ -18,8 +18,8 @@
  * then follows the caller's language naturally instead of being pinned.
  *
  * Env:
- *   VOICE_TTS_VOICE_NAME=Kore|Despina|Vindemiatrix|...  (see voice-lab/)
- *   VOICE_TTS_VOICE_NAME_EN=...  (optional English voice; defaults to same)
+ *   VOICE_TTS_VOICE_NAME=Achernar  (Kannada and English. Google labels this voice Soft.)
+ *   VOICE_TTS_VOICE_NAME_EN=Despina (Hindi and Marathi only. English uses Achernar.)
  *   VOICE_TTS_LANGUAGE_CODE=auto|kn-IN|en-IN|mr-IN|hi-IN (auto = native)
  *   VOICE_AFFECTIVE_DIALOG=1     (UNSUPPORTED on this model — see note below)
  *   VOICE_LLM_TEMPERATURE=1.0    (wording variety without inventing facts)
@@ -66,10 +66,20 @@ function readFlag(name: string, fallback: boolean): boolean {
   return !/^(0|false|off|no|disabled)$/i.test(raw.trim());
 }
 
+/**
+ * Kannada and English: Achernar, the Live voice Google labels Soft.
+ * Hindi and Marathi stay on Despina.
+ */
+export const DEFAULT_LIVE_VOICE_NAME = 'Achernar';
+/** Hindi and Marathi keep Despina. English uses Achernar. */
+export const DEFAULT_OTHER_LANGUAGE_VOICE_NAME = 'Despina';
+
 export function loadLiveSpeechSettings(): LiveSpeechConfig {
-  const voiceName = (process.env.VOICE_TTS_VOICE_NAME || 'Kore').trim() || 'Kore';
+  const voiceName =
+    (process.env.VOICE_TTS_VOICE_NAME || DEFAULT_LIVE_VOICE_NAME).trim() || DEFAULT_LIVE_VOICE_NAME;
   const voiceNameEn =
-    (process.env.VOICE_TTS_VOICE_NAME_EN || voiceName).trim() || voiceName;
+    (process.env.VOICE_TTS_VOICE_NAME_EN || DEFAULT_OTHER_LANGUAGE_VOICE_NAME).trim() ||
+    DEFAULT_OTHER_LANGUAGE_VOICE_NAME;
   const languageCode = normalizeLiveLanguageCode(process.env.VOICE_TTS_LANGUAGE_CODE);
 
   const tempRaw = Number(process.env.VOICE_LLM_TEMPERATURE);
@@ -87,9 +97,10 @@ export function loadLiveSpeechSettings(): LiveSpeechConfig {
     affectiveDialog: readFlag('VOICE_AFFECTIVE_DIALOG', false),
     temperature,
     deliveryNotes:
-      'Warm, close-mic, unhurried phone delivery — shaped by the prompt, since the ' +
-      'Live API exposes no rate/pitch/SSML. Natural spoken Kannada, complete ' +
-      'sentences, real breaths, audible smile. Voice: see voice-lab/ for the A/B.',
+      'Kannada and English use Achernar (soft female). Hindi and Marathi stay on Despina. ' +
+      'The Live API exposes no rate/pitch/SSML and ignores kn-IN, so Kannada prosody is ' +
+      'the prompt: one human pace, warm intonation, retroflex ಳ and ಣ. ' +
+      'Voice: see scripts/voice-lab.ts.',
   };
 }
 
@@ -102,10 +113,11 @@ export function buildLiveSpeechConfig(
     languageOverride === undefined
       ? settings.languageCode
       : normalizeLiveLanguageCode(languageOverride);
-  const voice =
-    lang === 'en-IN' || lang === 'en-US' || lang === 'en'
-      ? settings.voiceNameEn
-      : settings.voiceName;
+  // null language is Kannada. English uses the same soft voice. Hindi and
+  // Marathi keep Despina.
+  const english =
+    lang === 'en-IN' || lang === 'en-US' || lang === 'en';
+  const voice = !lang || english ? settings.voiceName : settings.voiceNameEn;
   const speechConfig: Record<string, unknown> = {
     voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
   };

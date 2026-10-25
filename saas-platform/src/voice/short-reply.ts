@@ -3,8 +3,17 @@
  * not opening echo, not STT noise to ignore.
  */
 
-const OPENING_ECHO =
-  /this is (?:bhoomi|priya)|i am priya|alliance square|residential site in mys(?:ore|uru)|looking for a (?:residential )?(?:site|plot) in mys(?:ore|uru)|are you looking for a (?:residential )?(?:site|plot)|hi,? are you looking|hello,? are you looking|site (?:ನೋಡ್ತಿದೀರಾ|ನೋಡ್ತಿದ್ದೀರಾ)|ಸೈಟ್\s*ನೋಡ|ಅಲೈಯನ್ಸ್\s*ಸ್ಕ್ವೇರ್|ನಾನು\s*ಪ್ರಿಯಾ|ನೋಡ್ತಿದ್ದೀರಾ|ನೋಡ್ತಿದೀರಾ|ಮಾತಾಡ್ತಿದ್ದೀನಿ|ಮಾತಾಡ್ತಿದೀನಿ|enquiry ಮಾಡಿದ್ದೀರಲ್ಲ|ನಮಸ್ಕಾರ\s*ಸರ್/i;
+/**
+ * Only the AGENT's own opening / self-intro coming back through the mic.
+ * Must NEVER match a real customer answer ("yes I'm looking for a site in Hunsur")
+ * — that used to silence the caller after the greeting.
+ */
+const AGENT_OPENING_ECHO =
+  /(?:this is (?:bhoomi|priya)|i'?m priya(?:\s+from)?|i am priya(?:\s+from)?|hello,?\s*i'?m priya|ನಾನು\s*ಪ್ರಿಯಾ|ನಾನು\s*ಅಲಯನ್ಸ್|ನಾನು\s*ಭೂಮಿ|from alliance square(?:\s+properties)?[^.?!]{0,40}(?:looking|interested|ಮಾತಾಡ)|enquiry ಮಾಡಿದ್ದೀರಲ್ಲ|ಮಾತಾಡ್ತಿದ್ದೀನಿ|ಮಾತಾಡ್ತಿದೀನಿ)/i;
+
+/** Agent's site question echoed alone (no customer yes / interest wording). */
+const AGENT_SITE_QUESTION_ECHO =
+  /^(?:[\s,]*(?:hello|hi|ನಮಸ್ಕಾರ|ಹಲೋ)[\s,]*)?(?:are you looking for a (?:residential )?(?:site|plot) in mys|interested in buying a site in mys|ನಿಮಗೆ\s*ಮೈಸೂರಿನಲ್ಲಿ\s*ಸೈಟ್\s*(?:ನೋಡ|ನೊತಿ|ತಗೊಳ್ಳೋ)|ನೀವು\s*.{0,20}site\s*ನೋಡ್ತಿದ)/i;
 
 /** Roman + Kannada script short replies common on Mysuru calls. */
 const SHORT_AFFIRMATIVE =
@@ -12,11 +21,30 @@ const SHORT_AFFIRMATIVE =
 
 const STT_NOISE = /^[uhm.\s]+$/iu;
 
+/** Customer is answering the opening — never treat as echo. */
+function looksLikeCustomerSiteAnswer(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (/^\s*(yes|yeah|yep|yup|ya|haudu|houda|howdu|haan|han|ok|okay|sari|seri|ಹೌದು|ಹೌದ|ಸರಿ|ಓಕೆ|ಹಾ)\b/i.test(t)) {
+    return true;
+  }
+  if (/\b(looking for|interested in|i want|i need|searching for|after a (?:plot|site))\b/i.test(t)) {
+    return true;
+  }
+  if (/(ನೋಡುತ್ತಿದ್ದೇನೆ|ನೋಡ್ತಿದ್ದೀನಿ|ನೋಡ್ತಿದೀನಿ|ಆಸಕ್ತಿ|ಬೇಕು)/.test(t)) return true;
+  if (/(hunsur|narasipura|nanjangud|ಹುಣಸೂರು|ನರಸೀಪುರ|ನಂಜನಗೂಡ)/i.test(t)) return true;
+  return false;
+}
+
 export function looksLikeOpeningEcho(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return true;
   if (isShortAffirmativeReply(t)) return false;
-  return OPENING_ECHO.test(t);
+  if (looksLikeCustomerSiteAnswer(t)) return false;
+  if (AGENT_OPENING_ECHO.test(t)) return true;
+  // Pure agent question echo with no customer interest words.
+  if (AGENT_SITE_QUESTION_ECHO.test(t) && t.length <= 120) return true;
+  return false;
 }
 
 export function isShortAffirmativeReply(text: string): boolean {

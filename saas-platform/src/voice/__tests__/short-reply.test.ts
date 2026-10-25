@@ -20,6 +20,18 @@ describe('short-reply', () => {
     assert.equal(isCustomerTurnSignal('ನೀವು Mysuru ನಲ್ಲಿ site ನೋಡ್ತಿದ್ದೀರಾ?'), false);
   });
 
+  it('never treats a real customer answer as opening echo', () => {
+    for (const said of [
+      "Yes, I'm looking for a site in Hunsur",
+      'yes I am looking for a site in mysuru',
+      'ಹೌದು ಸೈಟ್ ನೋಡ್ತಿದ್ದೀನಿ',
+      'I want a plot in Narasipura',
+    ]) {
+      assert.equal(looksLikeOpeningEcho(said), false, said);
+      assert.equal(isCustomerTurnSignal(said), true, said);
+    }
+  });
+
   it('ignores empty noise', () => {
     assert.equal(isCustomerTurnSignal(''), false);
     assert.equal(isCustomerTurnSignal('uh'), false);

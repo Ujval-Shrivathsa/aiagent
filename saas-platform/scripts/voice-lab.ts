@@ -25,6 +25,7 @@ import {
   buildOutboundCallbackTimeNudge,
   buildOutboundCallbackOutsideWindowNudge,
 } from '../src/voice/kannada-script';
+import { buildNeedQuestionNudge } from '../src/voice/needs-checklist';
 
 const MODEL = 'gemini-3.1-flash-live-preview';
 const SAMPLE_RATE = 24000;
@@ -36,10 +37,11 @@ const OUT_DIR = path.resolve(process.cwd(), 'voice-lab');
  * current production baseline so the others have something to beat.
  */
 const DEFAULT_VOICES = [
-  'Despina', // ♀ Smooth    — "smooth and gentle female voice" (current default)
+  'Despina', // ♀ Smooth    — previous default, kept so a new Kannada voice has to beat it
+  'Achernar', // ♀ Soft      — the softest of the female set; added by the 13 Oct 2026 pass
   'Vindemiatrix', // ♀ Gentle    — "gentle and delicate female voice"
   'Aoede', // ♀ Breezy     — "relaxed and natural female voice"
-  'Sulafat', // ♀ Warm       — "warm and approachable female voice"
+  'Sulafat', // ♀ Warm       — current Kannada default ("warm and approachable female voice")
   'Callirrhoe', // ♀ Easy-going — "friendly and easy-going female voice"
   'Kore', // ♀ Firm       — the previous voice, kept for comparison
 ];
@@ -76,6 +78,26 @@ const LINES: { label: string; instruction: string; expect: string }[] = [
     label: '05-outside-window',
     instruction: buildOutboundCallbackOutsideWindowNudge(),
     expect: PDF_THANKS_CLOSE_KN.slice(0, 10),
+  },
+  // THE NEEDS CHECKLIST (step 3B). A voice that sounds warm on the opening but
+  // wooden on a two-option question is the wrong voice, so the audition has to
+  // include the questions a caller actually gets asked.
+  {
+    label: '06-needs-purpose',
+    instruction: buildNeedQuestionNudge('purpose', { acquired: 'Ravi' }),
+    expect: 'ಇನ್ವೆಸ್ಟ್',
+  },
+  {
+    label: '07-needs-locality',
+    instruction: buildNeedQuestionNudge('locality', { acquired: 'Ravi' }),
+    expect: 'ಸೈಟ್',
+  },
+  // The one permitted human beat, opening a real question — this is the render
+  // where a beat either lands as listening or sounds like a tic.
+  {
+    label: '08-needs-with-beat',
+    instruction: buildNeedQuestionNudge('locality', { acquired: null, ackWord: 'ಹೂಂ' }),
+    expect: 'ಸೈಟ್',
   },
 ];
 

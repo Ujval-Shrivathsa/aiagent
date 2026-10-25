@@ -74,9 +74,12 @@ describe('call-memory: the caller\'s own words survive the session restart', () 
 });
 
 describe('call-memory: what the agent already said, and what it already knows', () => {
-  it('records the agent\'s last spoken line so it is never said twice', () => {
-    const m = rememberAgentLine(createCallMemory(), 'ನಿಮ್ಮ ಹೆಸರು ಏನು?');
-    assert.match(buildRecallContext(m), /ನಿಮ್ಮ ಹೆಸರು ಏನು\?/);
+  it('records a real line and never stores a name question', () => {
+    const kept = rememberAgentLine(createCallMemory(), 'ನಮ್ಮಲ್ಲಿ ಹುಣಸೂರ್ ರಸ್ತೆ');
+    assert.match(String(kept.lastAgentLine), /ಹುಣಸೂರ್/);
+    const dropped = rememberAgentLine(createCallMemory(), 'ನಿಮ್ಮ ಹೆಸರು ಏನು?');
+    assert.equal(dropped.lastAgentLine, null);
+    assert.equal(buildRecallContext(dropped), '');
   });
 
   it('an empty or directive-shaped agent line is not remembered', () => {
@@ -86,11 +89,11 @@ describe('call-memory: what the agent already said, and what it already knows', 
     assert.equal(directive.lastAgentLine, null);
   });
 
-  it('names the caller and forbids asking for the name again', () => {
+  it('does not tell the restarted session to use or request a name', () => {
     const m = setKnownCaller(createCallMemory(), { name: 'ರವಿ', honorific: 'ಸರ್' });
     const text = buildRecallContext(m);
-    assert.match(text, /ರವಿ ಸರ್/);
-    assert.match(text, /never ask for the name again/);
+    assert.doesNotMatch(text, /ರವಿ/);
+    assert.doesNotMatch(text, /ask for the name/i);
   });
 
   it('agrees with the flow position the runtime block already encodes', () => {

@@ -4,6 +4,8 @@ import next from 'next';
 import { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
 import { setupGemini } from './src/voice/logic';
+import { clearOutboundOpeningInstructionCache } from './src/voice/opening-prewarm-cache';
+import { VOICE_BEHAVIOR_VERSION } from './src/voice/kannada-script';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true });
 dotenv.config({ path: path.resolve(process.cwd(), '../.env.local') });
@@ -16,6 +18,14 @@ const handle = app.getRequestHandler();
 const port = Number(process.env.PORT) || 3000;
 
 app.prepare().then(() => {
+  // Drop any in-memory opening prompts from a previous process so updated
+  // greeting / silence / name rules always win after restart or deploy.
+  const cleared = clearOutboundOpeningInstructionCache();
+  if (cleared > 0) {
+    console.log(`> Cleared ${cleared} stale outbound opening cache entr(y/ies)`);
+  }
+  console.log(`> Voice behavior version: ${VOICE_BEHAVIOR_VERSION}`);
+
   const server = createServer((req, res) => {
     handle(req, res);
   });
