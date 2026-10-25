@@ -884,10 +884,23 @@ let plivoCallUuid: string | null = null;
   /** True after the locations line's own turn has finished. Mid-line audio must not be dropped as a repeat. */
   let areasLineTurnSealed = false;
   const openingQuestionSpoken = (text: string) => /ನೋಡ.{0,16}ರಾ|looking for a site/i.test(text);
+  const openingTextReady = (text: string) => {
+    const s = text.replace(/[\s\u200c\u200d]/g, '');
+    return (
+      s.includes('ಪ್ರಿಯ') &&
+      s.includes('ಮೈಸೂರ') &&
+      /ಸ್ಕ್ವೇರ|ಸ್ಕ್ವಯರ|ಸ್ಕ್ವೆರ/.test(s) &&
+      openingQuestionSpoken(text)
+    );
+  };
+  const openingTextWrong = (text: string) =>
+    /ಗ್ರೂಪ್|ದಸರಾ|ಆಫರ್|ನಿವೇಶನ|group|offer/i.test(text) ||
+    (/[A-Za-z]{4,}/.test(text) && !/ಸ್ಕ್ವೇರ|ಸ್ಕ್ವಯರ|ಸ್ಕ್ವೆರ/.test(text));
   /** Opening audio is held until the question is in it, then played as one piece. */
   let openingHold: Buffer[] = [];
   let openingReleased = false;
   let openingContinueSent = false;
+  let openingRetrySent = false;
   let locationsHold: Buffer[] = [];
   let locationsReleased = false;
   let locationsRetrySent = false;
@@ -1970,8 +1983,30 @@ let plivoCallUuid: string | null = null;
       // while this buffer is waiting for the rest of the sentence.
       lastAiAudioAt = Date.now();
       clearOutboundStepAudioGuard();
-      if (openingQuestionSpoken(outboundAiAccum) || openingHold.reduce((n, b) => n + b.length, 0) >= 8 * 8000) {
+      if (openingTextWrong(outboundAiAccum)) {
+        openingHold = [];
+        if (!openingRetrySent && geminiSession) {
+          openingRetrySent = true;
+          try {
+            geminiSession.sendRealtimeInput({ text: PDF_OPENING_KN });
+          } catch { /* the next try is the same line */ }
+        }
+        return;
+      }
+      if (openingTextReady(outboundAiAccum)) {
         releaseOpeningAudio();
+        return;
+      }
+      if (openingHold.reduce((n, b) => n + b.length, 0) >= 8 * 8000) {
+        if (!openingRetrySent && geminiSession) {
+          openingHold = [];
+          openingRetrySent = true;
+          try {
+            geminiSession.sendRealtimeInput({ text: PDF_OPENING_KN });
+          } catch { /* the caller still gets one more try */ }
+        } else {
+          releaseOpeningAudio();
+        }
       }
       return;
     }
@@ -3431,12 +3466,19 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                       // A turn can end after "ನಾನು ಪ್ರಿಯಾ" and the question is
                       // still unsaid. Sealing there dropped the rest and made
                       // her start the first line again.
-                      if (greetingAudioHeard && (openingQuestionAudioPlayed || openingQuestionSpoken(outboundAiAccum))) {
+                      if (greetingAudioHeard && (openingQuestionAudioPlayed || openingTextReady(outboundAiAccum))) {
                         releaseOpeningAudio();
                         openingTurnComplete = true;
                         openingTurnSealed = true;
                         latLog('OPENING_TURN_COMPLETE');
                         releaseGreetingListening();
+                      } else if (openingTextWrong(outboundAiAccum) && !openingRetrySent && geminiSession) {
+                        openingHold = [];
+                        openingRetrySent = true;
+                        console.log('[CALL] Opening was not the Square line — saying it once');
+                        try {
+                          geminiSession.sendRealtimeInput({ text: PDF_OPENING_KN });
+                        } catch { /* the caller still has the line */ }
                       } else {
                         console.log('[CALL] Opening stopped before the question — still speaking it');
                         if (!openingContinueSent && geminiSession) {
@@ -3560,8 +3602,20 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                     const spoken = String(outTx).trim();
                     if (spoken && !outboundTranscriptFolded) {
                       outboundAiAccum = `${outboundAiAccum} ${spoken}`.trim();
-                      if (!openingReleased && !openingGreetingTurnFinished && openingQuestionSpoken(outboundAiAccum)) {
+                      if (!openingReleased && !openingGreetingTurnFinished && openingTextReady(outboundAiAccum)) {
                         releaseOpeningAudio();
+                      } else if (
+                        !openingReleased &&
+                        !openingGreetingTurnFinished &&
+                        openingTextWrong(outboundAiAccum)
+                      ) {
+                        openingHold = [];
+                        if (!openingRetrySent && geminiSession) {
+                          openingRetrySent = true;
+                          try {
+                            geminiSession.sendRealtimeInput({ text: PDF_OPENING_KN });
+                          } catch { /* the audio path still holds the retry */ }
+                        }
                       }
                     }
                     const asksForName =
