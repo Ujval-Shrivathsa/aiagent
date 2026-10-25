@@ -1963,6 +1963,10 @@ let plivoCallUuid: string | null = null;
     capture?.onAiMuLaw(muLawBuffer);
     if (isOutboundCall && !openingGreetingTurnFinished && !openingReleased) {
       openingHold.push(muLawBuffer);
+      // Held audio is still audio. The dead-air guard must not re-send the line
+      // while this buffer is waiting for the rest of the sentence.
+      lastAiAudioAt = Date.now();
+      clearOutboundStepAudioGuard();
       if (openingQuestionSpoken(outboundAiAccum) || openingHold.reduce((n, b) => n + b.length, 0) >= 8 * 8000) {
         releaseOpeningAudio();
       }
@@ -1970,6 +1974,8 @@ let plivoCallUuid: string | null = null;
     }
     if (isOutboundCall && !locationsReleased && (playScriptAudioNow || locationsHold.length > 0)) {
       locationsHold.push(muLawBuffer);
+      lastAiAudioAt = Date.now();
+      clearOutboundStepAudioGuard();
       if (locationsTextBad(outboundAiAccum)) {
         locationsHold = [];
         return;
