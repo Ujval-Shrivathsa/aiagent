@@ -888,6 +888,21 @@ let plivoCallUuid: string | null = null;
   let openingHold: Buffer[] = [];
   let openingReleased = false;
   let openingContinueSent = false;
+  let locationsHold: Buffer[] = [];
+  let locationsReleased = false;
+  let locationsRetrySent = false;
+  const locationsTextBad = (text: string) =>
+    /ರಿಂಗ್|ಜೆ\s*ಪಿ|ಜೆಪಿ|ಇಲವಾಲ|ring road|jp nagar/i.test(text);
+  const locationsTextReady = (text: string) => {
+    const s = text.replace(/[\s\u200c\u200d]/g, '');
+    return (
+      s.includes('ಹುಣಸೂರ') &&
+      s.includes('ನರಸೀಪುರ') &&
+      s.includes('ನಂಜನಗೂಡ') &&
+      /ಓಕೆ|ಯಾವುದಾದರೂ/.test(s) &&
+      !locationsTextBad(text)
+    );
+  };
   let openingQuestionSent = false;
   let fullCallGuideInjected = false;
   let geminiSessionOpened = false;
@@ -1953,6 +1968,15 @@ let plivoCallUuid: string | null = null;
       }
       return;
     }
+    if (isOutboundCall && !locationsReleased && (playScriptAudioNow || locationsHold.length > 0)) {
+      locationsHold.push(muLawBuffer);
+      if (locationsTextBad(outboundAiAccum)) {
+        locationsHold = [];
+        return;
+      }
+      if (locationsTextReady(outboundAiAccum)) releaseLocationsAudio();
+      return;
+    }
     aiPlaybackEndsAt = Math.max(Date.now(), aiPlaybackEndsAt) + muLawBuffer.length / 8;
     lastAiAudioAt = Date.now();
     // The step is on the line — its dead-air guard has nothing left to repair.
@@ -1999,6 +2023,28 @@ let plivoCallUuid: string | null = null;
     aiPlaybackEndsAt = Date.now() + buf.length / 8;
     lastAiAudioAt = Date.now();
     console.log(`[CALL] Opening played as one line (${(buf.length / 8000).toFixed(1)}s)`);
+    for (let i = 0; i < buf.length; i += 1600) {
+      const payload = buf.subarray(i, Math.min(buf.length, i + 1600)).toString('base64');
+      if (audioSink === 'plivo') {
+        ws.send(JSON.stringify({
+          event: 'playAudio',
+          media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload },
+        }));
+      } else {
+        ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload } }));
+      }
+    }
+  };
+
+  const releaseLocationsAudio = () => {
+    if (locationsReleased) return;
+    const buf = locationsHold.length ? Buffer.concat(locationsHold) : Buffer.alloc(0);
+    locationsHold = [];
+    if (!buf.length) return;
+    locationsReleased = true;
+    aiPlaybackEndsAt = Math.max(Date.now(), aiPlaybackEndsAt) + buf.length / 8;
+    lastAiAudioAt = Date.now();
+    console.log(`[CALL] Locations played as one line (${(buf.length / 8000).toFixed(1)}s)`);
     for (let i = 0; i < buf.length; i += 1600) {
       const payload = buf.subarray(i, Math.min(buf.length, i + 1600)).toString('base64');
       if (audioSink === 'plivo') {
@@ -3491,11 +3537,22 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                         looksLikeSpokenNameQuestion(outboundAiAccum));
                     if (asksForName) {
                       discardNameQuestionAudio();
-                    } else if (spoken && !outboundAreasLineDelivered && looksLikeAreasLine(outboundAiAccum)) {
+                    } else if (spoken && !outboundAreasLineDelivered && locationsTextBad(outboundAiAccum)) {
+                      locationsHold = [];
+                      console.log('[CALL] Wrong places in the locations line — saying only the three roads');
+                      if (!locationsRetrySent && geminiSession) {
+                        locationsRetrySent = true;
+                        playScriptAudioNow = true;
+                        try {
+                          geminiSession.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
+                        } catch { /* the next turn still has to be the three roads */ }
+                      }
+                    } else if (spoken && !outboundAreasLineDelivered && locationsTextReady(outboundAiAccum)) {
                       outboundAreasLineDelivered = true;
                       outboundAreasLineHeard = true;
                       callMemory = setCallStep(callMemory, 'projects');
                       console.log('[GUARD] Areas line delivered — next yes goes to sales-team transfer');
+                      releaseLocationsAudio();
                       releaseNameGateFromTranscript();
                     } else if (spoken) {
                       releaseNameGateFromTranscript();
