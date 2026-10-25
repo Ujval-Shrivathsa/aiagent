@@ -69,7 +69,7 @@ describe('customer scenarios — stranger on the phone', () => {
     assert.equal(promptLeaksNameQuestionExample(g), false);
     assert.equal(promptLeaksNameQuestionExample(buildOutboundSystemInstruction('1 Jan 2026')), false);
     assert.equal(promptLeaksNameQuestionExample(buildOutboundFastConnectInstruction('1 Jan 2026')), false);
-    assert.match(VOICE_BEHAVIOR_VERSION, /name-free-prompt/);
+    assert.match(VOICE_BEHAVIOR_VERSION, /answer-questions/);
   });
 
   it('plain yes goes to locations — never a name ask', () => {
@@ -90,7 +90,7 @@ describe('customer scenarios — stranger on the phone', () => {
     assert.equal(detectOutboundLocality(said), 'hunsur');
     assert.equal(nextAfterOpening(said), 'location_fact');
     const nudge = buildOutboundLocationInterestNudge('hunsur');
-    assert.match(nudge, /Say only the line given/);
+    assert.match(nudge, /Speak the location fact/);
     assert.doesNotMatch(nudge, /ಹೆಸರು/);
   });
 

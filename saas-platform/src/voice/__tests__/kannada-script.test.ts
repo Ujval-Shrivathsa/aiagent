@@ -42,6 +42,7 @@ import {
   buildOutboundProjectsRetryNudge,
   buildOutboundNameDeclinedNudge,
   PDF_AREAS_LINE_KN,
+  PDF_AREAS_LINE_EN,
   PDF_INTEREST_QUESTION_KN,
   PDF_HANDOFF_LINE_KN,
   PDF_THANKS_CLOSE_KN,
@@ -84,6 +85,19 @@ import {
   squashScriptText,
   OUTBOUND_THANKS_FALLBACK_NUDGE,
   looksLikeRepeatRequest,
+  looksLikeRepeatLastLine,
+  routeCallerQuestion,
+  sideQuestionsMoveToClose,
+  sideAnswerFor,
+  SIDE_ANSWER_WHO_EN,
+  SIDE_ANSWER_WHO_KN,
+  SIDE_ANSWER_WHY_EN,
+  SIDE_ANSWER_WHY_KN,
+  SIDE_ANSWER_DEFER_EN,
+  SIDE_ANSWER_DEFER_KN,
+  SIDE_ANSWER_ROBOT_EN,
+  SIDE_ANSWER_ROBOT_KN,
+  buildRepeatLastLineTurn,
   looksLikeNameClarification,
   looksLikeCustomerBusy,
   looksLikeThanksOnlyLine,
@@ -115,7 +129,7 @@ describe('v5 script — spoken lines', () => {
     );
     assert.match(PDF_OPENING_HI, /प्रिया/);
     assert.match(PDF_OPENING_HI, /मैसूरु|मैसूर/);
-    assert.match(VOICE_BEHAVIOR_VERSION, /name-free-prompt/);
+    assert.match(VOICE_BEHAVIOR_VERSION, /answer-questions/);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /tell me once more/i);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /एक बार फिर/);
     assert.equal(looksLikeSpokenNameQuestion('आपका नाम क्या है?'), true);
@@ -141,6 +155,8 @@ describe('v5 script — spoken lines', () => {
     assert.match(greeting, /say NOTHING before it/);
     assert.match(greeting, /being programmed/);
     assert.match(greeting, /TURN-TAKING/);
+    assert.match(greeting, /Speak this line aloud now, exactly as written, then stop and listen/);
+    assert.doesNotMatch(greeting, /Say nothing else/);
     assert.match(greeting, /Then stop and listen/);
     assert.ok(
       greeting.includes(PDF_OPENING_EN),
@@ -307,6 +323,8 @@ describe('v5 script — system instructions', () => {
 describe('v5 script — detectors', () => {
   it('areas / handoff / not-interested lines (exact or pattern)', () => {
     assert.equal(looksLikeAreasLine(PDF_AREAS_LINE_KN), true);
+    assert.equal(looksLikeAreasLine(PDF_AREAS_LINE_EN), true);
+    assert.equal(nameQuestionAudioGate(PDF_AREAS_LINE_EN), 'release');
     assert.equal(looksLikeAreasLine('We have sites near Hunsur Road, T. Narasipura Road.'), true);
     assert.equal(looksLikeAreasLine('Yes I am looking for a site.'), false);
     assert.equal(looksLikeHandoffLine(PDF_HANDOFF_LINE_KN), true);
@@ -949,7 +967,7 @@ describe('caller name and honorific', () => {
     const hunsur = buildOutboundLocationInterestNudge('hunsur');
     assert.ok(hunsur.includes(LOCATION_FACT_HUNSUR_KN));
     assert.ok(hunsur.includes(PDF_INTERESTED_CLOSE_KN));
-    assert.match(hunsur, /Say only the line given/);
+    assert.match(hunsur, /Speak the location fact/);
     assert.doesNotMatch(hunsur, /ಹೆಸರು/);
     assert.match(hunsur, /endCall/);
   });
@@ -1127,7 +1145,10 @@ describe('get to the point — no filler reaction, and the name step always spea
       assert.match(flat, /"like that"/);
       assert.match(flat, /"ohh"/);
       assert.match(flat, /ಅಹಾ/);
-      assert.match(flat, /a SIGNAL, not something to react to/i);
+      assert.doesNotMatch(flat, /a SIGNAL, not something to react to/i);
+      assert.doesNotMatch(flat, /Say nothing else/i);
+      assert.doesNotMatch(flat, /Say only the line given/i);
+      assert.match(flat, /one short sentence/);
     }
   });
 
@@ -1496,5 +1517,61 @@ describe('no dead air after the name, and a late reply is always answered', () =
     assert.ok(!/addressing them as "ಸರ್"/.test(n));
     assert.ok(n.includes(PDF_AREAS_LINE_KN));
     assert.equal(n.includes('undefined'), false);
+  });
+});
+
+describe('repeat detector and side-question routing', () => {
+  it('hears a request to say the last line again', () => {
+    for (const said of ['repeat', 'again', 'what', 'what?', 'sorry', 'pardon', 'ಇನ್ನೊಮ್ಮೆ ಹೇಳಿ', 'ಮತ್ತೆ ಹೇಳಿ']) {
+      assert.equal(looksLikeRepeatLastLine(said), true, said);
+      assert.equal(routeCallerQuestion(said), 'repeat', said);
+    }
+    assert.equal(looksLikeRepeatLastLine("what's the price"), false);
+    assert.equal(routeCallerQuestion("what's the price"), 'defer');
+    assert.equal(routeCallerQuestion('yes'), null);
+    assert.equal(routeCallerQuestion('Hunsur'), null);
+  });
+
+  it('routes the caller questions and keeps answers free of a thank-you', () => {
+    assert.equal(routeCallerQuestion('who is this'), 'who');
+    assert.equal(routeCallerQuestion('who are you'), 'who');
+    assert.equal(routeCallerQuestion('why are you calling'), 'why');
+    assert.equal(routeCallerQuestion('where is the site'), 'where');
+    assert.equal(routeCallerQuestion('are you a robot'), 'robot');
+    assert.equal(routeCallerQuestion('are you an AI'), 'robot');
+    assert.equal(routeCallerQuestion('call me later'), 'callback');
+    assert.equal(routeCallerQuestion('not now'), 'callback');
+    assert.equal(routeCallerQuestion('what is the price'), 'defer');
+    assert.equal(routeCallerQuestion('ನೀವು ಯಾರು'), 'who');
+    assert.equal(sideAnswerFor('who', 'who is this'), SIDE_ANSWER_WHO_EN);
+    assert.equal(sideAnswerFor('who', 'ನೀವು ಯಾರು'), SIDE_ANSWER_WHO_KN);
+    assert.equal(sideAnswerFor('why', 'why are you calling'), SIDE_ANSWER_WHY_EN);
+    assert.equal(sideAnswerFor('why', 'ಯಾಕೆ ಕರೆ ಮಾಡ್ದೀರಾ'), SIDE_ANSWER_WHY_KN);
+    assert.equal(sideAnswerFor('defer', 'how much'), SIDE_ANSWER_DEFER_EN);
+    assert.equal(sideAnswerFor('defer', 'ಬೆಲೆ ಎಷ್ಟು'), SIDE_ANSWER_DEFER_KN);
+    assert.equal(sideAnswerFor('robot', 'are you a robot'), SIDE_ANSWER_ROBOT_EN);
+    assert.equal(sideAnswerFor('robot', 'ನೀವು ರೋಬೋಟ್ ಆ?'), SIDE_ANSWER_ROBOT_KN);
+    assert.match(sideAnswerFor('where', 'where is the site'), /Hunsur Road/);
+    assert.match(sideAnswerFor('where', 'where is the Hunsur site'), /ಹುಣಸೂರು|Hunsur Road/);
+    for (const line of [
+      SIDE_ANSWER_WHO_EN,
+      SIDE_ANSWER_WHO_KN,
+      SIDE_ANSWER_WHY_EN,
+      SIDE_ANSWER_WHY_KN,
+      SIDE_ANSWER_DEFER_EN,
+      SIDE_ANSWER_DEFER_KN,
+      SIDE_ANSWER_ROBOT_EN,
+      SIDE_ANSWER_ROBOT_KN,
+    ]) {
+      assert.equal(hasThanksClosing(line), false, line);
+      assert.doesNotMatch(line, /ಧನ್ಯವಾದ|thank/i);
+    }
+    assert.equal(sideQuestionsMoveToClose(0), false);
+    assert.equal(sideQuestionsMoveToClose(1), false);
+    assert.equal(sideQuestionsMoveToClose(2), true);
+    const replay = buildRepeatLastLineTurn(PDF_OPENING_EN);
+    assert.match(replay, /a little slower/);
+    assert.ok(replay.includes(PDF_OPENING_EN));
+    assert.doesNotMatch(replay, /\bname\b/i);
   });
 });

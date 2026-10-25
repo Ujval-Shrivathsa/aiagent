@@ -21,6 +21,12 @@ import {
   CALLBACK_OUTSIDE_WINDOW_LINE_KN,
   OUTBOUND_NO_REPEAT_NUDGE,
   looksLikeRepeatRequest,
+  looksLikeRepeatLastLine,
+  routeCallerQuestion,
+  sideQuestionsMoveToClose,
+  buildRepeatLastLineTurn,
+  buildSideAnswerTurn,
+  buildCallbackLaterTurn,
   looksLikeNameClarification,
   looksLikeThanksOnlyLine,
   looksLikeClosingGoodbye,
@@ -857,6 +863,10 @@ let plivoCallUuid: string | null = null;
   let greetingAudioHeard = false;
   let deferredContextScheduled = false;
   let greetingRetrySent = false;
+  let greetingSentAt = 0;
+  /** The question she is on. A repeat resends this; a side answer returns to it. */
+  let lastPinnedSpokenLine = PDF_OPENING_EN;
+  let sideQuestionCount = 0;
   let openingGreetingTurnFinished = false;
   /** Model finished generating the opening. Playback may still be running. */
   let openingTurnComplete = false;
@@ -864,6 +874,8 @@ let plivoCallUuid: string | null = null;
   let greetingListenTimer: ReturnType<typeof setTimeout> | null = null;
   /** Safety only: a greeting that never arrives must not leave the caller unheard. */
   const GREETING_LISTEN_HOLD_CAP_MS = 20_000;
+  const GREETING_AUDIO_RETRY_MS = 3_000;
+  const GREETING_AUDIO_GIVE_UP_MS = 6_000;
   let runtimeInstructionsInjected = false;
   let greetingSent = false;
   let openingQuestionSent = false;
@@ -959,6 +971,61 @@ let plivoCallUuid: string | null = null;
       });
     } else {
       geminiSession.sendRealtimeInput({ text });
+    }
+  };
+
+  const replayLastPinnedLine = () => {
+    if (outboundRepeatAskSent || endCallInvoked || outboundHardMuteAfterClose) return;
+    outboundRepeatAskSent = true;
+    const line = lastPinnedSpokenLine || PDF_OPENING_EN;
+    console.log('[CALL] repeat last line');
+    try {
+      sendClientTextTurn(buildRepeatLastLineTurn(line));
+    } catch (e: any) {
+      outboundRepeatAskSent = false;
+      console.error('[CALL] repeat send failed:', e?.message || e);
+    }
+  };
+
+  const answerSideQuestion = (route: 'who' | 'why' | 'where' | 'defer' | 'robot', callerText: string) => {
+    if (endCallInvoked || outboundHardMuteAfterClose) return;
+    if (sideQuestionsMoveToClose(sideQuestionCount)) {
+      console.log('[CALL] side-question cap — moving to the close');
+      try {
+        sendClientTextTurn(buildOutboundHandoffTransferNudge());
+      } catch (e: any) {
+        console.error('[CALL] close after side-question cap failed:', e?.message || e);
+      }
+      return;
+    }
+    sideQuestionCount += 1;
+    console.log(`[CALL] side question ${route} (${sideQuestionCount}/${2})`);
+    try {
+      sendClientTextTurn(buildSideAnswerTurn(route, callerText, lastPinnedSpokenLine || PDF_OPENING_EN));
+    } catch (e: any) {
+      sideQuestionCount = Math.max(0, sideQuestionCount - 1);
+      console.error('[CALL] side-answer send failed:', e?.message || e);
+    }
+  };
+
+  const askCallbackLater = () => {
+    if (endCallInvoked || outboundHardMuteAfterClose) return;
+    if (sideQuestionsMoveToClose(sideQuestionCount)) {
+      console.log('[CALL] side-question cap — moving to the close');
+      try {
+        sendClientTextTurn(buildOutboundHandoffTransferNudge());
+      } catch (e: any) {
+        console.error('[CALL] close after callback cap failed:', e?.message || e);
+      }
+      return;
+    }
+    sideQuestionCount += 1;
+    console.log(`[CALL] callback later (${sideQuestionCount}/2)`);
+    try {
+      sendClientTextTurn(buildCallbackLaterTurn());
+    } catch (e: any) {
+      sideQuestionCount = Math.max(0, sideQuestionCount - 1);
+      console.error('[CALL] callback-later send failed:', e?.message || e);
     }
   };
 
@@ -1350,7 +1417,7 @@ let plivoCallUuid: string | null = null;
       now,
       playbackEndsAt: aiPlaybackEndsAt,
       holdStartedAt: greetingHoldStartedAt,
-      holdCapMs: GREETING_LISTEN_HOLD_CAP_MS,
+      holdCapMs: greetingAudioHeard ? GREETING_LISTEN_HOLD_CAP_MS : GREETING_AUDIO_GIVE_UP_MS,
     });
     if (!open) {
       greetingListenSettlePending = false;
@@ -1364,11 +1431,14 @@ let plivoCallUuid: string | null = null;
     }
     // The last word is still in the phone buffer for a beat after our
     // playback clock hits zero. Keep the caller muted through that beat.
-    if (!greetingListenSettlePending) {
+    // No greeting audio means there is nothing left in the buffer.
+    if (greetingAudioHeard && !greetingListenSettlePending) {
       greetingListenSettlePending = true;
-      // Phone buffer still holds the last syllable — stay deaf a beat longer.
       greetingListenTimer = setTimeout(releaseGreetingListening, 600);
       return;
+    }
+    if (!greetingAudioHeard) {
+      console.warn('[CALL] no greeting audio 6s after send — opening listening');
     }
     openingGreetingTurnFinished = true;
     openingQuestionSent = true;
@@ -1391,8 +1461,9 @@ let plivoCallUuid: string | null = null;
     try {
       geminiSession?.sendRealtimeInput({
         text:
-          'SYSTEM (internal): After the caller\'s yes, say only the locations line. ' +
-          'Say only the line given. Say nothing else.',
+          'SYSTEM (internal): The opening is finished. Stay inside the four beats. ' +
+          'If they say yes, say the locations line. If they ask a side question, ' +
+          'answer in one short sentence in their language, then return to the question you were on.',
       });
     } catch (e: any) {
       console.warn('[GEMINI] Post-greeting no-name reminder failed:', e?.message || e);
@@ -1766,6 +1837,11 @@ let plivoCallUuid: string | null = null;
     }
     playGeminiAudioParts(parts);
     outboundLastSpokenLine = turnText;
+    if (turnText && looksLikeOpeningRestate(turnText)) {
+      lastPinnedSpokenLine = PDF_OPENING_EN;
+    } else if (turnText && looksLikeAreasLine(turnText)) {
+      lastPinnedSpokenLine = /[\u0C80-\u0CFF]/.test(turnText) ? PDF_AREAS_LINE_KN : PDF_AREAS_LINE_EN;
+    }
     registerOutboundSpeech(turnText, outboundSpokenChunks);
     if (hasThanksClosing(turnText)) {
       // Remember it for the rest of THIS turn so a repeat chunk can be dropped.
@@ -1866,6 +1942,7 @@ let plivoCallUuid: string | null = null;
     if (!loggedFirstAudio) {
       loggedFirstAudio = true;
       console.log(`[GEMINI] Streaming speech to ${audioSink} (${geminiPlaybackRate} Hz → 8 kHz mu-law)`);
+      if (audioSink === 'plivo') console.log('[CALL] first playAudio to Plivo');
     }
     capture?.onAiSpeakStart();
     capture?.onAiMuLaw(muLawBuffer);
@@ -2695,6 +2772,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       if (!data) continue;
       if (!greetingAudioHeard) {
         greetingAudioHeard = true;
+        console.log('[CALL] first Gemini audio chunk');
         if (streamConnectAt > 0) {
           console.log(`[GEMINI] First greeting audio (+${Date.now() - streamConnectAt}ms from stream connect)`);
         }
@@ -2787,8 +2865,14 @@ const forceOutboundHangupIfClosing = (reason: string) => {
    */
   const nameGateOpts = () => ({ areasDelivered: outboundAreasLineDelivered });
 
+  const logGate = (decision: 'play' | 'hold' | 'drop', reason: string) => {
+    const snippet = outboundAiAccum.replace(/\s+/g, ' ').trim().slice(0, 80);
+    console.log(`[CALL] gate ${decision} reason=${reason}${snippet ? ` text="${snippet}"` : ''}`);
+  };
+
   const gateOutboundAudio = (parts: any[]) => {
     if (!openingGreetingTurnFinished || outboundHardMuteAfterClose) {
+      logGate('play', !openingGreetingTurnFinished ? 'opening' : 'hard_mute');
       playOutboundTurnIfNew(parts, outboundAiAccum);
       return;
     }
@@ -2798,11 +2882,13 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       looksLikeSpokenNameQuestion(outboundAiAccum) ||
       nameQuestionAudioGate(outboundAiAccum, nameGateOpts()) === 'drop'
     ) {
+      logGate('drop', 'name_question');
       discardNameQuestionAudio();
       return;
     }
     heldOutboundAudioParts.push(...parts);
     if (nameQuestionAudioGate(outboundAiAccum, nameGateOpts()) === 'release') {
+      logGate('play', 'script_line');
       flushHeldOutboundAudio();
       return;
     }
@@ -2811,23 +2897,28 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       /^(?:ನಿಮ್ಮ|ನೀವು\s*ಯಾರ|what\b|may i\b|could i\b|can i\b|who am\b|tell me\b|how (?:should|do)\b|naam\b|aapka\b|आपका|नाम|hesaru|nimma)/i.test(
         outboundAiAccum.trim(),
       );
+    logGate('hold', suspicious ? 'suspicious_prefix' : 'waiting_for_transcript');
     // Wait for enough transcript. On timeout: drop if still suspicious;
     // before locations, never flush a held turn that is not a proven script line.
     nameGateTimer = setTimeout(() => {
       nameGateTimer = null;
       const gate = nameQuestionAudioGate(outboundAiAccum, nameGateOpts());
       if (blockNameQuestionAudio || gate === 'drop' || looksLikeSpokenNameQuestion(outboundAiAccum)) {
+        logGate('drop', 'name_question_after_wait');
         discardNameQuestionAudio();
         return;
       }
       if (gate === 'release') {
+        logGate('play', 'script_line_after_wait');
         flushHeldOutboundAudio();
         return;
       }
       if (suspicious) {
+        logGate('drop', 'suspicious_prefix_after_wait');
         discardNameQuestionAudio();
         return;
       }
+      logGate('hold', 'until_turn_complete');
       // Still hold until turnComplete — do not play unknown audio before locations.
     }, suspicious ? 900 : 650);
   };
@@ -2959,6 +3050,16 @@ const forceOutboundHangupIfClosing = (reason: string) => {
           sendSpokenGreeting();
         };
 
+        const armGreetingAudioWatch = () => {
+          setTimeout(() => {
+            if (endCallInvoked || greetingAudioHeard || greetingRetrySent) return;
+            greetingRetrySent = true;
+            console.warn('[CALL] no greeting audio 3s after send — resending the greeting once');
+            greetingSent = false;
+            sendSpokenGreeting();
+          }, GREETING_AUDIO_RETRY_MS);
+        };
+
         const sendSpokenGreeting = () => {
           if (!geminiSession || greetingSent) return;
           greetingSent = true;
@@ -2966,11 +3067,17 @@ const forceOutboundHangupIfClosing = (reason: string) => {
             const greetingText: string = PDF_OPENING_EN;
             const instruction = getOutboundGreetingInstruction('en');
             console.log(`[GEMINI] Sending opening greeting once (+${Date.now() - streamConnectAt}ms from stream)`);
+            console.log('[CALL] greeting sent');
             diagLog('greeting instruction sent → GREETING (caller audio held until playback ends; interruptions ignored)');
             setCallState('GREETING', 'opening sent');
             capture?.onAiText(greetingText);
+            lastPinnedSpokenLine = PDF_OPENING_EN;
             geminiSession.sendRealtimeInput({ text: instruction });
             if (greetingHoldStartedAt === 0) greetingHoldStartedAt = Date.now();
+            if (greetingSentAt === 0) {
+              greetingSentAt = Date.now();
+              armGreetingAudioWatch();
+            }
             releaseGreetingListening();
           } catch (greetErr) {
             greetingSent = false;
@@ -3139,6 +3246,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                       outboundAiAccum,
                     );
                   if (nameTurn || stillHeldSuspicious) {
+                    logGate('drop', nameTurn ? 'name_question_turn_end' : 'suspicious_turn_end');
                     heldOutboundAudioParts = [];
                     clearNameGateTimer();
                     if (!outboundAreasLineHeard) nameQuestionNeedsRedirect = true;
@@ -3148,6 +3256,9 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                     discardNameQuestionAudio();
                   }
                   blockNameQuestionAudio = false;
+                  if (!nameTurn && !stillHeldSuspicious && heldOutboundAudioParts.length) {
+                    logGate('play', 'turn_complete');
+                  }
                   if (!nameTurn && !stillHeldSuspicious) flushHeldOutboundAudio();
                   blockUnwantedRepeatAsk = false;
                   if (repeatAskCorrectionPending && !outboundHardMuteAfterClose && !endCallInvoked) {
@@ -3464,7 +3575,12 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   if (isOutboundCall) {
                     console.log(`[VERIFY] ${review.intent} in ${review.elapsedMs.toFixed(1)}ms`);
                   }
-                  if (review.plan.action === 'explain_why' || review.plan.action === 'wait_after_echo') {
+                  const questionRoute =
+                    isOutboundCall && openingGreetingTurnFinished ? routeCallerQuestion(userText) : null;
+                  if (
+                    !questionRoute &&
+                    (review.plan.action === 'explain_why' || review.plan.action === 'wait_after_echo')
+                  ) {
                     const nudge = review.plan.nudge;
                     const waitMs = Math.max(0, aiPlaybackEndsAt - Date.now());
                     const sendVerified = () => {
@@ -3529,7 +3645,24 @@ const forceOutboundHangupIfClosing = (reason: string) => {
 
                   fullTranscription += `User: ${userText}\n`;
                   capture?.onCustomerTranscript(userText);
-                  const nameStepHandled = handleNameStep(userText);
+                  let questionHandled = false;
+                  if (questionRoute === 'repeat') {
+                    replayLastPinnedLine();
+                    questionHandled = true;
+                  } else if (questionRoute === 'callback' && !looksLikeCallbackTimeRequest(userText)) {
+                    askCallbackLater();
+                    questionHandled = true;
+                  } else if (
+                    questionRoute === 'who' ||
+                    questionRoute === 'why' ||
+                    questionRoute === 'where' ||
+                    questionRoute === 'defer' ||
+                    questionRoute === 'robot'
+                  ) {
+                    answerSideQuestion(questionRoute, userText);
+                    questionHandled = true;
+                  }
+                  const nameStepHandled = questionHandled ? false : handleNameStep(userText);
                   // The checklist is the name step's sibling: whichever of the two
                   // takes this turn owns it, and no generic nudge may fire on top.
                   const needsStepHandled = nameStepHandled ? false : handleNeedsStep(userText);
@@ -3552,8 +3685,8 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   // name nudge had just given it, which is why the caller heard
                   // nothing usable after giving their name. A name turn is owned
                   // by the name step alone.
-                  if (stepOwned) {
-                    // owned by handleNameStep — no second instruction this turn
+                  if (questionHandled || stepOwned) {
+                    // A side question, a repeat, or the script step already owns this turn.
                   } else if (isShortAffirmativeReply(userText)) {
                     customerAnsweredOpening(userText);
                     keepOutboundActiveAfterOpeningYes(userText);
@@ -3576,15 +3709,17 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                       sendClientTextTurn(
                         `SYSTEM (internal): The customer replied: "${String(userText).trim().slice(0, 120)}". ` +
                           `Stay on this call. Do NOT hang up. Do NOT stay silent. Do NOT repeat the opening. ` +
-                          `After the caller's yes, say only the locations line. Say only the line given. Say nothing else. ` +
-                          `Say this one line now, exactly once: "${PDF_AREAS_LINE_KN}". Then STOP and WAIT.`,
+                          `After the caller's yes, say the locations line. ` +
+                          `Say this one line now, exactly once: "${PDF_AREAS_LINE_KN}". Then stop and listen.`,
                       );
                     } catch (e: any) {
                       outboundStayActiveNudgeSent = false;
                       console.error('[GEMINI] Continue-after-opening nudge failed:', e?.message || e);
                     }
                   }
-                  if (!stepOwned) {
+                  if (questionHandled) {
+                    // The repeat or the side answer already went out. Do not also close or advance.
+                  } else if (!stepOwned) {
                     if (outboundHardMuteAfterClose) {
                       forceOutboundHangupIfClosing('customer speech after close');
                     } else {
@@ -3620,7 +3755,6 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                       // lost. Routing is decided here, not by the model, so an
                       // out-of-window request is refused even if the model
                       // disagrees.
-                      outboundAreasLineDelivered &&
                       looksLikeCallbackTimeRequest(userText)
                     ) {
                       try {
@@ -4128,6 +4262,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
               // Do not speak a "say that again" line after reconnect. Wait.
               setCallState('LISTENING', 'reconnected — listening again');
               startListeningWatchdog();
+              console.log('[CALL] connect ok');
               console.log(`[GEMINI] Reconnect OK (attempt ${geminiReconnectAttempts}) — context restored, resume line sent, LISTENING`);
               diagLog(`reconnect OK attempt=${geminiReconnectAttempts} → LISTENING`);
               return true;
@@ -4149,21 +4284,21 @@ const forceOutboundHangupIfClosing = (reason: string) => {
             }
             localSession = await ai.live.connect(geminiConnectOptions);
             connected = true;
+            console.log('[CALL] connect ok');
             break;
           } catch (err) {
             console.error(`[GEMINI] Connect attempt ${attempt} failed:`, err);
             if (attempt === MAX_GEMINI_CONNECT_ATTEMPTS) {
               callLog('ERROR', `GEMINI CONNECT FAILED: ${err instanceof Error ? err.message : String(err)}`);
               capture?.onSttError('Gemini live connect failed');
-              console.warn('[GEMINI] Keeping phone line open — background reconnect scheduled (will NOT hang up).');
-              diagLog('initial connect failed → background reconnect loop (line stays open)');
-              scheduleGeminiReconnect('initial connect failed');
+              console.error('[CALL] ALL 3 CONNECT ATTEMPTS FAILED — hanging up');
+              await completeAndHangupOutboundCall('all gemini connect attempts failed');
+              return;
             }
           }
         }
 
         if (!connected || !localSession) {
-          console.warn('[GEMINI] No live session yet — phone line open, background reconnect running.');
           return;
         }
 

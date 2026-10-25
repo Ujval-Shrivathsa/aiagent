@@ -213,7 +213,6 @@ export function languageFollowSystemPrompt(lang: FollowLanguage): string {
   return (
     `SYSTEM (internal): The caller has switched to ${name}. From your next turn onward speak ${name} — ` +
     `natural and conversational, never literal translation.${mouth} Keep the same script step and continue. ` +
-    `Say only the line for this step. Say nothing else. ` +
     `On silence, stay quiet — never say "tell me once more" or ask them to repeat unless they asked first. ` +
     `Do not mention the language change.`
   );

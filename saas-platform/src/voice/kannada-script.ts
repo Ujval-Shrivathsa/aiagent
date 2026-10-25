@@ -26,7 +26,7 @@
  */
 
 /** Bump when greeting, silence, name-ban, or language rules change (invalidates prewarm cache). */
-export const VOICE_BEHAVIOR_VERSION = '2026-10-25-name-free-prompt';
+export const VOICE_BEHAVIOR_VERSION = '2026-10-25-answer-questions';
 
 // ---------------------------------------------------------------------------
 // SPOKEN SCRIPT LINES — exact, word for word.
@@ -140,7 +140,7 @@ export function buildOutboundLocationInterestNudge(key: OutboundLocalityKey): st
   const fact = locationFactLines(key);
   return (
     `SYSTEM (internal): They said a place where we have sites (for example Hunsur). Do NOT ask a new question. ` +
-    `Say only the line given. Say nothing else. ` +
+    `Speak the location fact, then the sales-manager close. ` +
     `Focus on their location requirement. In ONE turn: briefly acknowledge what they said (one short word like "ಸರಿ" / "Okay" / "ठीक"), then say this location fact exactly once in the CURRENT conversation language — Kannada: "${fact.kn}" ` +
     `(English: "${fact.en}"). ` +
     `Then immediately say the sales-manager close exactly once, thank-you first: "${PDF_INTERESTED_CLOSE_KN}" ` +
@@ -269,11 +269,11 @@ export function getOutboundGreetingInstruction(lang: 'kn' | 'en' | 'hi' = 'en'):
     `do not answer them, and do not react to anything they say until this sentence is finished. ` +
     `Ignore interruptions while you speak it — the line keeps their audio muted until you finish. ` +
     `Only AFTER the last word of this sentence, stop and listen for their next reply. ` +
-    `Say only the line given. Say nothing else.
+    `Speak this line aloud now, exactly as written, then stop and listen:
 
 "${line}"
 
-Then stop and listen. Wait for their reply before you say anything else.`
+Then stop and listen.`
   );
 }
 
@@ -763,6 +763,179 @@ export function looksLikeRepeatRequest(text: string): boolean {
   );
 }
 
+/**
+ * Caller wants the last line again. Short utterances only, so "what is the
+ * price" stays a side question. The engine resends the pinned line; the model
+ * does not have to remember it.
+ */
+export function looksLikeRepeatLastLine(text: string): boolean {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (/ಇನ್ನೊಮ್ಮೆ/.test(raw) || /ಮತ್ತೆ\s*ಹೇಳ/.test(raw)) return true;
+  if (looksLikeRepeatRequest(raw)) return true;
+  const words = raw
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return /^(?:what|sorry|again|pardon|huh|repeat|excuse me|say again|come again)(?:\s+please)?$/.test(
+    words,
+  );
+}
+
+export type CallerQuestionRoute = 'repeat' | 'who' | 'why' | 'where' | 'defer' | 'robot' | 'callback';
+
+export const MAX_SIDE_QUESTIONS = 2;
+
+/** True once two side questions have already been answered. The next one closes. */
+export function sideQuestionsMoveToClose(alreadyAnswered: number): boolean {
+  return alreadyAnswered >= MAX_SIDE_QUESTIONS;
+}
+
+export const SIDE_ANSWER_WHO_EN = "I'm Priya from Alliance Square.";
+export const SIDE_ANSWER_WHO_KN = 'ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ.';
+export const SIDE_ANSWER_WHY_EN =
+  "We're calling about plots at Alliance Square in Mysuru, to check if you're looking for a site.";
+export const SIDE_ANSWER_WHY_KN =
+  'ನಾವು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ಮೈಸೂರಿನ ಪ್ಲಾಟ್ ಬಗ್ಗೆ ಕರೆ ಮಾಡ್ತಿದ್ದೀವಿ, ನೀವು ಸೈಟ್ ನೋಡ್ತಿದೀರಾ ಅಂತ ನೋಡೋಕೆ.';
+export const SIDE_ANSWER_DEFER_EN = 'The sales manager will share that when they call.';
+export const SIDE_ANSWER_DEFER_KN = 'ಸೇಲ್ಸ್ ಮ್ಯಾನೇಜರ್ ಕರೆ ಮಾಡಿದಾಗ ಅದನ್ನ ಹೇಳ್ತಾರೆ.';
+export const SIDE_ANSWER_ROBOT_EN =
+  "I'm calling on behalf of Alliance Square, and the sales manager can speak with you in detail.";
+export const SIDE_ANSWER_ROBOT_KN =
+  'ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ಪರವಾಗಿ ಕರೆ ಮಾಡ್ತಿದ್ದೀನಿ. ವಿವರ ಸೇಲ್ಸ್ ಮ್ಯಾನೇಜರ್ ಹೇಳ್ತಾರೆ.';
+export const SIDE_WHERE_PLACES_EN =
+  'We have sites on Hunsur Road, T. Narasipura Road and in Nanjangudu.';
+export const SIDE_WHERE_PLACES_KN =
+  'ನಮ್ಮ ಹತ್ತಿರ ಹುಣಸೂರು ರಸ್ತೆ, ಟಿ. ನರಸೀಪುರ ರಸ್ತೆ ಮತ್ತು ನಂಜನಗೂಡಿನಲ್ಲಿ ಸೈಟ್‌ಗಳಿವೆ.';
+
+function looksLikeDeferQuestion(text: string): boolean {
+  return (
+    /\b(?:price|prices|cost|rates?|how much|size|sq\.?\s*ft|square feet|dimension|document|documents|paperwork|offer|offers|discount|availability|available)\b/i.test(
+      text,
+    ) || /ಎಷ್ಟು|ಬೆಲೆ|ಗಾತ್ರ|ದಾಖಲೆ|ಆಫರ್|ಡಿಸ್ಕೌಂಟ್|ಖಾಲಿ ಇದೆ/.test(text)
+  );
+}
+
+function looksLikeWhoQuestion(text: string): boolean {
+  return (
+    /\bwho (?:are you|is this|is that|is calling)\b/i.test(text) ||
+    /\bwhat(?:'s| is) your name\b/i.test(text) ||
+    /ನೀವು\s*ಯಾರು|ಯಾರು\s*(?:ನೀವು|ಕರೆ|ಮಾತಾಡ)/.test(text)
+  );
+}
+
+function looksLikeWhyCalling(text: string): boolean {
+  return (
+    /\bwhy (?:are you|did you|you) call/i.test(text) ||
+    /\bwhere are you calling from\b/i.test(text) ||
+    /ಯಾಕೆ\s*ಕರೆ|ಏಕೆ\s*ಕರೆ|ಯಾಕೆ\s*ಫೋನ್|ಏತಕ್ಕೆ\s*ಕರೆ/.test(text)
+  );
+}
+
+function looksLikeRobotQuestion(text: string): boolean {
+  return (
+    /\b(?:robot|chatbot|artificial intelligence|a\.i\.|bot)\b/i.test(text) ||
+    /\bare you (?:an )?ai\b/i.test(text) ||
+    /ರೋಬೋಟ್|ಬಾಟ್/.test(text)
+  );
+}
+
+function looksLikeWhereSite(text: string): boolean {
+  return (
+    (/\bwhere\b/i.test(text) && /\b(?:site|plot|place|land|project|location)\b/i.test(text)) ||
+    /ಎಲ್ಲಿದೆ|ಎಲ್ಲಿ ಇದೆ|ಲೊಕೇಶನ್/.test(text)
+  );
+}
+
+function looksLikeCallbackLater(text: string): boolean {
+  return (
+    /\b(?:call me later|not now|call me back|call back later|later please)\b/i.test(text) ||
+    /ನಂತರ\s*ಕರೆ|ಈಗ\s*ಬೇಡ|ಈಗ\s*ಸಮಯ\s*ಇಲ್ಲ|ಮತ್ತೆ\s*ಕರೆ\s*ಮಾಡ/.test(text)
+  );
+}
+
+/** Route a caller utterance. Null means it is a normal yes / no / place answer. */
+export function routeCallerQuestion(text: string): CallerQuestionRoute | null {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  const repeat = looksLikeRepeatLastLine(t);
+  if (looksLikeDeferQuestion(t) && !repeat) return 'defer';
+  if (looksLikeWhoQuestion(t)) return 'who';
+  if (looksLikeWhyCalling(t)) return 'why';
+  if (looksLikeRobotQuestion(t)) return 'robot';
+  if (looksLikeWhereSite(t)) return 'where';
+  if (looksLikeCallbackLater(t)) return 'callback';
+  if (repeat) return 'repeat';
+  return null;
+}
+
+export function callerAnswerIsKannada(text: string): boolean {
+  return /[\u0C80-\u0CFF]/.test(String(text || ''));
+}
+
+export function sideAnswerFor(
+  route: 'who' | 'why' | 'where' | 'defer' | 'robot',
+  text: string,
+): string {
+  const kn = callerAnswerIsKannada(text);
+  if (route === 'who') return kn ? SIDE_ANSWER_WHO_KN : SIDE_ANSWER_WHO_EN;
+  if (route === 'why') return kn ? SIDE_ANSWER_WHY_KN : SIDE_ANSWER_WHY_EN;
+  if (route === 'defer') return kn ? SIDE_ANSWER_DEFER_KN : SIDE_ANSWER_DEFER_EN;
+  if (route === 'robot') return kn ? SIDE_ANSWER_ROBOT_KN : SIDE_ANSWER_ROBOT_EN;
+  const place = detectOutboundLocality(text);
+  if (place) {
+    const fact = locationFactLines(place);
+    return kn ? fact.kn : fact.en;
+  }
+  return kn ? SIDE_WHERE_PLACES_KN : SIDE_WHERE_PLACES_EN;
+}
+
+/** Code resends the pinned line. The model is told to speak it once, slower. */
+export function buildRepeatLastLineTurn(line: string): string {
+  const safe = String(line || '').trim() || PDF_OPENING_EN;
+  return (
+    `SYSTEM (internal): The caller asked to hear that again. ` +
+    `Speak this line aloud now, once, a little slower, exactly as written, then stop and listen:\n"${safe}"`
+  );
+}
+
+export function buildCallbackLaterTurn(): string {
+  return (
+    `SYSTEM (internal): They asked to be called later, or said not now. Do not use the decline close. ` +
+    `Ask which time between ${CALLBACK_WINDOW_LABEL} works, then call setCallbackTime once they agree ` +
+    `to a time inside that window. Do not end the call on this turn.`
+  );
+}
+
+/**
+ * One short answer, then back to the question she was on.
+ * A defer answer is followed by the close. No thank-you in the answer sentence.
+ */
+export function buildSideAnswerTurn(
+  route: 'who' | 'why' | 'where' | 'defer' | 'robot',
+  callerText: string,
+  returnTo: string,
+): string {
+  const answer = sideAnswerFor(route, callerText);
+  const kn = callerAnswerIsKannada(callerText);
+  if (route === 'defer') {
+    const close = kn ? PDF_INTERESTED_CLOSE_KN : PDF_INTERESTED_CLOSE_EN;
+    return (
+      `SYSTEM (internal): They asked something the sales manager answers. ` +
+      `Speak this one sentence aloud now: "${answer}" ` +
+      `Then speak the close exactly once and call endCall in the same turn: "${close}". ` +
+      `Do not quote a price. Do not request any caller detail.`
+    );
+  }
+  const back = String(returnTo || '').trim() || PDF_OPENING_EN;
+  return (
+    `SYSTEM (internal): They asked a side question. Speak this one sentence aloud now: "${answer}" ` +
+    `Then return to the question you were on and say it again: "${back}". ` +
+    `Do not end the call.`
+  );
+}
+
 export function looksLikeNotInterestedCloseLine(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return false;
@@ -1226,8 +1399,16 @@ export function looksLikeAreasLine(text: string): boolean {
   if (!t) return false;
   const sq = squashScriptText(t);
   if (sq.includes(squashScriptText(PDF_AREAS_LINE_KN))) return true;
+  if (sq.includes(squashScriptText(PDF_AREAS_LINE_EN))) return true;
+  if (sq.includes(squashScriptText(PDF_AREAS_LINE_HI))) return true;
   return (
-    matchesSpaced(t, sq, /(?:ನಮ್ಮ ಹತ್ತಿರ|we have sites near|ಸೈಟ್‌?ಗಳಿವೆ)/i, /ನಮ್ಮಹತ್ತಿರ/, /ಸೈಟ್ಗಳಿವೆ/) &&
+    matchesSpaced(
+      t,
+      sq,
+      /(?:ನಮ್ಮ ಹತ್ತಿರ|we have sites (?:near|on|in)|ಸೈಟ್‌?ಗಳಿವೆ)/i,
+      /ನಮ್ಮಹತ್ತಿರ/,
+      /ಸೈಟ್ಗಳಿವೆ/,
+    ) &&
     matchesSpaced(
       t,
       sq,
@@ -1315,7 +1496,7 @@ export const OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE =
   `In Kannada say exactly: "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}" ` +
   `In English, only if the call is in English: "${PDF_NOT_INTERESTED_CLOSE_EN}" ` +
   `In Hindi, only if the call is in Hindi: "${PDF_NOT_INTERESTED_CLOSE_HI}" ` +
-  `Do NOT argue, do NOT list the projects, do NOT ask why, and do NOT ask a question. Say only the line given. Say nothing else.`;
+  `Do NOT argue, do NOT list the projects, do NOT ask why, and do NOT ask a question. Speak the close aloud now, exactly as written, then call endCall.`;
 
 /**
  * Caller said YES / interested → locations line NOW (concise, information
@@ -1323,7 +1504,7 @@ export const OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE =
  */
 export const OUTBOUND_YES_LOCATIONS_NUDGE =
   `SYSTEM (internal): They said YES. They are interested in a site in Mysuru. Do NOT hang up, ` +
-  `and do NOT repeat the opening. After the caller's yes, say only the locations line. Say only the line given. Say nothing else. In ONE turn, say this one line exactly, once. It already includes the question, so do not ask a second question. ` +
+  `and do NOT repeat the opening. After the caller's yes, say only the locations line. In ONE turn, say this one line exactly, once. It already includes the question, so do not ask a second question. ` +
   `In Kannada say exactly: "${PDF_AREAS_LINE_KN}" ` +
   `In English, only if the call is in English: "${PDF_AREAS_LINE_EN}" ` +
   `In Hindi, only if the call is in Hindi: "${PDF_AREAS_LINE_HI}" ` +
@@ -1932,11 +2113,11 @@ export type OutboundPromptOptions = {
  */
 export function buildOutboundCallInstruction(currentDateStr: string): string {
   const dateLine = currentDateStr ? `\nDATE: ${currentDateStr}` : '';
-  return `You are Priya, a sales officer at Alliance Square in Mysuru, on a live phone call. You are a young Kannadiga woman: warm, polite, feminine, soft, close to the mic. Never say you are an AI. never ಸರ್, never ಮಾಮ್, except the silence goodbye, which is already written with ಸರ್.
+  return `You are Priya, a sales officer at Alliance Square in Mysuru, on a live phone call. You are a young Kannadiga woman: warm, polite, feminine, soft, close to the mic. Do not claim to be human. never ಸರ್, never ಮಾಮ್, except the silence goodbye, which is already written with ಸರ್.
 
-THE WHOLE CALL — four beats. Say only the line given. Say nothing else. Say each script line AS WRITTEN: no rephrasing, no fresh wording. Never repeat a line you have already said, in any wording. Never reword it. A close is spoken EXACTLY ONCE per call. The thank-you comes first. Do not move the thank-you to the end. Say the whole close, including the words after the thank-you.
+THE WHOLE CALL — four beats. Stay inside these four beats. When the caller asks a side question from the list below, answer in one short sentence in their language, then return to the question you were on. Say each script line AS WRITTEN: no rephrasing, no fresh wording. Never repeat a line you have already said, in any wording. Never reword it. A close is spoken EXACTLY ONCE per call. The thank-you comes first. Do not move the thank-you to the end. Say the whole close, including the words after the thank-you.
 
-FIXED LINES are word-for-word. They are EXEMPT from the "say it in your own words" idea. On a fixed line there is NOTHING before it and NOTHING after it. NEVER promise to explain more later — no "I'll give you more information". GET TO THE POINT. No reaction before it: never "ohh", "oh", "ah", "okay so", "like that", never ಅಹಾ, never a laugh. A caller's reply is a SIGNAL, not something to react to.
+FIXED LINES are word-for-word. They are EXEMPT from the "say it in your own words" idea. On a fixed line there is NOTHING before it and NOTHING after it. NEVER promise to explain more later — no "I'll give you more information". GET TO THE POINT. No reaction before it: never "ohh", "oh", "ah", "okay so", "like that", never ಅಹಾ, never a laugh.
 
 1. OPENING. FIRST LINE: "${PDF_OPENING_EN}"
    Kannada only if the call is already in Kannada: "${PDF_OPENING_TURN1_KN}"
@@ -1946,15 +2127,23 @@ FIXED LINES are word-for-word. They are EXEMPT from the "say it in your own word
    If they say Hunsur, say only "${LOCATION_FACT_HUNSUR_KN}" then the sales-manager close. Do not list all three places.
    If they say T. Narasipura, say only "${LOCATION_FACT_NARASIPURA_KN}" then the sales-manager close.
    If they say Nanjangudu, say only "${LOCATION_FACT_NANJANGUDU_KN}" then the sales-manager close.
-3. STEP 3 — CALLER SAYS YES TO THE LOCATIONS. Say only "${PDF_INTERESTED_CLOSE_KN}" then call endCall in that same turn.
+3. STEP 3 — CALLER SAYS YES TO THE LOCATIONS. Say "${PDF_INTERESTED_CLOSE_KN}" then call endCall in that same turn.
    English only if the call is in English: "${PDF_INTERESTED_CLOSE_EN}"
-4. If they say no, or they are busy, say only "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}" then call endCall.
+4. If they say no, or they are busy, say "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}" then call endCall.
 
-AT MOST TWO QUESTIONS: the opening, and the locations line. Never ask about budget, plot size, timeline, documents, or possession. Never ask permission to continue — no "shall I continue?".
+SIDE QUESTIONS — at most two on a call, then move to the close. One short sentence in the caller's language, then go back to the question you were on. Do not put a thank-you in these answers. Never quote a price. Never request any caller detail.
+- Who are you / who is this: "${SIDE_ANSWER_WHO_EN}" Kannada: "${SIDE_ANSWER_WHO_KN}"
+- Why are you calling: "${SIDE_ANSWER_WHY_EN}" Kannada: "${SIDE_ANSWER_WHY_KN}"
+- Where is the site: only the three approved place facts already written above. If they named one place, say that fact. If not, say "${SIDE_WHERE_PLACES_EN}" Kannada: "${SIDE_WHERE_PLACES_KN}"
+- Price, size, documents, offers, or anything else: "${SIDE_ANSWER_DEFER_EN}" Kannada: "${SIDE_ANSWER_DEFER_KN}" Then the close and endCall.
+- Robot or AI: do not claim to be human. "${SIDE_ANSWER_ROBOT_EN}" Kannada: "${SIDE_ANSWER_ROBOT_KN}" Then continue.
+- Call me later / not now: ask for a time inside the callback window and call setCallbackTime. Do not use the decline close for this.
+
+AT MOST TWO QUESTIONS: the opening, and the locations line, plus at most two side answers. Never ask about budget, plot size, timeline, documents, or possession. Never ask permission to continue — no "shall I continue?".
 
 PLACES — say only these: ${allowedLayoutsList()}. Never mention any other project.
 
-TOOLS — endCall, notInterested, setCallbackTime. YOU END THE CALL: call endCall in the SAME turn as a close. The call ends after the close. STRICT: say only the line given.
+TOOLS — endCall, notInterested, setCallbackTime. YOU END THE CALL: call endCall in the SAME turn as a close. The call ends after the close. STRICT: a close ends the call.
 
 CALLBACK: the sales team is available ${CALLBACK_WINDOW_LABEL} only. Inside that window, confirm the time, call setCallbackTime, then the interested close. Outside it, the time is not possible. Say "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}".
 

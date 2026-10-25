@@ -195,7 +195,7 @@ export function buildRecallContext(memory: CallMemory): string {
       'from the flow position above, in the same calm tone, with audio.',
   );
   lines.push(
-    'After the caller\'s yes, say only the locations line. Say only the line given. Say nothing else.',
+    'After the caller\'s yes, say the locations line. If they ask a side question, answer in one short sentence, then return to the question you were on.',
   );
 
   return lines.join('\n');

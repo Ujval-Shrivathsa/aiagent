@@ -364,9 +364,11 @@ describe('the needs list is two questions, and the pinned lines are untouched', 
 describe('one short listening beat, at the start of a real line only', () => {
   const full = buildOutboundSystemInstruction('30 Sep 2026');
 
-  it('the short instruction says only the line given', () => {
-    assert.match(full, /Say only the line given/);
-    assert.match(full, /Say nothing else/);
+  it('the short instruction stays on the four beats and answers a side question', () => {
+    assert.match(full, /Stay inside these four beats/);
+    assert.match(full, /one short sentence/);
+    assert.doesNotMatch(full, /Say nothing else/i);
+    assert.doesNotMatch(full, /Say only the line given/i);
     assert.doesNotMatch(full, /ONE exception, and it is the only one/);
   });
 
