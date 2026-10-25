@@ -39,7 +39,7 @@ export async function GET() {
     ? crypto.createHash('sha256').update(authId).digest('hex').slice(0, 12)
     : '';
   return NextResponse.json({
-    build: 'hangup-status/16',
+    build: 'hangup-status/17',
     now: new Date().toISOString(),
     aleg: stats,
     hangup,

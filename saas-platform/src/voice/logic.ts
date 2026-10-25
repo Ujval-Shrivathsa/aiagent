@@ -879,6 +879,11 @@ let plivoCallUuid: string | null = null;
   let runtimeInstructionsInjected = false;
   let greetingSent = false;
   let openingTurnSealed = false;
+  /** True only after the site question itself has been played, not a prefix of it. */
+  let openingQuestionAudioPlayed = false;
+  /** True after the locations line's own turn has finished. Mid-line audio must not be dropped as a repeat. */
+  let areasLineTurnSealed = false;
+  const openingQuestionSpoken = (text: string) => /ನೋಡ್ತಿದೀರಾ|looking for a site/i.test(text);
   let openingQuestionSent = false;
   let fullCallGuideInjected = false;
   let geminiSessionOpened = false;
@@ -1599,7 +1604,16 @@ let plivoCallUuid: string | null = null;
     if (!trimmed) {
       return { suppress: false };
     }
-    if (!outboundAreasLineHeard && looksLikeAreasLine(trimmed)) {
+    // The opening is one line. Nothing in it is a repeat until that line has
+    // finished, or the question is cut and a "don't repeat" nudge makes her
+    // start the same line again.
+    if (!openingGreetingTurnFinished) {
+      if (looksLikeSpokenNameQuestion(trimmed)) {
+        return { suppress: true, reason: 'name_question' };
+      }
+      return { suppress: false };
+    }
+    if (looksLikeAreasLine(trimmed) && !areasLineTurnSealed) {
       return { suppress: false };
     }
     if (looksLikeSpokenNameQuestion(trimmed)) {
@@ -2594,8 +2608,9 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       const quietSecs = Math.round((now - lastCustomerTranscriptAt) / 1000);
       console.log(`[SILENCE] ${quietSecs}s quiet — staying silent, not asking them to speak`);
       diagLog(`silence check quiet=${quietSecs}s → stay silent nudge`);
-      // Private reminder so the model does not invent "tell me once more" / ಮತ್ತೆ ಹೇಳಿ.
-      sendOutboundSilenceNudge(OUTBOUND_SILENCE_CHECK_NUDGE);
+      // The check is not spoken. Counting it anyway reached the goodbye and
+      // hung up on a caller who was still on the line.
+      outboundSilence = armOutboundSilenceCheck(Date.now(), 0);
       scheduleOutboundSilenceTick();
     } else if (tick.action === 'close_silence' && customerUtteranceCount === 0) {
       console.log('[SILENCE] Caller has not been heard yet — staying on the line');
@@ -2841,12 +2856,20 @@ const forceOutboundHangupIfClosing = (reason: string) => {
 
   const gateOutboundAudio = (parts: any[]) => {
     if (!openingGreetingTurnFinished || outboundHardMuteAfterClose) {
-      if (!outboundHardMuteAfterClose && openingTurnSealed && !playScriptAudioNow) {
+      if (
+        !outboundHardMuteAfterClose &&
+        openingTurnSealed &&
+        openingQuestionAudioPlayed &&
+        !playScriptAudioNow
+      ) {
         logGate('drop', 'second_opening');
         return;
       }
       logGate('play', !openingGreetingTurnFinished ? 'opening' : 'hard_mute');
       playOutboundTurnIfNew(parts, outboundAiAccum);
+      if (!openingQuestionAudioPlayed && openingQuestionSpoken(outboundAiAccum)) {
+        openingQuestionAudioPlayed = true;
+      }
       return;
     }
     if (playScriptAudioNow || looksLikeAreasLine(outboundAiAccum)) {
@@ -3236,6 +3259,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   }
                   nameQuestionNeedsRedirect = false;
                   playScriptAudioNow = false;
+                  if (outboundAreasLineHeard) areasLineTurnSealed = true;
                   outboundAiAccum = '';
                   sendPcmToTwilio(Buffer.alloc(0), true);
                   // The silence goodbye has no thank-you word, so the thanks
@@ -3291,12 +3315,17 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   lastOutboundTurnSuppressed = false;
                   if (!openingGreetingTurnFinished) {
                     if (isOutboundCall) {
-                      // Generation ending is not playback ending. Keep the
-                      // caller muted until the phone has played the greeting.
-                      openingTurnComplete = true;
-                      if (greetingAudioHeard) openingTurnSealed = true;
-                      latLog('OPENING_TURN_COMPLETE');
-                      releaseGreetingListening();
+                      // A turn can end after "ನಾನು ಪ್ರಿಯಾ" and the question is
+                      // still unsaid. Sealing there dropped the rest and made
+                      // her start the first line again.
+                      if (greetingAudioHeard && openingQuestionAudioPlayed) {
+                        openingTurnComplete = true;
+                        openingTurnSealed = true;
+                        latLog('OPENING_TURN_COMPLETE');
+                        releaseGreetingListening();
+                      } else {
+                        console.log('[CALL] Opening stopped before the question — still speaking it');
+                      }
                     } else {
                       openingGreetingTurnFinished = true;
                       openingQuestionSent = true;
@@ -4385,14 +4414,11 @@ const forceOutboundHangupIfClosing = (reason: string) => {
             lastUpsampleSample = cur;
         }
         // Noise frames are attenuated, not replaced with zeros — a wrong
-        // 'noise' label used to deafen Priya. The opening greeting is the
-        // exception: those frames are silence so caller speech cannot cut it
-        // off. The chunk is always sent, so the reconnect watchdog still sees
-        // a live stream.
+        // 'noise' label used to deafen Priya. During the opening, caller
+        // audio is not forwarded at all. Silence bytes made the model end
+        // the first line halfway and say it again.
         let forwardedPcm: Buffer = pcmBuffer;
         if (greetingProtected) {
-          // Absolute mute to the model until the greeting finishes playing.
-          forwardedPcm = Buffer.alloc(sampleCount * 4);
           bargeInStartedAt = null;
           if (vadIsSpeaking) {
             vadIsSpeaking = false;
@@ -4404,6 +4430,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
           forwardedPcm = forwardFrameToModel(pcmBuffer, sampleCount * 2, frameClass);
         }
         try {
+            if (!greetingProtected) {
             const payloadB64 = forwardedPcm.subarray(0, sampleCount * 4).toString("base64");
             geminiSession.sendRealtimeInput({
               audio: {
@@ -4411,6 +4438,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                 mimeType: 'audio/pcm;rate=16000',
               }
             });
+            }
             // Continuous streaming telemetry: this MUST keep incrementing for the
             // whole call. If it stalls while Plivo frames keep arriving, the
             // pipeline is broken and the reconnect/watchdog restores it.
