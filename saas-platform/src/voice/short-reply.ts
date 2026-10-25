@@ -17,7 +17,7 @@ const AGENT_SITE_QUESTION_ECHO =
 
 /** Roman + Kannada script short replies common on Mysuru calls. */
 const SHORT_AFFIRMATIVE =
-  /^(?:houda|haudu|howdu|howda|haud|haan|han|ha+|yes+|yeah+|yep+|ok+|okay+|sari|seri|hmm+|hm+|heli|hel+|hello|hi|ಹೌದು|ಹೌದ|ಸರಿ|ಹಾ+|ಹೇ+|ಹೇಳಿ|ಓಕೆ|ಅಲ್ವಾ|ಬೇಕು|ಬೇಡ|ಇಲ್ಲ)[.!?\s]*$/iu;
+  /^(?:houda|haudu|howdu|howda|haud|haan|han|ha+|yes+|yeah+|yep+|ok+|okay+|sari|seri|hmm+|hm+|heli|hel+|ಹೌದು|ಹೌದ|ಸರಿ|ಹಾ+|ಹೇ+|ಹೇಳಿ|ಓಕೆ|ಅಲ್ವಾ|ಬೇಕು|ಬೇಡ|ಇಲ್ಲ)[.!?\s]*$/iu;
 
 const STT_NOISE = /^[uhm.\s]+$/iu;
 

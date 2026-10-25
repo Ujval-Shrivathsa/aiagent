@@ -1,5 +1,7 @@
 import { createServer } from 'http';
+import { utimesSync } from 'fs';
 import path from 'path';
+import { parse } from 'url';
 import next from 'next';
 import { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
@@ -27,7 +29,8 @@ app.prepare().then(() => {
   console.log(`> Voice behavior version: ${VOICE_BEHAVIOR_VERSION}`);
 
   const server = createServer((req, res) => {
-    handle(req, res);
+    const parsedUrl = parse(req.url || '', true);
+    handle(req, res, parsedUrl);
   });
 
   const wss = new WebSocketServer({ noServer: true });
@@ -62,5 +65,19 @@ app.prepare().then(() => {
     console.log(
       `> Voice provider: ${process.env.VOICE_PROVIDER || 'twilio'} | Stack: Gemini Live | APP_URL: ${process.env.APP_URL ? 'set' : 'missing'}`,
     );
+    if (dev) {
+      // Turbopack can boot with nested route handlers missing. A file event
+      // under app/ a few seconds later rebuilds that tree. Without it,
+      // POST /api/campaign/start stays 404 for the whole dev session.
+      const campaignRoute = path.resolve(process.cwd(), 'src/app/api/campaign/start/route.ts');
+      setTimeout(() => {
+        try {
+          const now = new Date();
+          utimesSync(campaignRoute, now, now);
+        } catch {
+          // A missed nudge only leaves the dev 404 this boot already had.
+        }
+      }, 8000);
+    }
   });
 });

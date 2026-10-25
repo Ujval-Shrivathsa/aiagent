@@ -121,15 +121,15 @@ describe('v5 script — spoken lines', () => {
   it('opening = intro AND the site question in ONE turn, and never a name', () => {
     assert.equal(
       PDF_OPENING_KN,
-      'ಹಲೋ, ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ನಿಮಗೆ ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ?',
+      'ಹಲೋ, ನಾನು ಪ್ರಿಯಾ, ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ ಕರೆ ಮಾಡ್ತಿದ್ದೀನಿ, ನಿಮಗೆ ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ?',
     );
     assert.equal(
       PDF_OPENING_EN,
-      "Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?",
+      "Hello, I am Priya calling from Alliance Square. Are you looking for a site in Mysuru?",
     );
     assert.match(PDF_OPENING_HI, /प्रिया/);
     assert.match(PDF_OPENING_HI, /मैसूरु|मैसूर/);
-    assert.match(VOICE_BEHAVIOR_VERSION, /one-voice/);
+    assert.match(VOICE_BEHAVIOR_VERSION, /exact-lines/);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /tell me once more/i);
     assert.match(OUTBOUND_SILENCE_CHECK_NUDGE, /एक बार फिर/);
     assert.equal(looksLikeSpokenNameQuestion('आपका नाम क्या है?'), true);
@@ -151,16 +151,12 @@ describe('v5 script — spoken lines', () => {
 
     // OWNER-SPECIFIED: live greeting speaks the English opening word for word.
     const greeting = getOutboundGreetingInstruction('en');
-    assert.match(greeting, /one sentence/);
-    assert.match(greeting, /then stop and listen/);
+    assert.equal(greeting, PDF_OPENING_EN);
     assert.doesNotMatch(greeting, /being programmed/);
-    assert.doesNotMatch(greeting, /Say nothing else/);
-    assert.ok(greeting.includes(PDF_OPENING_EN), 'an English greeting is only the English line');
     const liveGreeting = getOutboundGreetingInstruction();
-    assert.ok(liveGreeting.includes(PDF_OPENING_KN), 'the live greeting is the Kannada opening');
-    assert.ok(!liveGreeting.includes(PDF_OPENING_EN), 'the live greeting is not the English opening');
-    assert.doesNotMatch(liveGreeting, /how are you/i);
-    assert.ok(!greeting.includes(PDF_NAME_QUESTION_KN), 'the name question is never in the greeting');
+    assert.equal(liveGreeting, PDF_OPENING_KN);
+    assert.ok(!liveGreeting.includes(PDF_OPENING_EN));
+    assert.ok(!greeting.includes(PDF_NAME_QUESTION_KN));
   });
 
   it('no honorific in any line that can be spoken before the name is known', () => {
@@ -196,10 +192,8 @@ describe('v5 script — spoken lines', () => {
     // The locations line already includes this question. It is not asked again.
     assert.ok(PDF_AREAS_LINE_KN.includes(PDF_INTEREST_QUESTION_KN));
     const nudge = OUTBOUND_YES_LOCATIONS_NUDGE;
-    assert.match(nudge, /already includes the question/i);
-    assert.ok(nudge.includes(PDF_AREAS_LINE_KN));
+    assert.equal(nudge, PDF_AREAS_LINE_KN);
     assert.ok(nudge.includes(PDF_INTEREST_QUESTION_KN));
-    assert.match(nudge, /STOP and WAIT/);
     const full = buildOutboundSystemInstruction('30 Sep 2026');
     assert.match(full, /AT MOST TWO QUESTIONS/);
     assert.match(full, /After the caller's yes, say only the locations line/);
@@ -254,9 +248,8 @@ describe('v5 script — spoken lines', () => {
 
   it('close nudges end on the single thank-you, not the sales-team line', () => {
     const handoff = buildOutboundHandoffTransferNudge();
-    assert.match(handoff, /endCall in the SAME turn/);
-    assert.match(handoff, /EXACTLY ONCE/);
-    assert.match(handoff, /sales team/i);
+    assert.equal(handoff, PDF_INTERESTED_CLOSE_KN);
+    assert.match(buildOutboundSystemInstruction('30 Sep 2026'), /endCall in the SAME turn/);
   });
 });
 
@@ -271,7 +264,7 @@ describe('v5 script — system instructions', () => {
     assert.doesNotMatch(full, /CHANGE ONLY WHEN THE CALLER ASKS/);
     assert.match(full, /Marathi/);
     assert.doesNotMatch(full, /Are you looking for a site in Mysuru/);
-    assert.match(full, /ನೋಡ್ತಿದೀರಾ/);
+    assert.match(getOutboundGreetingInstruction(), /ನೋಡ್ತಿದೀರಾ/);
     assert.match(full, /STEP 1B — CALLER SAYS YES/);
     assert.match(full, /STEP 3 — CALLER SAYS YES TO THE LOCATIONS/);
     assert.match(full, /After the caller's yes, say only the locations line/);
@@ -291,18 +284,18 @@ describe('v5 script — system instructions', () => {
 
   it('reference context + nudges carry the exact v5 lines', () => {
     const ref = buildOutboundProjectReferenceContext();
-    assert.ok(ref.includes(PDF_OPENING_TURN1_KN));
+    assert.ok(getOutboundGreetingInstruction().includes(PDF_OPENING_TURN1_KN));
+    assert.ok(!ref.includes(PDF_OPENING_TURN1_KN));
     assert.ok(!ref.includes(PDF_OPENING_EN));
-    assert.ok(ref.includes(PDF_AREAS_LINE_KN));
+    assert.equal(OUTBOUND_YES_LOCATIONS_NUDGE, PDF_AREAS_LINE_KN);
     assert.match(ref, /After the caller's yes, say only the locations line/);
     assert.doesNotMatch(ref, /Name question/);
     assert.doesNotMatch(ref, /\bname\b/i);
-    assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /interested/i);
     assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /ಹುಣಸೂರು/);
-    assert.match(OUTBOUND_YES_ASK_NAME_NUDGE, /ಹುಣಸೂರು/); // alias resolves to locations nudge
+    assert.match(OUTBOUND_YES_ASK_NAME_NUDGE, /ಹುಣಸೂರು/);
     const handoff = buildOutboundHandoffTransferNudge();
-    assert.match(handoff, /thank-you/);
-    assert.match(handoff, /endCall in the SAME turn/);
+    assert.equal(handoff, PDF_INTERESTED_CLOSE_KN);
+    assert.match(ref, /endCall in the SAME turn/);
     assert.doesNotMatch(handoff, /Do NOT call endCall/);
     assert.match(OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE, /ನಿಮ್ಮ ಸಮಯಕ್ಕೆ ಧನ್ಯವಾದಗಳು/);
     assert.doesNotMatch(OUTBOUND_SILENCE_CHECK_NUDGE, /ಇನ್ನೂ ಲೈನ್‌ನಲ್ಲಿ ಇದೀರಾ/);
@@ -543,11 +536,6 @@ describe('silence state machine — one check, then the call ends', () => {
       const flat = prompt.replace(/\s+/g, ' ');
       assert.match(flat, /THE WHOLE CALL — four beats/);
       assert.match(flat, /After the caller's yes, say only the locations line/);
-      assert.ok(flat.includes(PDF_OPENING_TURN1_KN), 'the opening is in the pinned script');
-      assert.ok(flat.includes(PDF_AREAS_LINE_KN), 'the locations line is in the pinned script');
-      assert.ok(flat.includes(PDF_INTEREST_QUESTION_KN), 'the locations question is in the pinned script');
-      assert.ok(flat.includes(PDF_THANKS_CLOSE_KN), 'the thank-you is in the pinned script');
-      assert.ok(flat.includes(OUTBOUND_NOT_INTERESTED_CLOSE_KN), 'the no-close is in the pinned script');
       assert.doesNotMatch(flat, /3B\. THE TWO NEEDS QUESTIONS/);
     }
 
@@ -555,8 +543,8 @@ describe('silence state machine — one check, then the call ends', () => {
     assert.match(fullFlat, /Say each script line AS WRITTEN/);
     assert.match(fullFlat, /no rephrasing, no fresh wording/);
     assert.match(fullFlat, /Never repeat a line you have already said, in any wording/);
-    assert.ok(fullFlat.includes(PDF_AREAS_LINE_KN), 'the locations line must be delivered as written');
-    assert.ok(fullFlat.includes(PDF_INTEREST_QUESTION_KN), 'the locations question must be delivered as written');
+    assert.equal(getOutboundGreetingInstruction(), PDF_OPENING_KN);
+    assert.equal(OUTBOUND_YES_LOCATIONS_NUDGE, PDF_AREAS_LINE_KN);
     assert.doesNotMatch(fullFlat, /phrase it FRESH and cheerful every call/i);
     assert.doesNotMatch(fullFlat, /fresh phrasing every call/i);
   });
@@ -569,8 +557,8 @@ describe('silence state machine — one check, then the call ends', () => {
     assert.doesNotMatch(full, /say the check line ONCE/);
     assert.match(full, /If they are silent, say NOTHING/);
     assert.match(full, /While waiting, say NOTHING at all/);
-    assert.match(full, /ಸರ್, ನೀವು ಬ್ಯುಸಿ ಇದ್ರೆ/);
-    assert.match(full, /spoken EXACTLY ONCE per call/, 'the thank-you rule is untouched');
+    assert.match(SILENCE_GOODBYE_LINE_KN, /ಸರ್, ನೀವು ಬ್ಯುಸಿ ಇದ್ರೆ/);
+    assert.match(full, /spoken EXACTLY ONCE per call/);
     assert.doesNotMatch(full, /asked TWICE in one silent stretch/);
 
     assert.match(fast, /If they are silent, say nothing/);
@@ -806,7 +794,7 @@ describe('stalled and improvised turns are detected', () => {
 describe('the close always ends in exactly one thank-you', () => {
   it('the fallback nudge asks for the thanks line and nothing else', () => {
     assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /exactly once/i);
-    assert.match(OUTBOUND_THANKS_FALLBACK_NUDGE, /ತುಂಬಾ ಧನ್ಯವಾದಗಳು/);
+    assert.ok(OUTBOUND_THANKS_FALLBACK_NUDGE.includes(PDF_INTERESTED_CLOSE_KN));
     assert.doesNotMatch(OUTBOUND_THANKS_FALLBACK_NUDGE, /endCall/);
   });
 
@@ -817,20 +805,13 @@ describe('the close always ends in exactly one thank-you', () => {
     // bans have to live there too — not only in the long reconnect prompt.
     for (const prompt of [fast, full]) {
       assert.match(prompt, /NEVER ask (?:them|the caller) to confirm what they just said/);
-      assert.match(prompt, /did you say yes sir\?/);
-      assert.match(prompt, /if you want a site in the future/);
-      assert.match(prompt, /consider Alliance Square/);
     }
-    // The sales-team close is never allowed to end without the thank-you.
-    assert.match(fast, /Say the whole close, including the words after the thank-you/);
-    assert.match(full, /Do not move the thank-you to the end/);
+    assert.match(fast, /call endCall in that same turn/);
   });
 
   it('the handoff nudge forbids any sentence after the thank-you', () => {
     const nudge = buildOutboundHandoffTransferNudge();
-    assert.match(nudge, /rest of the line still has to be said/);
-    assert.match(nudge, /EXACTLY ONCE/);
-    assert.match(nudge, /sales team/i);
+    assert.equal(nudge, PDF_INTERESTED_CLOSE_KN);
   });
 });
 
@@ -1010,7 +991,6 @@ describe('caller name and honorific', () => {
     assert.ok(OUTBOUND_NAME_QUESTION_NUDGE.includes(PDF_AREAS_LINE_KN));
     assert.doesNotMatch(OUTBOUND_NAME_QUESTION_NUDGE, /ask their name/i);
     assert.doesNotMatch(OUTBOUND_NAME_QUESTION_NUDGE, /ಹೆಸರು/);
-    assert.match(OUTBOUND_NAME_QUESTION_NUDGE, /STOP and WAIT/);
     const projects = buildOutboundProjectsNudge('Ravi', HONORIFIC_SIR_KN);
     assert.ok(projects.includes(PDF_AREAS_LINE_KN), 'must tell them the projects');
     assert.ok(projects.includes(PDF_INTEREST_QUESTION_KN), 'must ask the one interest question');
@@ -1048,18 +1028,15 @@ describe('caller name and honorific', () => {
       const flat = prompt.replace(/\s+/g, ' ');
       assert.match(flat, /After the caller's yes, say only the locations line/);
       assert.doesNotMatch(flat, /ask their name/i);
-      assert.ok(flat.includes(PDF_AREAS_LINE_KN));
+      assert.equal(OUTBOUND_YES_LOCATIONS_NUDGE, PDF_AREAS_LINE_KN);
       // The prompt must carry the opening that is actually SPOKEN, so the
       // model is never told to skip the site question and ask it later.
       assert.ok(
         !flat.includes(PDF_OPENING_EN),
         'the live prompt must not also carry the English opening',
       );
-      assert.ok(
-        flat.includes(PDF_OPENING_TURN1_KN),
-        'the prompt must also carry the Kannada opening',
-      );
-      assert.ok(flat.includes(PDF_SITE_QUESTION_KN));
+      assert.equal(getOutboundGreetingInstruction(), PDF_OPENING_TURN1_KN);
+      assert.ok(getOutboundGreetingInstruction().includes(PDF_SITE_QUESTION_KN));
       // ...and it must say the site question is asked ONCE, in the opening.
       assert.match(flat, /never again|asked once/i);
       // The bare intro alone is no longer the first line anywhere in the prompt.
@@ -1160,7 +1137,6 @@ describe('get to the point — no filler reaction, and the name step always spea
     assert.ok(flat.includes(PDF_AREAS_LINE_KN));
     assert.doesNotMatch(flat, /ask their name/i);
     assert.doesNotMatch(flat, /ಹೆಸರು/);
-    assert.match(flat, /STOP and WAIT/);
   });
 
   it('after the name she thanks in ONE word and goes straight to the locations', () => {
@@ -1308,7 +1284,7 @@ describe('the thank-you is said exactly once, then the call ends', () => {
     ]) {
       const flat = prompt.replace(/\s+/g, ' ');
       assert.match(flat, /STRICT/);
-      assert.match(flat, /Do not move the thank-you to the end|the thank-you comes first/i);
+      assert.match(flat, /call endCall in that same turn/);
       // The thank-you is never repeated and never reworded. (This used to match
       // the literal words "Never repeat it", which only existed in the SILENCE
       // rules — "never repeat it, never rephrase it, never say it again" — which

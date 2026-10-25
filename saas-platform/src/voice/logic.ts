@@ -861,6 +861,8 @@ let plivoCallUuid: string | null = null;
   let endCallInvoked = false;
   let projectReferenceInjected = false;
   let greetingAudioHeard = false;
+  let pendingLocationsAfterGreeting = false;
+  let playScriptAudioNow = false;
   let deferredContextScheduled = false;
   let greetingSentAt = 0;
   /** The question she is on. A repeat resends this; a side answer returns to it. */
@@ -1157,6 +1159,7 @@ let plivoCallUuid: string | null = null;
     outboundStayActiveNudgeSent = true;
     console.log('[GEMINI] Interested after the projects — interest question now');
     try {
+      playScriptAudioNow = true;
       sendClientTextTurn(OUTBOUND_YES_LOCATIONS_NUDGE);
     } catch (e: any) {
       outboundStayActiveNudgeSent = false;
@@ -1204,6 +1207,7 @@ let plivoCallUuid: string | null = null;
       diagLog('unclear reply → locations, do not ask a name');
       outboundNameStepDone = true;
       outboundLocationsNudgeSent = true;
+      playScriptAudioNow = true;
       geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
       armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
       return true;
@@ -1246,6 +1250,7 @@ let plivoCallUuid: string | null = null;
         `[GEMINI] Answered the site question ("${raw.slice(0, 40)}") — locations now`,
       );
       diagLog('yes → locations');
+      playScriptAudioNow = true;
       geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
       armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
       return true;
@@ -1263,6 +1268,7 @@ let plivoCallUuid: string | null = null;
     if (!outboundLocationsNudgeSent) {
       outboundLocationsNudgeSent = true;
       console.log('[NAME] Reply after the opening — locations, not a name');
+      playScriptAudioNow = true;
       geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
       armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
     }
@@ -1455,19 +1461,23 @@ let plivoCallUuid: string | null = null;
       outboundGreetingSpoken = true;
       console.log('[GEMINI] Opening question spoken — waiting for a reply');
     }
-    // Private reminder AFTER the opening — never quotes a name question (quoting teaches it).
-    try {
-      geminiSession?.sendRealtimeInput({
-        text:
-          'SYSTEM (internal): The opening is finished. Stay silent until they answer. ' +
-          'Do not speak this. Do not add a second sentence.',
-      });
-    } catch (e: any) {
-      console.warn('[GEMINI] Post-greeting no-name reminder failed:', e?.message || e);
-    }
     if (!outboundOpeningRepeatDone) armOpeningWait();
     armOutboundSilenceAfterTurn();
     injectDeferredContextAfterOpening();
+    if (pendingLocationsAfterGreeting && !outboundLocationsNudgeSent && !endCallInvoked) {
+      pendingLocationsAfterGreeting = false;
+      outboundNameAsked = true;
+      outboundNameStepDone = true;
+      outboundLocationsNudgeSent = true;
+      playScriptAudioNow = true;
+      console.log('[CALL] greeting finished — speaking the locations');
+      try {
+        geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
+      } catch (e: any) {
+        outboundLocationsNudgeSent = false;
+        console.error('[CALL] locations after greeting failed:', e?.message || e);
+      }
+    }
   };
 
   const clearWaitTick = () => {
@@ -1567,9 +1577,10 @@ let plivoCallUuid: string | null = null;
     callMemory = setCallStep(callMemory, 'closing');
     outboundBusyCloseSent = true;
     clearOutboundSilenceTimer();
-    if (hasThanksClosing(turnText) || outboundThanksPlayedInTurn) {
+    if (hasThanksClosing(turnText) || outboundThanksPlayedInTurn || looksLikeHandoffLine(turnText)) {
       outboundThanksPlayedInTurn = true;
-      console.log('[GUARD] Sales-team close started — the rest of the line plays, then the call ends');
+      console.log('[GUARD] Sales-team close spoken — ending after this line plays');
+      if (!outboundThanksSpoken) activateOutboundPostThanksMute();
     } else {
       armOutboundThanksFallback();
     }
@@ -1581,6 +1592,9 @@ let plivoCallUuid: string | null = null;
       return { suppress: true, reason: 'hard_mute_after_close' };
     }
     if (!trimmed) {
+      return { suppress: false };
+    }
+    if (!outboundAreasLineHeard && looksLikeAreasLine(trimmed)) {
       return { suppress: false };
     }
     if (looksLikeSpokenNameQuestion(trimmed)) {
@@ -1767,41 +1781,7 @@ let plivoCallUuid: string | null = null;
         reason === 'duplicate_within_turn' ||
         reason === 'name_question'
       ) {
-        console.log(`[GUARD] Stalled/repeated turn dropped (${reason}) — advancing the script step`);
-        if (reason === 'name_question') {
-          nameQuestionNeedsRedirect = true;
-          if (!outboundAreasLineDelivered && !outboundLocationsNudgeSent && !outboundHardMuteAfterClose) {
-            outboundNameAsked = true;
-            outboundNameStepDone = true;
-            outboundLocationsNudgeSent = true;
-            nameQuestionNeedsRedirect = false;
-            console.log('[GUARD] Name question suppressed — saying the locations instead');
-            geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
-            armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
-          }
-          return;
-        }
-        sendOutboundNoRepeatNudgeOnce();
-        if (outboundTransferStarted) {
-          // Mid-close: the sales-team line is out, so only the thanks is missing.
-          armOutboundThanksFallback();
-        } else if (
-          outboundAreasLineDelivered &&
-          !outboundAreasLineHeard &&
-          !outboundLocationsNudgeSent
-        ) {
-          // The projects line was sent but the caller never HEARD it (the turn
-          // that carried it was dropped): say it again instead of jumping ahead.
-          outboundLocationsNudgeSent = true;
-          geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
-          armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
-        } else if (outboundAreasLineDelivered && !outboundHandoffNudgeSent) {
-          outboundHandoffNudgeSent = true;
-          geminiSession?.sendRealtimeInput({ text: buildOutboundHandoffTransferNudge() });
-        } else if (!outboundAreasLineDelivered && !outboundLocationsNudgeSent) {
-          outboundLocationsNudgeSent = true;
-          geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
-        }
+        console.log(`[GUARD] Stalled/repeated turn dropped (${reason}) — waiting for the caller`);
         return;
       }
       if (reason === 'cannot_answer') {
@@ -2548,6 +2528,10 @@ const forceOutboundHangupIfClosing = (reason: string) => {
   };
 
   const sendOutboundSilenceNudge = (text: string) => {
+    if (text === OUTBOUND_SILENCE_CHECK_NUDGE) {
+      console.log('[SILENCE] Caller quiet — staying silent and listening');
+      return;
+    }
     if (!geminiSession || outboundHardMuteAfterClose || outboundTransferStarted) return;
     try {
       geminiSession.sendRealtimeInput({ text });
@@ -2823,28 +2807,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
       diagLog('name question audio dropped');
       clearCallerAudio();
     }
-    // Redirect immediately so the model cannot invent another name ask on the next beat.
-    if (
-      nameQuestionNeedsRedirect &&
-      !outboundAreasLineDelivered &&
-      !outboundLocationsNudgeSent &&
-      !outboundHardMuteAfterClose &&
-      !endCallInvoked
-    ) {
-      nameQuestionNeedsRedirect = false;
-      outboundNameAsked = true;
-      outboundNameStepDone = true;
-      outboundLocationsNudgeSent = true;
-      console.log('[GUARD] Name question removed — saying the locations');
-      try {
-        geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
-        armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
-      } catch (e: any) {
-        outboundLocationsNudgeSent = false;
-        nameQuestionNeedsRedirect = true;
-        console.error('[GUARD] Locations redirect after name-block failed:', e?.message || e);
-      }
-    }
+    // The bad turn is dropped. Do not speak the next line until the caller answers.
   };
 
   const flushHeldOutboundAudio = () => {
@@ -2870,6 +2833,11 @@ const forceOutboundHangupIfClosing = (reason: string) => {
   const gateOutboundAudio = (parts: any[]) => {
     if (!openingGreetingTurnFinished || outboundHardMuteAfterClose) {
       logGate('play', !openingGreetingTurnFinished ? 'opening' : 'hard_mute');
+      playOutboundTurnIfNew(parts, outboundAiAccum);
+      return;
+    }
+    if (playScriptAudioNow || looksLikeAreasLine(outboundAiAccum)) {
+      logGate('play', 'locations');
       playOutboundTurnIfNew(parts, outboundAiAccum);
       return;
     }
@@ -3159,7 +3127,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                     outboundLastSpokenLine,
                   );
                   const confirmedUserSpeech = transcriptProvesCaller;
-                  if (!confirmedUserSpeech || Date.now() < aiPlaybackEndsAt) {
+                  if (!confirmedUserSpeech || Date.now() < aiPlaybackEndsAt + 1200) {
                     console.log(
                       `[VERIFY] Keeping the line — caller has not taken over ` +
                         `(aiPlaying=${Date.now() < aiPlaybackEndsAt} vadSpeaking=${vadIsSpeaking})`,
@@ -3253,22 +3221,8 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   } else {
                     repeatAskCorrectionPending = false;
                   }
-                  if (
-                    nameQuestionNeedsRedirect &&
-                    !outboundAreasLineDelivered &&
-                    !outboundHardMuteAfterClose &&
-                    !endCallInvoked
-                  ) {
-                    nameQuestionNeedsRedirect = false;
-                    outboundNameAsked = true;
-                    outboundNameStepDone = true;
-                    outboundLocationsNudgeSent = true;
-                    console.log('[GUARD] Name question removed — saying the locations');
-                    geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
-                    armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
-                  } else {
-                    nameQuestionNeedsRedirect = false;
-                  }
+                  nameQuestionNeedsRedirect = false;
+                  playScriptAudioNow = false;
                   outboundAiAccum = '';
                   sendPcmToTwilio(Buffer.alloc(0), true);
                   // The silence goodbye has no thank-you word, so the thanks
@@ -3518,14 +3472,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                         looksLikeHandoffLine(spoken) &&
                         !outboundAreasLineDelivered
                       ) {
-                        // Premature close: the caller has not heard what we have
-                        // yet. Give them the locations instead of hanging up.
-                        console.log('[GUARD] Sales-team line before the locations line — not closing');
-                        diagLog('premature handoff (no areas line yet) → locations instead');
-                        if (!outboundLocationsNudgeSent) {
-                          outboundLocationsNudgeSent = true;
-                          geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
-                        }
+                        console.log('[GUARD] Sales-team line before the caller answered — not speaking it');
                       }
                     }
                   }
@@ -3536,7 +3483,16 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   !openingGreetingTurnFinished &&
                   response.serverContent?.inputTranscription?.text
                 ) {
-                  console.log('[GEMINI] Greeting still playing — ignoring caller speech');
+                  const heardDuringGreeting = String(response.serverContent.inputTranscription.text || '').trim();
+                  if (
+                    isShortAffirmativeReply(heardDuringGreeting) ||
+                    looksLikeInterestedYes(heardDuringGreeting)
+                  ) {
+                    pendingLocationsAfterGreeting = true;
+                    console.log('[CALL] yes during the greeting — locations play when this line finishes');
+                  } else {
+                    console.log('[GEMINI] Greeting still playing — ignoring caller speech');
+                  }
                 } else if (
                   isOutboundCall &&
                   looksLikeSilenceCheckEcho(response.serverContent?.inputTranscription?.text || '')
@@ -3674,32 +3630,8 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                   } else if (isShortAffirmativeReply(userText)) {
                     customerAnsweredOpening(userText);
                     keepOutboundActiveAfterOpeningYes(userText);
-                  } else if (
-                    openingGreetingTurnFinished &&
-                    !outboundHardMuteAfterClose &&
-                    !outboundStayActiveNudgeSent &&
-                    !looksLikeInterestedYes(userText) &&
-                    !verifiedNo &&
-                    !looksLikeOpeningDecline(userText) &&
-                    !looksLikeCustomerBusy(userText) &&
-                    lastCallerIntent !== 'why_asking' &&
-                    lastCallerIntent !== 'echo_waiting' &&
-                    lastCallerIntent !== 'echo_then_answer' &&
-                    isCustomerTurnSignal(userText)
-                  ) {
-                    outboundStayActiveNudgeSent = true;
-                    console.log('[GEMINI] Customer spoke after opening — prompting next script step');
-                    try {
-                      sendClientTextTurn(
-                        `SYSTEM (internal): The customer replied: "${String(userText).trim().slice(0, 120)}". ` +
-                          `Stay on this call. Do NOT hang up. Do NOT stay silent. Do NOT repeat the opening. ` +
-                          `After the caller's yes, say the locations line. ` +
-                          `Say this one line now, exactly once: "${PDF_AREAS_LINE_KN}". Then stop and listen.`,
-                      );
-                    } catch (e: any) {
-                      outboundStayActiveNudgeSent = false;
-                      console.error('[GEMINI] Continue-after-opening nudge failed:', e?.message || e);
-                    }
+                  } else if (openingGreetingTurnFinished && isCustomerTurnSignal(userText)) {
+                    console.log('[CALL] caller spoke — listening, not starting another line');
                   }
                   if (questionHandled) {
                     // The repeat or the side answer already went out. Do not also close or advance.
@@ -3797,6 +3729,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                             outboundNameAsked = true;
                             outboundNameStepDone = true;
                             outboundLocationsNudgeSent = true;
+                            playScriptAudioNow = true;
                             geminiSession?.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
                             armOutboundStepAudioGuard('the locations', OUTBOUND_YES_LOCATIONS_NUDGE);
                           }
@@ -3827,6 +3760,7 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                           // Only reachable if the name step is done and the
                           // projects line somehow has not landed yet.
                           outboundLocationsNudgeSent = true;
+                          playScriptAudioNow = true;
                           console.log('[GUARD] Caller interested — locations line');
                           geminiSession?.sendRealtimeInput({
                             text: withTone(OUTBOUND_YES_LOCATIONS_NUDGE),

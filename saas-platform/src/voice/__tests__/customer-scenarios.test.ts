@@ -60,16 +60,14 @@ describe('customer scenarios — stranger on the phone', () => {
   it('opening is the owner English line and never embeds a name question', () => {
     assert.equal(
       PDF_OPENING_EN,
-      "Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?",
+      "Hello, I am Priya calling from Alliance Square. Are you looking for a site in Mysuru?",
     );
     const g = getOutboundGreetingInstruction('en');
-    assert.ok(g.includes(PDF_OPENING_EN));
-    assert.match(g, /one sentence/);
-    assert.match(g, /then stop and listen/);
+    assert.equal(g, PDF_OPENING_EN);
     assert.equal(promptLeaksNameQuestionExample(g), false);
     assert.equal(promptLeaksNameQuestionExample(buildOutboundSystemInstruction('1 Jan 2026')), false);
     assert.equal(promptLeaksNameQuestionExample(buildOutboundFastConnectInstruction('1 Jan 2026')), false);
-    assert.match(VOICE_BEHAVIOR_VERSION, /one-voice/);
+    assert.match(VOICE_BEHAVIOR_VERSION, /exact-lines/);
   });
 
   it('plain yes goes to locations — never a name ask', () => {

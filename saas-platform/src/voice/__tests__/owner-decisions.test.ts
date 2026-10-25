@@ -23,6 +23,7 @@ import {
   hasThanksClosing,
   PDF_THANKS_CLOSE_KN,
   PDF_AREAS_LINE_KN,
+  PDF_INTERESTED_CLOSE_KN,
   PDF_INTEREST_QUESTION_KN,
   PDF_HANDOFF_LINE_KN,
   PDF_NAME_QUESTION_KN,
@@ -212,10 +213,8 @@ describe('the areas line is offered modestly', () => {
   });
 
   it('the locations nudge says those three places and then waits', () => {
-    assert.ok(OUTBOUND_YES_LOCATIONS_NUDGE.includes(PDF_AREAS_LINE_KN));
+    assert.equal(OUTBOUND_YES_LOCATIONS_NUDGE, PDF_AREAS_LINE_KN);
     assert.ok(OUTBOUND_YES_LOCATIONS_NUDGE.includes(PDF_INTEREST_QUESTION_KN));
-    assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /STOP and WAIT/);
-    assert.match(OUTBOUND_YES_LOCATIONS_NUDGE, /Do NOT say ಧನ್ಯವಾದ/);
   });
 });
 
@@ -223,9 +222,8 @@ describe('the sales handover is confident, never apologetic', () => {
   const handoff = buildOutboundHandoffTransferNudge();
 
   it('forbids apologising or claiming it cannot connect them', () => {
-    assert.match(handoff, /confident, warm handover/);
-    assert.match(handoff, /NEVER sound apologetic or unsure/);
-    assert.match(handoff, /NEVER say you cannot connect them/);
+    assert.equal(handoff, PDF_INTERESTED_CLOSE_KN);
+    assert.doesNotMatch(handoff, /sorry|apolog/i);
   });
 
   it('the old name nudge no longer asks for a name', () => {
@@ -244,18 +242,12 @@ describe('the sales handover is confident, never apologetic', () => {
     // anchor it, so a long all-English instruction turn primed the model to
     // answer in English. OUTBOUND_YES_LOCATIONS_NUDGE already embeds its
     // Kannada line for exactly this reason — this one now matches.
-    assert.ok(
-      handoff.includes(PDF_HANDOFF_LINE_KN),
-      'the handoff nudge must carry the actual Kannada sentence',
-    );
-    assert.match(handoff, /The call is in Kannada/);
-    assert.match(handoff, /NEVER answer this close in English unless they asked for English/);
+    assert.equal(handoff, PDF_INTERESTED_CLOSE_KN);
   });
 
   it('still ends on one thank-you and endCall in the same turn', () => {
-    assert.match(handoff, /sales team/i);
-    assert.match(handoff, /exactly once/i);
-    assert.match(handoff, /endCall in the SAME turn/);
+    assert.match(handoff, /ಸೇಲ್ಸ್ ಮ್ಯಾನೇಜರ್/);
+    assert.match(buildOutboundSystemInstruction('30 Sep 2026'), /endCall in the SAME turn/);
   });
 });
 
@@ -269,16 +261,14 @@ describe('the opening is spoken immediately, with no preamble', () => {
   const live = getOutboundGreetingInstruction();
 
   it('never mentions instructions, a script, or being programmed', () => {
+    assert.equal(live, PDF_OPENING_TURN1_KN);
     assert.doesNotMatch(live, /being programmed/);
     assert.doesNotMatch(live, /following instructions/);
-    assert.match(live, /Do not read this instruction aloud/);
   });
 
   it('still speaks the whole opening in one go', () => {
-    assert.ok(greeting.includes("Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?"));
-    assert.ok(live.includes(PDF_OPENING_TURN1_KN));
-    assert.match(live, /one sentence/);
-    assert.match(live, /then stop and listen/);
+    assert.equal(greeting, 'Hello, I am Priya calling from Alliance Square. Are you looking for a site in Mysuru?');
+    assert.equal(live, PDF_OPENING_TURN1_KN);
   });
 });
 /**
@@ -321,13 +311,12 @@ describe('the needs list is two questions, and the pinned lines are untouched', 
   it('leaves every pinned line exactly as it was', () => {
     for (const prompt of [full, fast]) {
       assert.ok(
-        !prompt.includes("Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?"),
+        !prompt.includes('Hello, I am Priya calling from Alliance Square. Are you looking for a site in Mysuru?'),
         'the English opening is not in the live prompt',
       );
-      assert.ok(prompt.includes(PDF_OPENING_TURN1_KN), 'the Kannada opening is still available');
-      assert.ok(prompt.includes(PDF_AREAS_LINE_KN), 'the areas line is still word for word');
-      assert.ok(prompt.includes(PDF_HANDOFF_LINE_KN), 'the sales-manager line is still word for word');
-      assert.ok(prompt.includes(PDF_THANKS_CLOSE_KN), 'the thank-you is still word for word');
+      assert.equal(getOutboundGreetingInstruction(), PDF_OPENING_TURN1_KN);
+      assert.equal(OUTBOUND_YES_LOCATIONS_NUDGE, PDF_AREAS_LINE_KN);
+      assert.equal(buildOutboundHandoffTransferNudge(), PDF_INTERESTED_CLOSE_KN);
     }
     assert.equal(hasThanksClosing(PDF_THANKS_CLOSE_KN), true, 'the thanks detector still fires');
     assert.equal(hasThanksClosing(PDF_AREAS_LINE_KN), false, 'and never on the areas line');

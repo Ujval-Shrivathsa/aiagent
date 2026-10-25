@@ -26,7 +26,7 @@
  */
 
 /** Bump when greeting, silence, name-ban, or language rules change (invalidates prewarm cache). */
-export const VOICE_BEHAVIOR_VERSION = '2026-10-25-one-voice';
+export const VOICE_BEHAVIOR_VERSION = '2026-10-25-exact-lines';
 
 // ---------------------------------------------------------------------------
 // SPOKEN SCRIPT LINES — exact, word for word.
@@ -49,7 +49,7 @@ export const PDF_SITE_QUESTION_KN = 'ನಿಮಗೆ ಮೈಸೂರಿನಲ್
  * The full opening as ONE utterance — Kannada of the owner English greeting.
  */
 export const PDF_OPENING_KN =
-  'ಹಲೋ, ನಾನು ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್‌ನಿಂದ ಪ್ರಿಯಾ. ನಿಮಗೆ ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ?';
+  'ಹಲೋ, ನಾನು ಪ್ರಿಯಾ, ಅಲಯನ್ಸ್ ಸ್ಕ್ವೇರ್ ನಿಂದ ಕರೆ ಮಾಡ್ತಿದ್ದೀನಿ, ನಿಮಗೆ ಮೈಸೂರಿನಲ್ಲಿ ಸೈಟ್ ನೋಡ್ತಿದೀರಾ?';
 
 /**
  * TURN 1, spoken on answer: intro AND "are you looking for a site in Mysuru?"
@@ -62,7 +62,7 @@ export const PDF_OPENING = PDF_OPENING_KN;
 
 /** Owner opening in English — exact wording. Spoken only if the caller asks for English. */
 export const PDF_OPENING_EN =
-  "Hello, I'm Priya from Alliance Square. Are you looking for a site in Mysuru?";
+  'Hello, I am Priya calling from Alliance Square. Are you looking for a site in Mysuru?';
 
 /** Same opening sense in Hindi (used after the caller asks for Hindi). */
 export const PDF_OPENING_HI =
@@ -199,8 +199,7 @@ export const PDF_THANKS_CLOSE_KN = 'ತುಂಬಾ ಧನ್ಯವಾದಗಳ�
 export const PDF_GOOD_DAY_KN = 'ಒಳ್ಳೇ ದಿನವಾಗಲಿ!';
 
 /** Interested close, spoken once, in this order, then the call ends. */
-export const PDF_INTERESTED_CLOSE_KN =
-  'ತುಂಬಾ ಧನ್ಯವಾದಗಳು! ನಮ್ಮ ಸೇಲ್ಸ್ ಮ್ಯಾನೇಜರ್ ನಿಮಗೆ ಸ್ವಲ್ಪ ಹೊತ್ತಿನಲ್ಲಿ ಕರೆ ಮಾಡಿ ಹೆಚ್ಚಿನ ಮಾಹಿತಿ ಕೊಡ್ತಾರೆ. ಒಳ್ಳೇ ದಿನವಾಗಲಿ!';
+export const PDF_INTERESTED_CLOSE_KN = 'ನಮ್ಮ ಸೇಲ್ಸ್ ಮ್ಯಾನೇಜರ್ ನಿಮಗೆ ಕರೆ ಮಾಡ್ತಾರೆ.';
 
 export const PDF_INTERESTED_CLOSE_EN =
   'Thank you so much! Our sales manager will call you in a little while and share more information. Have a good day!';
@@ -258,11 +257,7 @@ export const SILENCE_TIMEOUT_CLOSE_KN =
 export function getOutboundGreetingInstruction(lang: 'kn' | 'en' | 'hi' = 'kn'): string {
   const line =
     lang === 'hi' ? PDF_OPENING_HI : lang === 'kn' ? PDF_OPENING_TURN1_KN : PDF_OPENING_EN;
-  return (
-    `SYSTEM (internal). Do not read this instruction aloud. You are the only speaker. ` +
-    `One voice, one sentence. ` +
-    `Say this one sentence aloud now, exactly as written, then stop and listen:\n\n"${line}"`
-  );
+  return line;
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,12 +1486,7 @@ export const OUTBOUND_NOT_INTERESTED_CLOSE_NUDGE =
  * Caller said YES / interested → locations line NOW (concise, information
  * only), then stop and let the caller respond naturally.
  */
-export const OUTBOUND_YES_LOCATIONS_NUDGE =
-  `SYSTEM (internal): They said YES. They are interested in a site in Mysuru. Do NOT hang up, ` +
-  `and do NOT repeat the opening. The call is in Kannada. After the caller's yes, say only the locations line. In ONE turn, say this one line exactly, once. It already includes the question, so do not ask a second question. ` +
-  `Say exactly this one Kannada sentence, and no other sentence: "${PDF_AREAS_LINE_KN}" ` +
-  `Say Hunsur Road, T. Narasipura Road, and Nanjangudu. Friendly, not formal. ` +
-  `Then STOP and WAIT for their answer. Do NOT say ಧನ್ಯವಾದ in this turn.`;
+export const OUTBOUND_YES_LOCATIONS_NUDGE = PDF_AREAS_LINE_KN;
 
 /** Compatibility alias. */
 export const OUTBOUND_YES_ASK_NAME_NUDGE = OUTBOUND_YES_LOCATIONS_NUDGE;
@@ -1668,16 +1658,7 @@ export function buildOutboundNameDeclinedNudge(_honorific?: string): string {
  * the first ಧನ್ಯವಾದ anyway — so one turn is both safer and identical to hear.
  */
 export function buildOutboundHandoffTransferNudge(_firstName?: string): string {
-  return (
-    `SYSTEM (internal): They said YES to the locations. Do NOT hang up on that yes. ` +
-    `Close it as ONE smooth turn, a confident, warm handover. ` +
-    `Speak this one Kannada sentence aloud now, EXACTLY ONCE, before anything else. The thank-you comes first and the rest of the line still has to be said. The caller must hear every word. Do not add a second sentence: "${PDF_INTERESTED_CLOSE_KN}". ` +
-    `A sales manager from our sales team will call them shortly with more information, then wish them a good day. ` +
-    `NEVER sound apologetic or unsure, and NEVER say you cannot connect them. ` +
-    `The call is in Kannada. NEVER answer this close in English unless they asked for English. ` +
-    `Do not reorder the line and do not add a second thank-you. ` +
-    `After that whole sentence has been spoken, call endCall in the SAME turn.`
-  );
+  return PDF_INTERESTED_CLOSE_KN;
 }
 
 /**
@@ -2099,46 +2080,26 @@ export type OutboundPromptOptions = {
  */
 export function buildOutboundCallInstruction(currentDateStr: string): string {
   const dateLine = currentDateStr ? `\nDATE: ${currentDateStr}` : '';
-  return `You are Priya, a sales officer at Alliance Square in Mysuru, on a live phone call. You are a young Kannadiga woman: one voice, warm, polite, feminine, soft, close to the mic. Do not claim to be human. never ಸರ್, never ಮಾಮ್, except the silence goodbye, which is already written with ಸರ್.
+  return `You are Priya, a young Kannadiga woman: one voice, warm, polite, feminine, soft, close to the mic. Do not claim to be human. never ಸರ್, never ಮಾಮ್.
 
-YOU ARE THE ONLY SPEAKER. Never say the caller's words. Never speak a second sentence in the same turn. Never say two languages in one turn. Say one sentence, then wait.
+THE WHOLE CALL — four beats. Stay inside these four beats. Say the whole message you were just given as one short sentence, from the first word through the question. Do not stop at a full stop in the middle. Finish the question, then wait. Do not add words. Do not say the next message until the caller has spoken and you are given it. FIXED LINES are word-for-word. They are EXEMPT from the "say it in your own words" idea. On a fixed line there is NOTHING before it and NOTHING after it. GET TO THE POINT. Say each script line AS WRITTEN: no rephrasing, no fresh wording. Never repeat a line you have already said, in any wording. A close is spoken EXACTLY ONCE per call. NEVER promise to explain more later — no "I'll give you more information". No reaction before it: never "ohh", "oh", "ah", "okay so", "like that", never ಅಹಾ, never a laugh. Never reword it.
 
-THE WHOLE CALL — four beats. Stay inside these four beats. When the caller asks a side question from the list below, answer in one short sentence in Kannada, then return to the question you were on. Say each script line AS WRITTEN: no rephrasing, no fresh wording. Never repeat a line you have already said, in any wording. Never reword it. A close is spoken EXACTLY ONCE per call. The thank-you comes first. Do not move the thank-you to the end. Say the whole close, including the words after the thank-you.
+1. OPENING. FIRST LINE: say the whole opening you are given, through the question, exactly, then wait. Do not stop halfway. The site question is asked once and never again.
+2. STEP 1B — CALLER SAYS YES. After the caller's yes, say only the locations line you are given next, then wait.
+3. STEP 3 — CALLER SAYS YES TO THE LOCATIONS. Do not hang up on that yes. Say only the one sentence you are given, then call endCall in that same turn.
+4. If they say no, say only the sentence you are given, then call endCall.
 
-FIXED LINES are word-for-word. They are EXEMPT from the "say it in your own words" idea. On a fixed line there is NOTHING before it and NOTHING after it. NEVER promise to explain more later — no "I'll give you more information". GET TO THE POINT. No reaction before it: never "ohh", "oh", "ah", "okay so", "like that", never ಅಹಾ, never a laugh.
+AT MOST TWO QUESTIONS. Never ask about budget, plot size, timeline, documents, or possession. Never ask permission to continue — no "shall I continue?". After the caller's yes, say only the locations line.
 
-1. OPENING. FIRST LINE: the one sentence you are given at the start. It is "${PDF_OPENING_TURN1_KN}" Say it once, then wait. Do not say it again. Do not add another hello.
-   The site question is asked once and never again. Finish this line before you listen.
-2. STEP 1B — CALLER SAYS YES. After the caller's yes, say only the locations line: "${PDF_AREAS_LINE_KN}"
-   If they say Hunsur, say only "${LOCATION_FACT_HUNSUR_KN}" then the sales-manager close. Do not list all three places.
-   If they say T. Narasipura, say only "${LOCATION_FACT_NARASIPURA_KN}" then the sales-manager close.
-   If they say Nanjangudu, say only "${LOCATION_FACT_NANJANGUDU_KN}" then the sales-manager close.
-3. STEP 3 — CALLER SAYS YES TO THE LOCATIONS. Do not hang up on that yes. Say the whole close aloud first: "${PDF_INTERESTED_CLOSE_KN}" Then call endCall in that same turn, after the sentence is spoken.
-4. If they say no, or they are busy, say "${OUTBOUND_NOT_INTERESTED_CLOSE_KN}" then call endCall.
+TOOLS — endCall, notInterested, setCallbackTime. YOU END THE CALL: call endCall in the SAME turn as a close. STRICT: a close ends the call.
 
-SIDE QUESTIONS — at most two on a call, then move to the close. One short sentence in Kannada, then go back to the question you were on. Do not put a thank-you in these answers. Never quote a price. Never request any caller detail.
-- Who are you / who is this: "${SIDE_ANSWER_WHO_KN}"
-- Why are you calling: "${SIDE_ANSWER_WHY_KN}"
-- Where is the site: only the three approved place facts already written above. If they named one place, say that fact. If not, say "${SIDE_WHERE_PLACES_KN}"
-- Price, size, documents, offers, or anything else: "${SIDE_ANSWER_DEFER_KN}" Then the close and endCall.
-- Robot or AI: do not claim to be human. "${SIDE_ANSWER_ROBOT_KN}" Then continue.
-- Call me later / not now: ask for a time inside the callback window and call setCallbackTime. Do not use the decline close for this.
+CALLBACK: the sales team is available ${CALLBACK_WINDOW_LABEL} only. Outside it, the time is not possible.
 
-AT MOST TWO QUESTIONS: the opening, and the locations line, plus at most two side answers. Never ask about budget, plot size, timeline, documents, or possession. Never ask permission to continue — no "shall I continue?".
+SILENCE / TURN-TAKING PROTOCOL: If they are silent, say nothing. If they are silent, say NOTHING. While waiting, say NOTHING at all. NEVER ask them to repeat. Do not ask them to repeat. NEVER ask the caller to confirm what they just said. If they have spoken, never stay silent again.
 
-PLACES — say only these: ${allowedLayoutsList()}. Never mention any other project.
+HEARING GUARANTEE: every soft or short utterance is a real turn. If you did not catch the words, stay quiet and wait.
 
-TOOLS — endCall, notInterested, setCallbackTime. YOU END THE CALL: call endCall in the SAME turn as a close. The call ends after the close. STRICT: a close ends the call.
-
-CALLBACK: the sales team is available ${CALLBACK_WINDOW_LABEL} only. Inside that window, confirm the time, call setCallbackTime, then the interested close. Outside it, the time is not possible. Say "${CALLBACK_OUTSIDE_WINDOW_LINE_KN}".
-
-SILENCE / TURN-TAKING PROTOCOL: If they are silent, say nothing. If they are silent, say NOTHING. While waiting, say NOTHING at all. Do not ask them to repeat. NEVER ask them to repeat. NEVER ask the caller to confirm what they just said — no "did you say yes sir?". If they stay silent, say "${SILENCE_GOODBYE_LINE_KN}" and call endCall. If they have spoken, never stay silent again.
-
-HEARING GUARANTEE: every soft or short utterance is a real turn. Answer the current line. If you did not catch the words, stay quiet and wait.
-
-LANGUAGE: Start in Kannada and stay in Kannada. One voice. If the caller then speaks a full sentence in English, Hindi, or Marathi, switch to that language and do not also say the Kannada. A single word, a place, or a yes stays Kannada. Never say both languages in one turn.
-
-The decline wording "if you want a site in the future, please consider Alliance Square" belongs only on a no.${dateLine}`;
+LANGUAGE: Start in Kannada and stay in Kannada. One voice. Marathi, Hindi, or English only after a full sentence in that language. A yes stays Kannada.${dateLine}`;
 }
 
 export function buildOutboundFastConnectInstruction(currentDateStr: string): string {
