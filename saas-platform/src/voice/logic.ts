@@ -1874,10 +1874,6 @@ let plivoCallUuid: string | null = null;
       lastPinnedSpokenLine = /[\u0C80-\u0CFF]/.test(turnText) ? PDF_AREAS_LINE_KN : PDF_AREAS_LINE_EN;
     }
     registerOutboundSpeech(turnText, outboundSpokenChunks);
-    if (hasThanksClosing(turnText)) {
-      // Remember it for the rest of THIS turn so a repeat chunk can be dropped.
-      outboundThanksPlayedInTurn = true;
-    }
     if (!outboundCantHearSaid && looksLikeCantHearLine(turnText)) {
       // Our one and only "I couldn't hear you" — after this the agent just
       // listens, whatever the line quality is.
@@ -1902,12 +1898,10 @@ let plivoCallUuid: string | null = null;
     }
     if (
       isOutboundCall &&
-      // Excluded once the sales-team close is spoken: its thank-you still owes
-      // the caller a line, so the blanket mute must not fire.
-      // outboundBusyCloseSent is set when the goodbye is REQUESTED, before any
-      // of that audio exists. Muting on the flag cut the goodbye after "ಸರ್, ನೀವು".
       !outboundTransferStarted &&
-      (hasThanksClosing(turnText) || looksLikeClosingGoodbye(turnText))
+      (looksLikeNotInterestedCloseLine(turnText) ||
+        (outboundAreasLineDelivered &&
+          (hasThanksClosing(turnText) || looksLikeClosingGoodbye(turnText))))
     ) {
       // The close often starts with the thank-you and still has more to say.
       // Mute on turn complete, after this turn's audio is queued.
@@ -3449,7 +3443,11 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                       clearOutboundSilenceTimer();
                       activateOutboundPostThanksMute();
                     }
-                    if (isOutboundCall && hasThanksClosing(completedAiText)) {
+                    if (
+                      isOutboundCall &&
+                      hasThanksClosing(completedAiText) &&
+                      (outboundAreasLineDelivered || looksLikeNotInterestedCloseLine(completedAiText))
+                    ) {
                       // Not-interested thanks close (or goodbye close) delivered —
                       // hard-mute the agent and schedule the hangup. This is also
                       // where the FORCED thank-you lands, ending the sales-team close.
