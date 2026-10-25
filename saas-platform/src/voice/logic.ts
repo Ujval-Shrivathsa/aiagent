@@ -892,7 +892,7 @@ let plivoCallUuid: string | null = null;
   let locationsReleased = false;
   let locationsRetrySent = false;
   const locationsTextBad = (text: string) =>
-    /ರಿಂಗ್|ಜೆ\s*ಪಿ|ಜೆಪಿ|ಇಲವಾಲ|ring road|jp nagar/i.test(text);
+    /ರಿಂಗ್|ಜೆ\s*ಪಿ|ಜೆಪಿ|ಇಲವಾಲ|ವಿಜಯ|ಬೋಗಾದಿ|ದತ್ತ|ದಟ್ಟ|ಪ್ಲಾಟ್|ಬಡಾವಣೆ|ring road|jp nagar/i.test(text);
   const locationsTextReady = (text: string) => {
     const s = text.replace(/[\s\u200c\u200d]/g, '');
     return (
@@ -3338,7 +3338,17 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                     repeatAskCorrectionPending = false;
                   }
                   nameQuestionNeedsRedirect = false;
-                  playScriptAudioNow = false;
+                  if (!locationsReleased && locationsHold.length && !locationsTextReady(outboundAiAccum)) {
+                    locationsHold = [];
+                    if (!locationsRetrySent && geminiSession) {
+                      locationsRetrySent = true;
+                      playScriptAudioNow = true;
+                      try {
+                        geminiSession.sendRealtimeInput({ text: OUTBOUND_YES_LOCATIONS_NUDGE });
+                      } catch { /* the caller still has the line */ }
+                    }
+                  }
+                  if (!(locationsRetrySent && !locationsReleased)) playScriptAudioNow = false;
                   if (outboundAreasLineHeard) areasLineTurnSealed = true;
                   outboundAiAccum = '';
                   sendPcmToTwilio(Buffer.alloc(0), true);
