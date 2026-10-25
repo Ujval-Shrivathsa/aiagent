@@ -883,7 +883,11 @@ let plivoCallUuid: string | null = null;
   let openingQuestionAudioPlayed = false;
   /** True after the locations line's own turn has finished. Mid-line audio must not be dropped as a repeat. */
   let areasLineTurnSealed = false;
-  const openingQuestionSpoken = (text: string) => /ನೋಡ್ತಿದೀರಾ|looking for a site/i.test(text);
+  const openingQuestionSpoken = (text: string) => /ನೋಡ.{0,16}ರಾ|looking for a site/i.test(text);
+  /** Opening audio is held until the question is in it, then played as one piece. */
+  let openingHold: Buffer[] = [];
+  let openingReleased = false;
+  let openingContinueSent = false;
   let openingQuestionSent = false;
   let fullCallGuideInjected = false;
   let geminiSessionOpened = false;
@@ -1942,6 +1946,13 @@ let plivoCallUuid: string | null = null;
     }
     capture?.onAiSpeakStart();
     capture?.onAiMuLaw(muLawBuffer);
+    if (isOutboundCall && !openingGreetingTurnFinished && !openingReleased) {
+      openingHold.push(muLawBuffer);
+      if (openingQuestionSpoken(outboundAiAccum) || openingHold.reduce((n, b) => n + b.length, 0) >= 8 * 8000) {
+        releaseOpeningAudio();
+      }
+      return;
+    }
     aiPlaybackEndsAt = Math.max(Date.now(), aiPlaybackEndsAt) + muLawBuffer.length / 8;
     lastAiAudioAt = Date.now();
     // The step is on the line — its dead-air guard has nothing left to repair.
@@ -1975,6 +1986,29 @@ let plivoCallUuid: string | null = null;
       }));
     } else {
       ws.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
+    }
+  };
+
+  const releaseOpeningAudio = () => {
+    if (openingReleased) return;
+    const buf = openingHold.length ? Buffer.concat(openingHold) : Buffer.alloc(0);
+    openingHold = [];
+    if (!buf.length) return;
+    openingReleased = true;
+    openingQuestionAudioPlayed = true;
+    aiPlaybackEndsAt = Date.now() + buf.length / 8;
+    lastAiAudioAt = Date.now();
+    console.log(`[CALL] Opening played as one line (${(buf.length / 8000).toFixed(1)}s)`);
+    for (let i = 0; i < buf.length; i += 1600) {
+      const payload = buf.subarray(i, Math.min(buf.length, i + 1600)).toString('base64');
+      if (audioSink === 'plivo') {
+        ws.send(JSON.stringify({
+          event: 'playAudio',
+          media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload },
+        }));
+      } else {
+        ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload } }));
+      }
     }
   };
 
@@ -3318,13 +3352,22 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                       // A turn can end after "ನಾನು ಪ್ರಿಯಾ" and the question is
                       // still unsaid. Sealing there dropped the rest and made
                       // her start the first line again.
-                      if (greetingAudioHeard && openingQuestionAudioPlayed) {
+                      if (greetingAudioHeard && (openingQuestionAudioPlayed || openingQuestionSpoken(outboundAiAccum))) {
+                        releaseOpeningAudio();
                         openingTurnComplete = true;
                         openingTurnSealed = true;
                         latLog('OPENING_TURN_COMPLETE');
                         releaseGreetingListening();
                       } else {
                         console.log('[CALL] Opening stopped before the question — still speaking it');
+                        if (!openingContinueSent && geminiSession) {
+                          openingContinueSent = true;
+                          try {
+                            geminiSession.sendRealtimeInput({
+                              text: 'Finish the sentence you already started. Say only the rest of it. Do not start again.',
+                            });
+                          } catch { /* the next audio still joins the held line */ }
+                        }
                       }
                     } else {
                       openingGreetingTurnFinished = true;
@@ -3438,6 +3481,9 @@ const forceOutboundHangupIfClosing = (reason: string) => {
                     const spoken = String(outTx).trim();
                     if (spoken && !outboundTranscriptFolded) {
                       outboundAiAccum = `${outboundAiAccum} ${spoken}`.trim();
+                      if (!openingReleased && !openingGreetingTurnFinished && openingQuestionSpoken(outboundAiAccum)) {
+                        releaseOpeningAudio();
+                      }
                     }
                     const asksForName =
                       !!spoken &&
